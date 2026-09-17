@@ -158,6 +158,11 @@ export const TEAM_TOOLS = [
 				provider: { type: "string", maxLength: 256 },
 				model: { type: "string", maxLength: 128 },
 				thinkingOptionId: { type: "string", maxLength: 64 },
+				// Optional: a claude-* fork is moved onto "auto" after import
+				// (paseo import carries no mode, and an imported seat otherwise
+				// comes up on "default"). Pass this only to narrow it on purpose,
+				// e.g. "plan" for a fork that should propose before acting.
+				modeId: { type: "string", maxLength: 32 },
 				cwd: { type: "string", maxLength: 512 },
 				owns: { type: "string", maxLength: 512 },
 				doesNotOwn: { type: "string", maxLength: 512 },

@@ -405,11 +405,78 @@ create_agent({
 ```
 
 The Paseo CLI spells the same thing `--mode` (`paseo run --mode default`), and
-so does `remote-paseo.mjs run`, which refuses a `claude-*` route without one.
+so does `remote-paseo.mjs run`, which never sends a `claude-*` route without one.
 
 `modeId: "auto"` is the right answer for a Peer, and it is what
 `remote-paseo.mjs run` fills in when `--mode` is omitted
 (`CLAUDE_DEFAULT_MODE`).
+
+**The provider default does NOT save a caller that stays quiet.** Measured
+2026-09-07 on daemon 0.7.2 — this is the single fact behind every "why is this
+seat not on auto" in this pack:
+
+```text
+paseo provider ls
+  claude-lead   ... defaultMode=auto
+  claude-peer   ... defaultMode=auto
+```
+
+…and the daemon applies that value **nowhere** at create time. It is catalog
+metadata: the desktop and `paseo hub` use it to PRESELECT a mode in a picker
+(`suggested`), and the seat itself is built by
+
+```js
+// @getpaseo/server .../agent/providers/claude/agent.js
+this.currentMode = isPermissionMode(config.modeId) ? config.modeId : "default";
+```
+
+so anything that does not name a mode gets `"default"`. Reproduced end to end:
+
+```text
+paseo run --provider claude-peer/claude-haiku-4-5 --thinking low <prompt>
+  -> paseo agent inspect  =>  Mode: default
+paseo run --provider claude-peer/claude-haiku-4-5 --thinking low --mode auto <prompt>
+  -> paseo agent inspect  =>  Mode: auto
+```
+
+The refusal quoted at the top of this section only fires when the create has a
+PARENT agent on a different provider. A create with no parent — the CLI,
+`paseo import`, a schedule whose provider differs from its caller's — is not
+refused: it silently lands on `"default"`. So the rule is not "Paseo will stop
+me if I forget"; it is **say the mode on every claude-\* creation, every time**.
+
+Three paths in this pack close that hole, and between them they cover every way
+the pack creates a seat:
+
+- `create_agent` — the `PreToolUse` gate (`createAgentModeArgsBlockReason`)
+  refuses a `claude-*` create with no `settings.modeId`, on BOTH runtimes, and
+  names the value to pass. It also catches the top-level `mode` spelling, which
+  Paseo ignores in silence.
+- `remote-paseo.mjs run` — sends `--mode auto` when the caller passes none
+  (`CLAUDE_DEFAULT_MODE`, pinned against the core's `CLAUDE_DEFAULT_SEAT_MODE`).
+- `team-fork.mjs fork` — `paseo import` has NO `--mode` at all (its whole option
+  set is `--provider`, `--cwd`, `--label`, `--json`, `--host`), so the fork is
+  moved onto the mode with `paseo agent mode <id> <mode>` immediately after the
+  import, and a fork that cannot be moved is deleted rather than handed over.
+  `verify` re-checks it from `runtimeInfo.modeId` and deletes a fork still
+  sitting on `"default"`.
+
+`pteam watchdog` reports the seats already running that way, under `parked`,
+with the `paseo agent mode <id> auto` that fixes each one where `auto` exists
+(see below for where it does not — the row's `fixNote` says the same).
+
+Two more mode facts worth knowing before you debug one:
+
+- `persistence.metadata.modeId` is a **creation-time snapshot Paseo never
+  rewrites** — the same trap as `persistence.metadata.model`. A seat that has
+  been running on `auto` for an hour still reads `"default"` there. Read
+  `runtimeInfo.modeId` (or `Mode` from `paseo agent inspect`).
+- `auto` disappears entirely when Claude Code is pointed at Bedrock or Vertex:
+  `claudeModeCatalog` drops it from the list and returns `defaultModeId:
+  "default"` whenever `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` is
+  set in the provider env. There is also a per-model gate — `paseo agent mode
+  <id> auto` on a model without it answers "auto mode unavailable for this
+  model". If auto refuses to stick, check those two before the pack.
 
 This used to say `"default"`, on the theory that every Peer tool call raising a
 Paseo permission for the Lead to triage was the loop the pack is built around.

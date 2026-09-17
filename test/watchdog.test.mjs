@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { classifyLeases, classifyStaleAgents, DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_GLOBAL_DEADLINE_MS, DEFAULT_INSPECT_CONCURRENCY } from "../scripts/watchdog.mjs";
+import { classifyLeases, classifyParkedSeats, classifyStaleAgents, DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_GLOBAL_DEADLINE_MS, DEFAULT_INSPECT_CONCURRENCY } from "../scripts/watchdog.mjs";
 
 const now = Date.parse("2026-08-08T12:00:00.000Z");
 const result = classifyStaleAgents(
@@ -132,6 +132,33 @@ assert.ok(
 	// Nothing to report, and nothing to throw, when the board is empty or absent.
 	assert.deepEqual(classifyLeases(new Map(), [{ id: ALIVE }], { now }), []);
 	assert.deepEqual(classifyLeases(null, null, { now }), []);
+}
+
+// A seat on "default" is a seat that answers nothing: measured 2026-09-07,
+// Paseo applies no provider defaultMode at create time, so a claude-* seat
+// created without settings.modeId comes up parking every tool call. The gate
+// stops new ones; this is how the running ones become visible.
+{
+	const rows = classifyParkedSeats([
+		{ id: "a", provider: "claude-peer/claude-opus-5", mode: "default", inspectOk: true, pendingPermissions: [1, 2] },
+		{ id: "b", provider: "claude-lead/claude-opus-5", mode: "auto", inspectOk: true, pendingPermissions: [] },
+		{ id: "c", provider: "claude-peer/claude-opus-5", mode: "plan", inspectOk: true, pendingPermissions: [] },
+		{ id: "d", provider: "claude-peer/claude-opus-5", mode: "bypassPermissions", inspectOk: true, pendingPermissions: [] },
+		// pi declares no modes at all, so its "default" means nothing.
+		{ id: "e", provider: "pi-peer/Minnyat/gpt-5.6-sol", mode: "default", inspectOk: true, pendingPermissions: [] },
+		// An agent that could not be inspected is unknown, not parked.
+		{ id: "f", provider: "claude-peer/claude-opus-5", mode: "default", inspectOk: false },
+	]);
+	assert.deepEqual(rows.map((row) => row.agentId), ["a", "d"]);
+	assert.equal(rows[0].pendingPermissions, 2);
+	assert.match(rows[0].suspicion, /Always Ask/);
+	assert.match(rows[0].suspicion, /2 already queued/);
+	assert.equal(rows[0].fix, "paseo agent mode a auto");
+	// The fix is conditional on auto existing for that seat, and the row says so.
+	assert.match(rows[0].fixNote, /Bedrock\/Vertex/);
+	assert.match(rows[0].fixNote, /never "bypassPermissions"/);
+	assert.match(rows[1].suspicion, /guardrails/);
+	assert.deepEqual(classifyParkedSeats(null), []);
 }
 
 console.log("watchdog tests passed");

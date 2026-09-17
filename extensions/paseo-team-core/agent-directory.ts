@@ -142,6 +142,18 @@ export interface AgentState {
 	model: string | null;
 	modelSource: "runtime" | "config" | null;
 	modelDrift: boolean;
+	/**
+	 * The permission mode the agent is ACTUALLY on ("auto", "default", ...), or
+	 * null when nothing readable says. Same source rule as the model, and for
+	 * the same measured reason: `persistence.metadata.modeId` is a creation-time
+	 * snapshot Paseo never rewrites — on 2026-09-07 a seat that had been running
+	 * on "auto" for half an hour still carried `metadata.modeId: "default"`.
+	 * pi agents read "default" here and mean nothing by it: the family declares
+	 * no modes at all.
+	 */
+	mode: string | null;
+	modeSource: "runtime" | "config" | null;
+	modeDrift: boolean;
 	thinking: string | null;
 	sessionId: string | null;
 	sessionFile: string | null;
@@ -179,6 +191,10 @@ export function normalizeAgentState(
 	const configModel = str(config.model);
 	const model = runtimeModel ?? configModel;
 
+	const runtimeMode = str(runtime.modeId);
+	const configMode = str(config.modeId);
+	const mode = runtimeMode ?? configMode;
+
 	return {
 		agentId: str(record.id) ?? agentId,
 		provider: str(record.provider),
@@ -196,6 +212,12 @@ export function normalizeAgentState(
 		modelDrift: Boolean(
 			runtimeModel && configModel && runtimeModel !== configModel,
 		),
+		mode,
+		modeSource: runtimeMode ? "runtime" : configMode ? "config" : null,
+		// A mode set after creation (`paseo agent mode`, or the desktop's own
+		// switcher) lands in runtimeInfo while config keeps what the agent was
+		// created with — a real disagreement about what the seat is doing now.
+		modeDrift: Boolean(runtimeMode && configMode && runtimeMode !== configMode),
 		thinking: str(runtime.thinkingOptionId),
 		sessionId: str(runtime.sessionId) ?? str(persistence.sessionId),
 		sessionFile: str(persistence.nativeHandle),

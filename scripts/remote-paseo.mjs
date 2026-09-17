@@ -203,6 +203,12 @@ export function parseArgs(argv) {
  * Paseo refuses to inherit a mode across providers, so one has to be supplied
  * on every claude-* create; this is the value the pack supplies. See the note
  * in buildArgv's `run` case for why it is "auto" rather than "default".
+ *
+ * Deliberately a literal rather than an import: policy-core is loaded lazily
+ * here (one `await importPolicyCore()` deep inside main, so `--help` and the
+ * argument checks stay synchronous), and a module-level await would make every
+ * importer pay for it. `remote-paseo.test.mjs` pins it against policy-core's
+ * `CLAUDE_DEFAULT_SEAT_MODE`, so the two cannot drift apart in silence.
  */
 export const CLAUDE_DEFAULT_MODE = "auto";
 

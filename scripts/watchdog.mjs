@@ -92,6 +92,7 @@ async function inspectOne(agent, deadline, options) {
       updatedAt: detail.UpdatedAt ?? detail.updatedAt ?? agent.updatedAt,
       parentAgentId: detail.ParentAgentId ?? detail.parentAgentId ?? null,
       pendingPermissions: detail.PendingPermissions ?? detail.pendingPermissions ?? [],
+      mode: detail.Mode ?? detail.mode ?? null,
     };
   } catch (error) {
     return {
@@ -102,6 +103,56 @@ async function inspectOne(agent, deadline, options) {
       inspectError: String(error?.message ?? error),
     };
   }
+}
+
+/**
+ * Seats whose permission mode makes them useless or unguarded.
+ *
+ * Measured 2026-09-07: Paseo applies no provider defaultMode at create time, so
+ * a `claude-*` seat created without an explicit mode comes up on "default"
+ * ("Always Ask") — every tool call parks in the pending-permission queue and the
+ * seat looks hung from the outside while it waits for a human who was never
+ * told. The create_agent gate stops NEW seats coming up that way; this is how
+ * the ones already running become visible, including any created before the
+ * gate shipped or by hand outside the pack.
+ *
+ * Only the two modes nobody chooses on purpose are reported: "default" (parks
+ * everything) and "bypassPermissions" (drops Paseo's guardrails). "plan" and
+ * "acceptEdits" are deliberate narrowings and say nothing about health. pi
+ * seats read "default" and mean nothing by it — the family declares no modes —
+ * so they are skipped entirely.
+ *
+ * Observation only, like everything else here: moving another seat's mode
+ * mid-turn is a change to how it is allowed to act, which is the operator's
+ * call and not a watchdog's.
+ */
+export function classifyParkedSeats(agents) {
+  const rows = [];
+  for (const agent of Array.isArray(agents) ? agents : []) {
+    if (agent?.inspectOk !== true) continue;
+    const provider = String(agent.provider ?? "");
+    if (!provider.startsWith("claude-")) continue;
+    const mode = typeof agent.mode === "string" ? agent.mode : null;
+    if (mode !== "default" && mode !== "bypassPermissions") continue;
+    const pending = Array.isArray(agent.pendingPermissions) ? agent.pendingPermissions.length : 0;
+    rows.push({
+      agentId: agent.id,
+      provider,
+      mode,
+      pendingPermissions: pending,
+      suspicion:
+        mode === "default"
+          ? `seat is on "default" (Always Ask): every tool call waits for a human${pending > 0 ? ` — ${pending} already queued` : ""}. Paseo does not apply the provider's defaultMode at create time, so a seat created without settings.modeId lands here.`
+          : 'seat is on "bypassPermissions": Paseo\'s own guardrails are off, and the role policy does not replace them.',
+      fix: `paseo agent mode ${agent.id} auto`,
+      // `auto` is not always there to move to, and the command then fails
+      // without correcting anything — say what to do instead of leaving the
+      // operator to rediscover it.
+      fixNote:
+        '"auto" needs support from the seat\'s backend and model: it is absent under Bedrock/Vertex, and a model without it answers "auto mode unavailable for this model". Then pick another explicit mode the seat supports ("acceptEdits", "plan", or "default" if you mean to watch it) — never "bypassPermissions".',
+    });
+  }
+  return rows;
 }
 
 /**
@@ -215,6 +266,7 @@ export async function collectWatchdogSnapshot(options = {}) {
     staleAfterMs: Math.max(1000, options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS),
     agents: classified,
     stale: classified.filter((agent) => agent.stale),
+    parked: classifyParkedSeats(classified),
     leases: leaseRows,
     ...(leaseError ? { leaseError } : {}),
     partial,

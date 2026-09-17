@@ -139,6 +139,13 @@ assert.deepEqual(
 		"the advertised fork reasons must be exactly the ones the core accepts",
 	);
 
+	// The fork schema must let a Lead SAY which mode the fork comes up in.
+	// `paseo import` carries no mode and Paseo applies no provider default, so
+	// team-fork.mjs moves the fork onto "auto" afterwards; a schema without this
+	// field would make a deliberate narrowing ("plan" for a planning fork)
+	// unreachable from this runtime while the Pi one has it.
+	assert.equal(fork.inputSchema.properties.modeId.type, "string");
+
 	// And for the consult tool. Its description is the one place a Lead is told
 	// that the Supervisor — not the Human — is where an open question goes, so a
 	// runtime carrying a weaker copy of that sentence is a runtime whose Lead

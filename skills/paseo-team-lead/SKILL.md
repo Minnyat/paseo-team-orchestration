@@ -379,6 +379,30 @@ Hard rules for a mixed fleet:
   `bypassPermissions`: the role policy still applies, but Paseo's own
   guardrails outside it are gone too.
 
+  Do NOT expect the provider to supply this for you. `paseo provider ls` shows
+  `defaultMode=auto` for every `claude-*` role provider and the daemon applies
+  that value NOWHERE at create time (measured 2026-09-07: the seat is built with
+  `isPermissionMode(config.modeId) ? config.modeId : "default"`) — it is only
+  what a picker preselects. The inheritance error above fires only when the
+  create has a parent on a different provider; a create with no parent lands on
+  `"default"` in silence. Since this release the `PreToolUse` gate refuses a
+  `claude-*` `create_agent` with no `settings.modeId` and names the value to
+  pass, so you cannot ship a parked seat by forgetting — but the fix is still
+  one word from you, not from the daemon.
+
+  A fork needs nothing extra: `paseo import` cannot carry a mode, so
+  `team_fork` moves the fork onto `auto` right after the import and deletes it
+  if that fails. Pass `modeId` to `team_fork` to narrow it on purpose
+  (`"plan"` for a fork that should propose before acting) — and whenever `auto`
+  is unavailable for the fork: under Bedrock/Vertex, or on a model that answers
+  "auto mode unavailable for this model". Without `modeId` such a fork fails
+  with `FORK_MODE_UNSET` every time; pick another explicit mode the seat
+  supports, never `bypassPermissions`.
+
+  Seats already running on the wrong mode show up in `pteam watchdog` under
+  `parked`. Every row carries the `paseo agent mode <id> auto` that fixes it
+  where `auto` exists, and a `fixNote` naming the fallback where it does not.
+
 Model classes (decided by task risk + disposition, not by role name):
 
 | MODEL_CLASS | Use for |

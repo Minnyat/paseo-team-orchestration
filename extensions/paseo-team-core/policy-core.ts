@@ -3120,6 +3120,216 @@ export function isLeadRecoveryProvider(provider: string): boolean {
 	return parsed.family === "pi" ? segments.length >= 3 : segments.length >= 2;
 }
 
+// ---------------------------------------------------------------------------
+// Permission mode — the mode a seat actually comes up in
+// ---------------------------------------------------------------------------
+
+/**
+ * Measured 2026-09-07 against the running daemon (`@getpaseo/server` 0.7.2,
+ * `agent/providers/claude/agent.js`), and this one line is why this section
+ * exists at all:
+ *
+ *   this.currentMode = isPermissionMode(config.modeId) ? config.modeId : "default";
+ *
+ * A Claude seat created WITHOUT an explicit mode comes up on `default`
+ * ("Always Ask") — never on `auto`. `paseo provider ls` reports
+ * `defaultMode=auto` for every `claude-*` role provider, and that value is
+ * catalog metadata only: the daemon uses it to PRESELECT a mode in its own
+ * pickers (`hub/starter-agent-runtime.js` marks it `suggested`) and applies it
+ * nowhere at create time. `resolveAndValidateCreateAgentMode` returns
+ * `undefined` for a parentless create with no requested mode, and `undefined`
+ * is exactly what the line above turns into `"default"`.
+ *
+ * Reproduced end to end the same day, on a real daemon:
+ *
+ *   paseo run --provider claude-peer/claude-haiku-4-5 ...   (no --mode)
+ *     -> paseo agent inspect  =>  Mode: default
+ *   paseo run --provider claude-peer/claude-haiku-4-5 ... --mode auto
+ *     -> paseo agent inspect  =>  Mode: auto
+ *
+ * So "auto is the default" is only true of the paths that SAY auto. Every path
+ * that stays quiet hands back a seat whose every tool call parks in the
+ * pending-permission queue — the seat looks hung from the outside while its
+ * creator spends turns on `list_pending_permissions`. That is not a narrowing
+ * anybody chose; it is a default nobody typed.
+ *
+ * pi is exempt because it declares no modes at all (`AvailableModes: []`,
+ * `DynamicModes: false`; `paseo agent mode <pi-agent> --list` answers `[]`),
+ * which is why every pi seat reads `Mode: default` while waiting for nobody.
+ */
+export const CLAUDE_SEAT_MODES = [
+	"plan",
+	"default",
+	"acceptEdits",
+	"auto",
+	"bypassPermissions",
+] as const;
+
+export type ClaudeSeatMode = (typeof CLAUDE_SEAT_MODES)[number];
+
+/**
+ * The mode a Claude seat comes up in unless its creator narrows it on purpose.
+ *
+ * What bounds a seat is its role policy plus its V3 brief, both enforced before
+ * Paseo's permission queue ever sees a call; the queue only decides how often a
+ * human is interrupted while the seat does already-bounded work.
+ */
+export const CLAUDE_DEFAULT_SEAT_MODE: ClaudeSeatMode = "auto";
+
+/**
+ * NEVER, on any seat: it drops Paseo's own guardrails, which sit OUTSIDE the
+ * role policy and are therefore not replaced by it. `plan` / `default` /
+ * `acceptEdits` stay available as deliberate narrowings.
+ */
+export const FORBIDDEN_SEAT_MODE: ClaudeSeatMode = "bypassPermissions";
+
+export function isClaudeSeatMode(value: unknown): value is ClaudeSeatMode {
+	return (
+		typeof value === "string" &&
+		(CLAUDE_SEAT_MODES as readonly string[]).includes(value)
+	);
+}
+
+/**
+ * The mode a newly created seat of this family MUST be given, or null when the
+ * family has no permission modes to give (pi). Null means "pass nothing", not
+ * "pass a default" — sending `--mode` to a modeless provider is an error.
+ */
+export function defaultSeatMode(
+	family: RuntimeFamily | null | undefined,
+): ClaudeSeatMode | null {
+	return family === "claude" ? CLAUDE_DEFAULT_SEAT_MODE : null;
+}
+
+/**
+ * Validate a mode a caller asked for, for a seat of this family.
+ *
+ * `what` names the operation in the message ("create_agent", "fork") so one
+ * check can serve every creation path without each of them re-wording it.
+ */
+export function seatModeBlockReason(
+	mode: unknown,
+	{ family, what }: { family: RuntimeFamily | null; what: string },
+): string | null {
+	if (mode === undefined || mode === null || mode === "") return null;
+	if (family !== "claude") {
+		return `Refusing ${what}: provider family "${family ?? "<unknown>"}" declares no permission modes (AvailableModes is empty), so "${String(mode)}" cannot be applied to it. Pass no mode at all.`;
+	}
+	if (!isClaudeSeatMode(mode)) {
+		return `Refusing ${what}: "${String(mode)}" is not a Claude permission mode. Valid modes: ${CLAUDE_SEAT_MODES.join(", ")}.`;
+	}
+	if (mode === FORBIDDEN_SEAT_MODE) {
+		return `Refusing ${what}: "${FORBIDDEN_SEAT_MODE}" is never allowed for a seat in this pack. It drops Paseo's own guardrails, which live outside the role policy and are not replaced by it. Use "${CLAUDE_DEFAULT_SEAT_MODE}", or narrow deliberately with "plan" / "default" / "acceptEdits".`;
+	}
+	return null;
+}
+
+/**
+ * Gate for the `settings.modeId` of a create_agent, on both runtimes.
+ *
+ * A missing mode is REFUSED rather than filled in, and the refusal is the point:
+ * this gate runs in the PreToolUse hook, which can block a call but cannot
+ * rewrite its arguments, so the only way to make the mode true is to make the
+ * caller say it. The message names the value to pass, so a Lead that forgot
+ * types one word and moves on.
+ *
+ * Only `claude-*` providers are gated. A pi target has no modes to set, and a
+ * provider this file cannot parse is left to the gates that own that failure.
+ */
+export function createAgentModeArgsBlockReason(args: unknown): string | null {
+	if (typeof args !== "object" || args === null) return null;
+	const rec = args as Record<string, unknown>;
+	const provider = typeof rec.provider === "string" ? rec.provider : "";
+	const parsed = parseRoleProvider(provider);
+	if (!parsed) return null;
+	const settings =
+		typeof rec.settings === "object" && rec.settings !== null
+			? (rec.settings as Record<string, unknown>)
+			: {};
+	const modeId = settings.modeId;
+	if (parsed.family !== "claude") {
+		// Nothing to demand — but a mode passed to a modeless family is still a
+		// mistake worth naming here: the daemon answers it with "Invalid mode
+		// 'auto' for provider 'pi-peer'. Available modes: (none)", which reads
+		// like the mode is wrong rather than the whole idea of one.
+		return seatModeBlockReason(modeId, {
+			family: parsed.family,
+			what: "create_agent",
+		});
+	}
+	if (typeof modeId !== "string" || modeId.trim() === "") {
+		// Measured on the same daemon: a top-level `mode` is IGNORED — Paseo's
+		// contract puts every initial runtime setting under `settings` — so a
+		// caller that spelled it there gets a seat on "default" and no clue why.
+		const misplaced =
+			typeof rec.mode === "string" && rec.mode.trim() !== ""
+				? ` A top-level "mode" (you passed "${rec.mode.trim()}") is IGNORED by create_agent; it has to be settings.modeId.`
+				: "";
+		return `Refusing create_agent: a "${provider}" seat requires settings.modeId — Paseo does NOT apply the provider's defaultMode at create time, so a seat created without one comes up on "default" (Always Ask) and parks every tool call in the permission queue. Pass settings.modeId: "${CLAUDE_DEFAULT_SEAT_MODE}" unless you are narrowing it on purpose ("plan" for a seat that should propose before acting, "acceptEdits" for a write seat whose brief already grants EDIT_AUTHORITY, "default" for one you genuinely intend to watch call by call).${misplaced}`;
+	}
+	return seatModeBlockReason(modeId.trim(), {
+		family: parsed.family,
+		what: "create_agent",
+	});
+}
+
+/** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
+export function createAgentModeBlockReason(input: unknown): string | null {
+	return createAgentModeArgsBlockReason(extractMcpArgs(input));
+}
+
+/**
+ * Verification half of the same rule, for a fork.
+ *
+ * `paseo import` takes no `--mode` (measured: its whole option set is
+ * `--provider`, `--cwd`, `--label`, `--json`, `--host`), so a fork is created
+ * on "default" and moved afterwards with `paseo agent mode`. This is what
+ * decides whether that move actually took — read from `runtimeInfo.modeId`,
+ * never from `persistence.metadata.modeId`, which is a creation-time snapshot
+ * Paseo does not rewrite and which still reads "default" on a seat that has
+ * been running on "auto" for hours.
+ */
+export function forkModeBlockReason({
+	expectedMode,
+	actualMode,
+	family,
+}: {
+	/** The mode the caller asked for. Absent = "whatever the fork was given". */
+	expectedMode?: string | null;
+	actualMode?: string | null;
+	/** The fork's own family; only "claude" has modes to check at all. */
+	family?: RuntimeFamily | null;
+}): string | null {
+	// Refused before anything is compared, and on any family: asking for it does
+	// not make it a seat mode, so a verify that repeats "bypassPermissions" must
+	// not pass a fork that is on it. Only a Claude runtime can report this value
+	// at all, so no pi seat is caught by skipping the family check.
+	if (actualMode === FORBIDDEN_SEAT_MODE || expectedMode === FORBIDDEN_SEAT_MODE) {
+		return `BLOCKED: FORK_MODE_UNROUTABLE — "${FORBIDDEN_SEAT_MODE}" is never a seat mode in this pack, requested or not: Paseo's own guardrails are off and the role policy does not replace them.`;
+	}
+	if (expectedMode) {
+		if (!actualMode) {
+			return `BLOCKED: FORK_MODE_UNROUTABLE — the fork reports no mode yet, so it cannot be shown to run "${expectedMode}". A fork whose mode is unknown is a seat that may be parking every tool call in the permission queue; do not use it.`;
+		}
+		if (actualMode !== expectedMode) {
+			return `BLOCKED: FORK_MODE_UNROUTABLE — the fork is on "${actualMode}", not the requested "${expectedMode}". \`paseo agent mode\` did not take; delete the fork rather than keep a seat whose permission mode nobody chose.`;
+		}
+		return null;
+	}
+	// Nothing was asked for, so a deliberate narrowing is not a fault: a fork
+	// created with modeId "plan" and verified without repeating it must not be
+	// deleted for being on "plan". Of the two modes nobody chooses on purpose,
+	// "bypassPermissions" was refused above; "default" is refused here — and an
+	// UNREADABLE mode is left alone, because deleting a correctly moved fork
+	// over a state file that has not caught up yet is the same over-strictness
+	// the model comparison is careful to avoid.
+	if (family !== "claude" || !actualMode) return null;
+	if (actualMode === "default") {
+		return `BLOCKED: FORK_MODE_UNROUTABLE — the fork is still on "default" (Always Ask): \`paseo import\` cannot carry a mode and Paseo applies no provider default, so nothing ever moved it. Every tool call it makes will park in the permission queue. Delete it and fork again.`;
+	}
+	return null;
+}
+
 /**
  * Argument-level gate for supervisor create_agent through the MCP proxy.
  * The supervisor may create exactly ONE kind of agent: a successor Lead
@@ -3421,6 +3631,16 @@ export function mcpBlockReason(
 			selfDomain: context.selfDomain,
 		});
 		if (supervisorBlock) return supervisorBlock;
+	}
+	if (matchesPaseoToolName(target, ["create_agent"]) && (role === "lead" || role === "supervisor")) {
+		// Runs for EVERY create_agent that got this far, on both paths: a seat
+		// created without settings.modeId comes up on "default" and parks every
+		// call it makes, whoever created it. LAST of the create_agent gates on
+		// purpose — a call refused on authority grounds (a Supervisor creating a
+		// Peer, a Lead widening a Supervisor's domain) must hear about the
+		// authority, not about a mode it was never going to get to use.
+		const modeBlock = createAgentModeBlockReason(input);
+		if (modeBlock) return modeBlock;
 	}
 	if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 		const argBlock = leadCreateWorkspaceBlockReason(input);

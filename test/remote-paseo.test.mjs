@@ -633,6 +633,15 @@ const EP = "https://app.paseo.sh/#offer=tok";
 	assert.ok(argv.includes("--mode"), t);
 	assert.equal(argv[argv.indexOf("--mode") + 1], CLAUDE_DEFAULT_MODE, t);
 	assert.equal(CLAUDE_DEFAULT_MODE, "auto", t);
+	// One rule, one value: this module keeps its own literal so `--help` and the
+	// argument checks stay synchronous (policy-core is loaded lazily deep inside
+	// main), and this is what stops the two copies drifting apart. Every other
+	// creation path in the pack — the create_agent gate, team-fork's post-import
+	// move — reads the core's constant directly.
+	const { CLAUDE_DEFAULT_SEAT_MODE } = await import(
+		"../extensions/paseo-team-core/policy-core.ts"
+	);
+	assert.equal(CLAUDE_DEFAULT_MODE, CLAUDE_DEFAULT_SEAT_MODE, t);
 }
 
 {

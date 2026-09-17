@@ -82,8 +82,11 @@ implementation still goes to an Engineer Peer.
    `list_providers`/`list_models` on the EXACT target daemon, create the agent
    with the exact `<role-provider>/<model-ref>` string +
    `settings.thinkingOptionId` — plus `settings.modeId` on every `claude-*`
-   route, because Paseo never inherits a permission mode across providers and a
-   top-level `mode` is ignored. Use `settings.modeId: "auto"` unless you have a
+   route, because Paseo never inherits a permission mode across providers, a
+   top-level `mode` is ignored, and the provider's own `defaultMode=auto` is
+   never applied at create time (a seat created without a mode comes up on
+   `"default"`, not on auto — the hook refuses that create rather than let you
+   ship a seat that parks every call). Use `settings.modeId: "auto"` unless you have a
    reason not to: what bounds a Peer is its role policy and its brief, both of
    which are enforced before Paseo's permission queue ever sees the call, and
    on `"default"` every one of that Peer's tool calls parks in the queue for

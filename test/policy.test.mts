@@ -9,7 +9,12 @@ import {
 	callsPaseoCli,
 	callsTeamSupportScript,
 	classifyMcpInput,
+	createAgentModeArgsBlockReason,
+	CLAUDE_DEFAULT_SEAT_MODE,
+	CLAUDE_SEAT_MODES,
+	defaultSeatMode,
 	denyReason,
+	forkModeBlockReason,
 	gitAuthorityBlockReason,
 	isSupervisorAllowedMcpTarget,
 	mcpBlockReason,
@@ -2046,6 +2051,141 @@ import {
 	assert.match(notice!, /peer message/i);
 	assert.match(notice!, /PR-X/);
 	assert.equal(peerMessageTurnNotice({ block: null }), null);
+}
+
+
+
+// --- create_agent: the mode a seat comes up in -------------------------------
+//
+// Measured 2026-09-07 on Paseo 0.7.2: `paseo provider ls` reports
+// `defaultMode=auto` for every claude-* role provider, but the daemon applies
+// it nowhere — `agent/providers/claude/agent.js` builds the seat with
+// `isPermissionMode(config.modeId) ? config.modeId : "default"`, so a create
+// that says nothing produces a seat on "default" whose every tool call parks in
+// the permission queue. Reproduced with `paseo run` (no --mode → Mode: default;
+// --mode auto → Mode: auto). The gate below is what makes the pack say it.
+{
+	const seat = (settings?: Record<string, unknown>, extra?: Record<string, unknown>) => ({
+		provider: "claude-peer/claude-opus-5",
+		labels: { "team.cluster": "d:/repo" },
+		...(settings ? { settings } : {}),
+		...extra,
+	});
+
+	assert.equal(
+		createAgentModeArgsBlockReason(seat({ modeId: "auto", thinkingOptionId: "high" })),
+		null,
+	);
+	// Narrowing on purpose stays allowed — a planning seat is the reason "plan"
+	// exists, and a watched seat is the reason "default" does.
+	for (const modeId of ["plan", "default", "acceptEdits"]) {
+		assert.equal(createAgentModeArgsBlockReason(seat({ modeId })), null, modeId);
+	}
+	// Missing: refused, with the value to type in the message.
+	const missing = createAgentModeArgsBlockReason(seat({ thinkingOptionId: "high" })) ?? "";
+	assert.match(missing, /settings\.modeId/);
+	assert.match(missing, /"auto"/);
+	assert.match(missing, /defaultMode/, "the message says WHY the provider default does not save you");
+	// The measured trap: Paseo ignores a top-level `mode`, so a caller that
+	// spelled it there gets "default" and no clue why. Named explicitly.
+	assert.match(
+		createAgentModeArgsBlockReason(seat(undefined, { mode: "auto" })) ?? "",
+		/top-level "mode"/,
+	);
+	// bypassPermissions drops Paseo's own guardrails, which sit outside the role
+	// policy — never a seat mode, however deliberate the caller.
+	assert.match(
+		createAgentModeArgsBlockReason(seat({ modeId: "bypassPermissions" })) ?? "",
+		/bypassPermissions/,
+	);
+	assert.match(createAgentModeArgsBlockReason(seat({ modeId: "yolo" })) ?? "", /not a Claude permission mode/);
+	// pi declares no modes at all (AvailableModes: []), so there is nothing to
+	// demand — and nothing to accept either.
+	assert.equal(
+		createAgentModeArgsBlockReason({ provider: "pi-peer/Minnyat/gpt-5.6-sol", labels: {} }),
+		null,
+	);
+	assert.match(
+		createAgentModeArgsBlockReason({ provider: "pi-peer/Minnyat/gpt-5.6-sol", settings: { modeId: "auto" } }) ?? "",
+		/no permission modes/,
+	);
+	// A provider this file cannot parse belongs to the gates that own that
+	// failure, not to this one.
+	assert.equal(createAgentModeArgsBlockReason({ provider: "x" }), null);
+	assert.equal(createAgentModeArgsBlockReason(undefined), null);
+
+	// Same gate through the pi MCP proxy shape, and it fires LAST: a call
+	// refused on authority grounds must hear about the authority.
+	assert.match(
+		mcpBlockReason("lead", {
+			tool: "create_agent",
+			args: { provider: "claude-peer/claude-opus-5" },
+		}) ?? "",
+		/settings\.modeId/,
+	);
+	assert.equal(
+		mcpBlockReason("lead", {
+			tool: "create_agent",
+			args: { provider: "claude-peer/claude-opus-5", settings: { modeId: "auto" } },
+		}),
+		null,
+	);
+	assert.match(
+		mcpBlockReason("supervisor", {
+			tool: "create_agent",
+			args: { provider: "claude-peer/claude-opus-5", settings: { modeId: "auto" } },
+		}) ?? "",
+		/lead-recovery only/,
+		"authority first: a Supervisor creating a Peer hears about the role, not the mode",
+	);
+
+	// The vocabulary itself, which every creation path shares.
+	assert.equal(defaultSeatMode("claude"), "auto");
+	assert.equal(defaultSeatMode("pi"), null);
+	assert.equal(CLAUDE_DEFAULT_SEAT_MODE, "auto");
+	assert.ok(!CLAUDE_SEAT_MODES.includes("bypass" as never));
+
+	// Fork verification: an imported seat that never got moved off "default" is
+	// removed, not reported as usable.
+	assert.equal(forkModeBlockReason({ expectedMode: "auto", actualMode: "auto" }), null);
+	assert.match(
+		forkModeBlockReason({ expectedMode: "auto", actualMode: "default" }) ?? "",
+		/FORK_MODE_UNROUTABLE/,
+	);
+	assert.match(
+		forkModeBlockReason({ expectedMode: "auto", actualMode: null }) ?? "",
+		/FORK_MODE_UNROUTABLE/,
+	);
+	// Nothing asked for: a deliberate narrowing must survive, and only the two
+	// modes nobody chooses on purpose are refused. Deleting a fork that is
+	// correctly on "plan" would be the destructive kind of over-strictness.
+	assert.equal(forkModeBlockReason({ actualMode: "plan", family: "claude" }), null);
+	assert.equal(forkModeBlockReason({ actualMode: "acceptEdits", family: "claude" }), null);
+	assert.match(
+		forkModeBlockReason({ actualMode: "default", family: "claude" }) ?? "",
+		/still on "default"/,
+	);
+	assert.match(
+		forkModeBlockReason({ actualMode: "bypassPermissions", family: "claude" }) ?? "",
+		/guardrails/,
+	);
+	// pi has no modes, and an unreadable mode is not evidence of anything.
+	assert.equal(forkModeBlockReason({ actualMode: "default", family: "pi" }), null);
+	assert.equal(forkModeBlockReason({ actualMode: null, family: "claude" }), null);
+	// Asking for the forbidden mode does not launder it: a verify that repeats
+	// "bypassPermissions" must still refuse a fork that is on it.
+	assert.match(
+		forkModeBlockReason({
+			expectedMode: "bypassPermissions",
+			actualMode: "bypassPermissions",
+			family: "claude",
+		}) ?? "",
+		/guardrails/,
+	);
+	assert.match(
+		forkModeBlockReason({ expectedMode: "bypassPermissions", actualMode: "bypassPermissions" }) ?? "",
+		/guardrails/,
+	);
 }
 
 console.log("[paseo-team] policy tests passed");

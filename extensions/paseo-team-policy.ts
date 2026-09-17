@@ -425,6 +425,9 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 				provider: { type: "string", maxLength: 256 },
 				model: { type: "string", maxLength: 128 },
 				thinkingOptionId: { type: "string", maxLength: 64 },
+				// See the same field in claude-team-mcp.mjs: a claude-* fork is
+				// moved onto "auto" after import; this only narrows it on purpose.
+				modeId: { type: "string", maxLength: 32 },
 				cwd: { type: "string", maxLength: 512 },
 				owns: { type: "string", maxLength: 512 },
 				doesNotOwn: { type: "string", maxLength: 512 },

@@ -28,6 +28,7 @@ import {
 	ALL_PASEO_TOOLS,
 	callsPaseoCli,
 	clusterLabelBlockReason,
+	createAgentModeArgsBlockReason,
 	leaseBlockReason,
 	sendAgentPromptBlockReason,
 	sendAgentPromptTargetId,
@@ -403,10 +404,14 @@ export function claudeToolBlockReason(
 			if (clusterBlock) return clusterBlock;
 		}
 		if (role === "supervisor" && matchesPaseoToolName(target, ["create_agent"])) {
-			return supervisorCreateAgentArgsBlockReason(input.toolInput, {
+			// Captured rather than returned: the mode gate below runs for a
+			// Supervisor's lead-recovery create_agent too, exactly as it does on
+			// the Pi adapter, and an early return here would skip it.
+			const argBlock = supervisorCreateAgentArgsBlockReason(input.toolInput, {
 				topology: input.topology ?? "single",
 				selfDomain: input.selfDomain ?? null,
 			});
+			if (argBlock) return argBlock;
 		}
 		if (role === "lead" && matchesPaseoToolName(target, ["create_agent"])) {
 			// A Lead seating its own governance seat (PR-H), gated in the same
@@ -418,6 +423,15 @@ export function claudeToolBlockReason(
 				selfDomain: input.selfDomain ?? null,
 			});
 			if (supervisorSeatBlock) return supervisorSeatBlock;
+		}
+		if (matchesPaseoToolName(target, ["create_agent"]) && (role === "lead" || role === "supervisor")) {
+			// Same mode gate the Pi adapter runs through mcpBlockReason, in the
+			// same position (last of the create_agent gates). A seat created
+			// without settings.modeId comes up on "default" whichever runtime
+			// created it, so a Claude-hosted Lead must not be the quiet way to a
+			// seat that parks every tool call it makes.
+			const modeBlock = createAgentModeArgsBlockReason(input.toolInput);
+			if (modeBlock) return modeBlock;
 		}
 		if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 			return leadCreateWorkspaceArgsBlockReason(input.toolInput);

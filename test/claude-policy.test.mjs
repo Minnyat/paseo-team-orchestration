@@ -307,10 +307,23 @@ assert.equal(
 	decide("supervisor", "mcp__paseo__create_agent", {
 		provider: "claude-lead/claude-opus-5",
 		labels: { purpose: "recovery", recovery_for: "content-analysis" },
-		settings: { thinkingOptionId: "high" },
+		settings: { thinkingOptionId: "high", modeId: "auto" },
 	}),
 	null,
 	"a Claude lead recovery passes the same gate as a pi one",
+);
+// The recovery seat needs a mode for the same reason it needs a thinking level:
+// Paseo applies no defaultMode at create time, and a successor Lead that comes
+// up on "default" parks every call it makes — with nobody left to triage them,
+// since the Lead it replaces is the one that failed.
+assert.match(
+	decide("supervisor", "mcp__paseo__create_agent", {
+		provider: "claude-lead/claude-opus-5",
+		labels: { purpose: "recovery", recovery_for: "content-analysis" },
+		settings: { thinkingOptionId: "high" },
+	}) ?? "",
+	/settings\.modeId/,
+	"a lead-recovery seat without a mode is refused too",
 );
 assert.equal(
 	decide("supervisor", "mcp__paseo__create_agent", {
@@ -416,7 +429,10 @@ assert.equal(
 	const recovery = {
 		provider: "claude-lead/claude-opus-5",
 		labels: { purpose: "recovery", recovery_for: "content-analysis" },
-		settings: { thinkingOptionId: "high" },
+		// modeId for the same reason as thinkingOptionId: Paseo applies no
+		// provider default at create time, so a successor Lead without one comes
+		// up on "default" and parks every call it makes.
+		settings: { thinkingOptionId: "high", modeId: "auto" },
 	};
 	assert.match(
 		claudeToolBlockReason({
@@ -666,7 +682,7 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 			toolInput: {
 				provider: "claude-lead/claude-opus-5",
 				labels: { purpose: "recovery", recovery_for: "frontend.shell" },
-				settings: { thinkingOptionId: "high" },
+				settings: { thinkingOptionId: "high", modeId: "auto" },
 			},
 			brief: null,
 			topology: "multi",

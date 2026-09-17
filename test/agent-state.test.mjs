@@ -204,5 +204,35 @@ assert.equal(normalizeAgentState({ labels: "not-an-object" }, FULL).labels && Ob
 assert.equal(AGENT_DOMAIN_LABEL, "team.domain");
 assert.equal(AGENT_PARENT_LABEL, "paseo.parent-agent-id");
 
+// The permission mode reads the same way the model does, and for a measured
+// reason: on 2026-09-07 a seat that had been running on "auto" for half an hour
+// still carried persistence.metadata.modeId "default" — the creation-time
+// snapshot Paseo never rewrites. A verifier that trusted it would keep a fork
+// parked in the permission queue while reporting it healthy.
+{
+	const stale = normalizeAgentState(
+		{
+			id: FULL,
+			provider: "claude-peer/claude-opus-5",
+			config: { modeId: "default" },
+			runtimeInfo: { modeId: "auto" },
+			persistence: { metadata: { modeId: "default" } },
+		},
+		FULL,
+	);
+	assert.equal(stale.mode, "auto");
+	assert.equal(stale.modeSource, "runtime");
+	assert.equal(stale.modeDrift, true, "created on default, moved onto auto — a real disagreement");
+
+	const created = normalizeAgentState({ id: FULL, config: { modeId: "auto" } }, FULL);
+	assert.equal(created.mode, "auto");
+	assert.equal(created.modeSource, "config");
+	assert.equal(created.modeDrift, false, "not started yet is not drift");
+
+	const unknown = normalizeAgentState({ id: FULL, persistence: { metadata: { modeId: "auto" } } }, FULL);
+	assert.equal(unknown.mode, null, "metadata is never a mode source");
+	assert.equal(unknown.modeSource, null);
+}
+
 rmSync(root, { recursive: true, force: true });
 console.log("agent-state.test.mjs OK");

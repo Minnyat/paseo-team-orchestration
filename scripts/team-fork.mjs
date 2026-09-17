@@ -39,10 +39,13 @@ import { importPolicyCore, isEntrypoint, resolvePaseoExec } from "./lib-common.m
 // specifier can only be right in one of them.
 const {
 	agentCluster,
+	defaultSeatMode,
+	forkModeBlockReason,
 	forkModelBlockReason,
 	forkRequestBlockReason,
 	forkSeedPrompt,
 	parseRoleProvider,
+	seatModeBlockReason,
 } = await importPolicyCore();
 const { paseoAgentsRoot, readAgentStates } = await importPolicyCore("agent-directory.ts");
 
@@ -206,6 +209,14 @@ export async function forkAgent(input = {}, options = {}) {
 	if (parsed.role === "peer" && input.disposition === "lead") {
 		throw bad("FORK_PROVIDER_INVALID", "the provider role and the declared disposition disagree");
 	}
+	// Which mode the fork must end up on. Checked here, before a single byte is
+	// copied, for the same reason the provider is: a request that can never
+	// produce a usable seat should not leave a session file behind.
+	const requestedMode =
+		typeof input.modeId === "string" && input.modeId.trim() !== "" ? input.modeId.trim() : null;
+	const modeBlocked = seatModeBlockReason(requestedMode, { family: parsed.family, what: "fork" });
+	if (modeBlocked) throw bad("FORK_MODE_INVALID", modeBlocked);
+	const mode = requestedMode ?? defaultSeatMode(parsed.family);
 
 	const state = readState(agentId, options);
 
@@ -269,10 +280,39 @@ export async function forkAgent(input = {}, options = {}) {
 		);
 	}
 
+	// Measured 2026-09-07: `paseo import` has no `--mode` at all (its whole
+	// option set is --provider, --cwd, --label, --json, --host), and Paseo does
+	// NOT apply the provider's defaultMode at create time — an imported Claude
+	// seat comes up on "default" and parks every tool call it makes in the
+	// pending-permission queue. So the mode is a SECOND call, and a fork that
+	// cannot be moved onto it is deleted rather than handed over: a seat whose
+	// permission mode nobody chose is exactly what `verify` exists to refuse,
+	// and leaving it alive would hand the Lead a fork that looks hung.
+	if (mode) {
+		try {
+			await run(["agent", "mode", forkAgentId, mode]);
+		} catch (error) {
+			let removed = false;
+			try {
+				await run(["delete", forkAgentId]);
+				removed = true;
+			} catch {
+				/* the message below names the agent to remove by hand */
+			}
+			throw bad(
+				"FORK_MODE_UNSET",
+				`the fork was imported but could not be moved onto mode "${mode}" (${String(error?.message ?? error)}). ${removed ? "It has been deleted; fork again." : `DELETE IT BY HAND — \`paseo delete ${forkAgentId}\` — then fork again.`} An imported seat stays on "default", where every tool call waits for a human.${requestedMode === null ?` If "${mode}" is unavailable for this backend or model (Bedrock/Vertex, or a model without it), fork again with an explicit modeId the seat supports.` : ""}`,
+			);
+		}
+	}
+
 	return {
 		ok: true,
 		agentId: forkAgentId,
 		forkOf: agentId,
+		// What `verify` will hold the fork to, alongside the model and thinking
+		// level the caller must still route through MCP.
+		mode,
 		sessionId: materialized.sessionId,
 		sessionFile: materialized.file,
 		parentSession: materialized.parentSession,
@@ -299,7 +339,7 @@ export async function forkAgent(input = {}, options = {}) {
 					...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
 				},
 			},
-			why: "The imported agent's model can only be set through MCP update_agent; the CLI has no --model. Run it, then `team-fork.mjs verify` before using the fork.",
+			why: `The imported agent's model can only be set through MCP update_agent; the CLI has no --model. Run it, then \`team-fork.mjs verify\` before using the fork.${mode ? ` The permission mode is already done: the fork was moved onto "${mode}" with \`paseo agent mode\`, which import cannot carry.` : ""}`,
 		},
 		then: "verify",
 	};
@@ -311,18 +351,38 @@ export async function forkAgent(input = {}, options = {}) {
  * Deleting rather than reporting: an agent on an unknown model produces
  * evidence nobody can weigh, and it is cheaper to fork again (a file copy) than
  * to discover three rounds later that the route was never applied.
+ *
+ * The permission mode is checked on the same terms as the model, because it
+ * fails the same way: `paseo import` cannot carry one, so it is applied by a
+ * separate call that can silently not have happened (an older fork, a hand-run
+ * import, a daemon that refused the mode for that model). A fork left on
+ * "default" answers nothing and waits for a human on every tool call, so it is
+ * removed rather than reported as usable.
  */
 export async function verifyFork(input = {}, options = {}) {
 	requireRole(options);
 	const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
 	if (!agentId) throw bad("FORK_TARGET_MISSING", "agentId (the imported fork) is required");
 	const state = readState(agentId, options);
-	const reason = forkModelBlockReason({
-		expectedModel: typeof input.model === "string" ? input.model : null,
-		actualModel: state.model,
-		expectedThinking: typeof input.thinkingOptionId === "string" ? input.thinkingOptionId : null,
-		actualThinking: state.thinking,
-	});
+	const family = parseRoleProvider(state.provider ?? "")?.family ?? null;
+	const requestedMode =
+		typeof input.modeId === "string" && input.modeId.trim() !== "" ? input.modeId.trim() : null;
+	const reason =
+		forkModelBlockReason({
+			expectedModel: typeof input.model === "string" ? input.model : null,
+			actualModel: state.model,
+			expectedThinking: typeof input.thinkingOptionId === "string" ? input.thinkingOptionId : null,
+			actualThinking: state.thinking,
+		}) ??
+		forkModeBlockReason({
+			// Only what the caller actually asked for is held to exactly; without
+			// a request the check is "not parked, not unguarded", so a fork
+			// deliberately created on "plan" survives a verify that says nothing
+			// about modes.
+			expectedMode: requestedMode,
+			actualMode: state.mode,
+			family,
+		});
 	if (!reason) {
 		return {
 			ok: true,
@@ -330,6 +390,8 @@ export async function verifyFork(input = {}, options = {}) {
 			model: state.model,
 			modelSource: state.modelSource,
 			thinking: state.thinking,
+			mode: state.mode,
+			modeSource: state.modeSource,
 			sessionId: state.sessionId,
 		};
 	}
@@ -346,11 +408,14 @@ export async function verifyFork(input = {}, options = {}) {
 	}
 	return {
 		ok: false,
-		code: "FORK_MODEL_UNROUTABLE",
+		code: reason.includes("FORK_MODE_UNROUTABLE")
+			? "FORK_MODE_UNROUTABLE"
+			: "FORK_MODEL_UNROUTABLE",
 		message: reason,
 		agentId,
 		model: state.model,
 		thinking: state.thinking,
+		mode: state.mode,
 		removed,
 		...(removeError ? { removeError } : {}),
 	};

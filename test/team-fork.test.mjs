@@ -498,4 +498,191 @@ test("a delete that fails is reported rather than swallowed", async () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// The mode the fork comes up in
+//
+// Measured 2026-09-07: `paseo import` has no --mode at all, and Paseo applies
+// no provider defaultMode at create time (claude/agent.js builds the seat with
+// `isPermissionMode(config.modeId) ? config.modeId : "default"`). So an
+// imported Claude seat is on "default" — every tool call parked in the
+// permission queue — until something moves it. That something is here.
+// ---------------------------------------------------------------------------
+
+test("a claude fork is moved onto auto right after the import", async () => {
+	await withState(async ({ agentsRoot }) => {
+		const calls = [];
+		const result = await forkAgent(
+			{
+				agentId: SOURCE,
+				reason: "change-host",
+				disposition: "lead",
+				provider: "claude-lead/claude-opus-5",
+			},
+			{
+				role: "lead",
+				agentsRoot,
+				runPaseo: async (args) => {
+					calls.push(args);
+					return { agentId: FORKED };
+				},
+			},
+		);
+		assert.equal(result.mode, "auto");
+		assert.equal(calls.length, 2, "import, then the mode it could not carry");
+		assert.equal(calls[0][0], "import");
+		assert.deepEqual(calls[1], ["agent", "mode", FORKED, "auto"]);
+	});
+});
+
+test("a deliberate narrowing travels; pi gets no mode at all", async () => {
+	await withState(async ({ agentsRoot }) => {
+		const calls = [];
+		const planned = await forkAgent(
+			{
+				agentId: SOURCE,
+				reason: "split-load",
+				disposition: "planner",
+				scope: "docs/plan",
+				provider: "claude-peer/claude-opus-5",
+				modeId: "plan",
+			},
+			{ role: "lead", agentsRoot, runPaseo: async (args) => (calls.push(args), { agentId: FORKED }) },
+		);
+		assert.equal(planned.mode, "plan");
+		assert.deepEqual(calls[1], ["agent", "mode", FORKED, "plan"]);
+
+		// pi declares no modes (AvailableModes: []), so there is nothing to set
+		// and sending one would be an error rather than a safety measure.
+		const piCalls = [];
+		const pi = await forkAgent(
+			{
+				agentId: SOURCE,
+				reason: "change-host",
+				disposition: "lead",
+				provider: "pi-lead/Minnyat/gpt-5.6-sol",
+			},
+			{ role: "lead", agentsRoot, runPaseo: async (args) => (piCalls.push(args), { agentId: FORKED }) },
+		);
+		assert.equal(pi.mode, null);
+		assert.equal(piCalls.length, 1, "import only");
+
+		// And a mode asked for on a pi route is refused before anything is copied.
+		await assert.rejects(
+			forkAgent(
+				{
+					agentId: SOURCE,
+					reason: "change-host",
+					disposition: "lead",
+					provider: "pi-lead/Minnyat/gpt-5.6-sol",
+					modeId: "auto",
+				},
+				{ role: "lead", agentsRoot, runPaseo: async () => ({ agentId: FORKED }) },
+			),
+			(error) => error.code === "FORK_MODE_INVALID",
+		);
+		// bypassPermissions is never a seat mode, however deliberate the caller.
+		await assert.rejects(
+			forkAgent(
+				{
+					agentId: SOURCE,
+					reason: "change-host",
+					disposition: "lead",
+					provider: "claude-lead/claude-opus-5",
+					modeId: "bypassPermissions",
+				},
+				{ role: "lead", agentsRoot, runPaseo: async () => ({ agentId: FORKED }) },
+			),
+			(error) => error.code === "FORK_MODE_INVALID",
+		);
+	});
+});
+
+test("a fork that cannot be moved off default is deleted, not handed over", async () => {
+	await withState(async ({ agentsRoot }) => {
+		const calls = [];
+		await assert.rejects(
+			forkAgent(
+				{
+					agentId: SOURCE,
+					reason: "change-host",
+					disposition: "lead",
+					provider: "claude-lead/claude-opus-5",
+				},
+				{
+					role: "lead",
+					agentsRoot,
+					runPaseo: async (args) => {
+						calls.push(args);
+						if (args[0] === "agent") throw new Error("auto mode unavailable for this model");
+						return { agentId: FORKED };
+					},
+				},
+			),
+			(error) =>
+				error.code === "FORK_MODE_UNSET" &&
+				/deleted/.test(error.message) &&
+				// The default mode was never chosen by the caller, so the way out
+				// when auto does not exist for this model is named.
+				/explicit modeId/.test(error.message),
+		);
+		assert.deepEqual(calls[2], ["delete", FORKED], "the half-made fork does not survive");
+	});
+});
+
+test("verify refuses a claude fork still sitting on default", async () => {
+	await withState(async ({ agentsRoot, write }) => {
+		write(FORKED, {
+			provider: "claude-lead/claude-opus-5",
+			// The creation-time snapshot is not a mode source either: this one
+			// says "auto" while the agent actually runs "default".
+			persistence: { metadata: { modeId: "auto" } },
+			runtimeInfo: { sessionId: "s", model: "claude-opus-5", modeId: "default" },
+		});
+		const calls = [];
+		const result = await verifyFork(
+			{ agentId: FORKED, model: "claude-opus-5" },
+			{ role: "lead", agentsRoot, runPaseo: async (args) => (calls.push(args), {}) },
+		);
+		assert.equal(result.ok, false);
+		assert.equal(result.code, "FORK_MODE_UNROUTABLE");
+		assert.equal(result.mode, "default");
+		assert.equal(result.removed, true);
+		assert.deepEqual(calls, [["delete", FORKED]]);
+	});
+});
+
+test("verify refuses bypassPermissions even when the caller asked for it", async () => {
+	await withState(async ({ agentsRoot, write }) => {
+		write(FORKED, {
+			provider: "claude-lead/claude-opus-5",
+			runtimeInfo: { sessionId: "s", model: "claude-opus-5", modeId: "bypassPermissions" },
+		});
+		const calls = [];
+		const result = await verifyFork(
+			{ agentId: FORKED, model: "claude-opus-5", modeId: "bypassPermissions" },
+			{ role: "lead", agentsRoot, runPaseo: async (args) => (calls.push(args), {}) },
+		);
+		assert.equal(result.ok, false);
+		assert.equal(result.code, "FORK_MODE_UNROUTABLE");
+		assert.equal(result.removed, true);
+		assert.deepEqual(calls, [["delete", FORKED]]);
+	});
+});
+
+test("verify accepts a claude fork on auto", async () => {
+	await withState(async ({ agentsRoot, write }) => {
+		write(FORKED, {
+			provider: "claude-lead/claude-opus-5",
+			runtimeInfo: { sessionId: "s", model: "claude-opus-5", modeId: "auto" },
+		});
+		const result = await verifyFork(
+			{ agentId: FORKED, model: "claude-opus-5" },
+			{ role: "lead", agentsRoot, runPaseo: async () => ({}) },
+		);
+		assert.equal(result.ok, true);
+		assert.equal(result.mode, "auto");
+		assert.equal(result.modeSource, "runtime");
+	});
+});
+
 console.log("team-fork tests passed");
