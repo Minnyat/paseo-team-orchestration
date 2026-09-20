@@ -5,7 +5,7 @@
  *   - shared locations (the prompts dir, the skills dir, mcp.json) only ever
  *     lose *named items* — never a whole directory or file another tool may
  *     also live in.
- *   - ~/.paseo-pi-team holds the permit audit log, an accountability record
+ *   - the pack's config directory holds the permit audit log, an accountability record
  *     of every allow/deny decision, so it survives uninstall unless --purge
  *     explicitly asks for it.
  *

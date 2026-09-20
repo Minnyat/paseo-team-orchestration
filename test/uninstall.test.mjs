@@ -66,7 +66,7 @@ function install() {
 		// indistinguishable from a skill the user wrote under the same name, and
 		// uninstall deliberately leaves those alone — so a fixture that skips it
 		// is not simulating an install, it is simulating a collision.
-		writeFileSync(join(claudeDir, "skills", name, SKILL_OWNER_MARKER), "paseo-pi-team\n");
+		writeFileSync(join(claudeDir, "skills", name, SKILL_OWNER_MARKER), "paseo-team-orchestration\n");
 	}
 	writeFileSync(join(teamScriptsDir(), "lib-common.mjs"), "// support");
 

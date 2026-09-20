@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// remote-paseo.mjs — remote-host executor for the paseo-pi-team role pack.
+// remote-paseo.mjs — remote-host executor for the paseo-team-orchestration role pack.
 //
 // The MCP server injected into a pi agent ALWAYS points at that agent's LOCAL
 // daemon (verified against Paseo 0.2.5 source: daemon.mcp.injectIntoAgents
@@ -45,8 +45,9 @@
 //                    [--prompt <text> | --prompt-file <file>] [--wait]
 //
 // Env:
-//   PASEO_TEAM_HOME         config dir (default ~/.paseo-pi-team) — same as
-//                           model-routing.mjs / preflight.mjs
+//   PASEO_TEAM_HOME         config dir (default ~/.paseo-team-orchestration,
+//                           or ~/.paseo-pi-team when that legacy directory
+//                           exists) — same as model-routing.mjs / preflight.mjs
 //   PASEO_TEAM_PASEO_EXEC   test/debug hook: full command line of a
 //                           paseo-compatible executable (e.g. "node ./fake.mjs")
 //
@@ -937,7 +938,7 @@ Commands:
                    [--prompt <text> | --prompt-file <file>] [--wait]
 
 Common:
-  --cluster <path>   cluster routing config (default ~/.paseo-pi-team/cluster-routing.local.json)
+  --cluster <path>   cluster routing config (default <config dir>/cluster-routing.local.json)
   --dry-run          print the paseo argv (endpoint redacted) without executing
   --help             this help
 

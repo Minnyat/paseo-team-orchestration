@@ -1,5 +1,5 @@
 // model-routing.mjs — stateless logical-model-class resolver for the
-// paseo-pi-team role pack.
+// paseo-team-orchestration role pack.
 //
 // What this module is ALLOWED to do:
 //   - read + validate a host-local routing config;
@@ -275,7 +275,8 @@ export function loadRoutingConfig(path = defaultRoutingConfigPath()) {
 // Cluster routing contract (controller-local)
 // ---------------------------------------------------------------------------
 //
-// ~/.paseo-pi-team/cluster-routing.local.json is the SINGLE controller-local
+// cluster-routing.local.json, in the pack's config directory, is the SINGLE
+// controller-local
 // route file: one object describing every host in the cluster, each with its
 // own connection info, capabilities, concurrency limits and per-class routes.
 // It never holds endpoint VALUES (env-var names only) and is never committed.

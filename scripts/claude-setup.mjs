@@ -1104,7 +1104,7 @@ export function installSkills(env = process.env) {
 			}
 			rmSync(destination, { recursive: true, force: true });
 			cpSync(source.path, destination, { recursive: true });
-			writeFileSync(join(destination, SKILL_OWNER_MARKER), "paseo-pi-team\n");
+			writeFileSync(join(destination, SKILL_OWNER_MARKER), "paseo-team-orchestration\n");
 			installed.push(source.name);
 		}
 	} catch (error) {

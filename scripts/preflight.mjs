@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// preflight.mjs — host readiness check for the paseo-pi-team role pack.
+// preflight.mjs — host readiness check for the paseo-team-orchestration role pack.
 //
 // Usage:
 //   node scripts/preflight.mjs [--json] [--strict] [--host-id <id>] [--cluster <path>]

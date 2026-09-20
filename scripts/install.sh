@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — install the paseo-pi-team role pack into the current user's pi config.
+# install.sh — install the paseo-team-orchestration role pack into the current user's pi config.
 #
 # Copies:
 #   extensions/paseo-team-policy.ts -> ~/.pi/agent/extensions/   (pi adapter)
@@ -81,11 +81,37 @@ mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
 # live here; create it so the documented copy commands work out of the box.
 #
 # Resolved the same way every reader resolves it — PST_TEAM_CONFIG_DIR first,
-# then the PASEO_TEAM_HOME legacy alias, then the default. Creating and
-# advertising $HOME/.paseo-pi-team unconditionally would name a directory no
-# reader uses on a host with either override set: the same mistake preflight
-# used to make in the other direction.
-TEAM_CONFIG_DIR="${PST_TEAM_CONFIG_DIR:-${PASEO_TEAM_HOME:-$HOME/.paseo-pi-team}}"
+# then the PASEO_TEAM_HOME legacy alias, then an existing legacy directory,
+# then the current name. Creating and advertising one literal unconditionally
+# would name a directory no reader uses on a host with an override set: the
+# same mistake preflight used to make in the other direction. Keep this ladder
+# identical to teamConfigDir() in lib-common.mjs; installer-contract asserts
+# that both halves name the same four rungs.
+# >>> team-config-dir ladder — installer-contract extracts and EXECUTES this block
+team_config_trim() {
+  # The readers call .trim() before testing truthiness. Shell does not: a
+  # whitespace-only variable is set and non-empty, so without this the
+  # installer would mkdir a directory literally named "   " while every JS
+  # reader trimmed it to "" and fell through to the home default. Installer
+  # writing one place and readers reading another is the single failure this
+  # ladder exists to prevent, so the trim is part of the ladder, not a detail.
+  local value=$1
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf %s "$value"
+}
+team_config_override=$(team_config_trim "${PST_TEAM_CONFIG_DIR:-}")
+team_config_legacy_env=$(team_config_trim "${PASEO_TEAM_HOME:-}")
+if [ -n "$team_config_override" ]; then
+  TEAM_CONFIG_DIR="$team_config_override"
+elif [ -n "$team_config_legacy_env" ]; then
+  TEAM_CONFIG_DIR="$team_config_legacy_env"
+elif [ -d "$HOME/.paseo-pi-team" ]; then
+  TEAM_CONFIG_DIR="$HOME/.paseo-pi-team"
+else
+  TEAM_CONFIG_DIR="$HOME/.paseo-team-orchestration"
+fi
+# <<< team-config-dir ladder
 mkdir -p "$TEAM_CONFIG_DIR"
 
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
