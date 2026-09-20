@@ -53,11 +53,13 @@ for (const installer of ["install.sh", "install.ps1"]) {
 // first version of this check did.
 {
   const sh = readFileSync(join(root, "scripts", "install.sh"), "utf8");
-  // Extract the whole ladder, not one line. The resolver is four rungs across
-  // an if/elif/else block now, and grabbing a single `TEAM_CONFIG_DIR=` line
-  // would capture the first rung and then "verify" a resolver whose other
-  // three branches never ran.
-  const assignment = /^if \[ -n "\$\{PST_TEAM_CONFIG_DIR[\s\S]*?^fi$/m.exec(sh)?.[0];
+  // Extract between explicit markers, not by guessing the shell's shape. The
+  // resolver is a trim helper plus four rungs now; a regex anchored on `if [`
+  // or on one `TEAM_CONFIG_DIR=` line captures a fragment and then "verifies" a
+  // ladder whose other branches never ran — and stops covering it silently the
+  // next time the block is rewritten, which is the failure mode that matters
+  // for a check nobody re-reads.
+  const assignment = /^# >>> team-config-dir ladder\b[\s\S]*?^# <<< team-config-dir ladder$/m.exec(sh)?.[0];
   assert.ok(assignment, "install.sh must resolve the config dir into TEAM_CONFIG_DIR");
   // Executed on POSIX only. install.sh is the POSIX installer — Windows runs
   // install.ps1 — and the env below is replaced rather than merged so the
@@ -66,7 +68,11 @@ for (const installer of ["install.sh", "install.ps1"]) {
   // the cross-platform half.
   const runnable = process.platform !== "win32";
   const resolve = (vars, home = "/home/fake") =>
-    execFileSync("bash", ["-c", `${assignment}; printf %s "$TEAM_CONFIG_DIR"`], {
+    // Newline, not `; `. The extracted block ends on a marker COMMENT, so a
+    // semicolon puts printf on that commented line and the probe reads back an
+    // empty string — a rig that reports every rung as "" and looks like the
+    // installer is broken when it is the harness that is.
+    execFileSync("bash", ["-c", `${assignment}\nprintf %s "$TEAM_CONFIG_DIR"`], {
       encoding: "utf8",
       env: { HOME: home, PST_TEAM_CONFIG_DIR: "", PASEO_TEAM_HOME: "", ...vars },
     });
@@ -106,6 +112,24 @@ for (const installer of ["install.sh", "install.ps1"]) {
     "/srv/team",
     "the documented override still beats an existing legacy directory",
   );
+
+  // A whitespace-only override is the one value where shell and JS disagree by
+  // default: `[ -n "   " ]` is true, `"   ".trim()` is falsy. Left alone, the
+  // installer mkdir'd a directory literally named "   " and every reader
+  // resolved somewhere else — the installer writing where nothing reads, which
+  // is this block's whole reason to exist, in its purest form.
+  for (const blank of ["   ", "\t", ""]) {
+    assert.equal(
+      resolve({ PST_TEAM_CONFIG_DIR: blank }, clean),
+      join(clean, ".paseo-team-orchestration"),
+      `a blank override (${JSON.stringify(blank)}) is not a configured value`,
+    );
+    assert.equal(
+      resolve({ PASEO_TEAM_HOME: blank }, clean),
+      join(clean, ".paseo-team-orchestration"),
+      `a blank legacy alias (${JSON.stringify(blank)}) is not one either`,
+    );
+  }
   }
 
   // Whatever it resolved is what gets created and advertised — not a literal.
@@ -116,11 +140,19 @@ for (const installer of ["install.sh", "install.ps1"]) {
   // PowerShell is not on every runner, so this half stays shape-based — but it
   // is the ASSIGNMENT that is checked, not a mention anywhere in the file.
   const ps = readFileSync(join(root, "scripts", "install.ps1"), "utf8");
-  const assignment = /\$teamConfigDir\s*=[\s\S]*?\n\n/.exec(ps)?.[0] ?? "";
+  // Same markers as install.sh, for the same reason: the previous regex stopped
+  // at the `$teamConfigDir =` line, and once the env reads moved up into their
+  // own trimmed variables that line no longer mentioned either override — so
+  // the check failed while the installer was correct, which is how a shape
+  // check earns distrust and then gets deleted.
+  const assignment =
+    /^# >>> team-config-dir ladder\b[\s\S]*?^# <<< team-config-dir ladder$/m.exec(ps)?.[0] ?? "";
+  assert.ok(assignment, "install.ps1 must carry the marked config-dir ladder");
   assert.match(assignment, /\$env:PST_TEAM_CONFIG_DIR/, "install.ps1: honours the documented override");
   assert.match(assignment, /\$env:PASEO_TEAM_HOME/, "install.ps1: honours the legacy alias");
   assert.match(assignment, /Test-Path \$teamLegacyDir/, "install.ps1: probes for the legacy directory");
   assert.match(assignment, /\.paseo-team-orchestration/, "install.ps1: defaults to the current name");
+  assert.match(assignment, /\.Trim\(\)/, "install.ps1: trims before testing truthiness, as the readers do");
   assert.match(ps, /-Path \$teamConfigDir/, "install.ps1: creates what it resolved");
   assert.doesNotMatch(ps, /~\/\.paseo-pi-team\//);
 }

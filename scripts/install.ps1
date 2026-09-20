@@ -72,11 +72,18 @@ New-Item -ItemType Directory -Force -Path $extDir, $promptDir, $skillsDir | Out-
 # the PASEO_TEAM_HOME legacy alias, then the default): advertising the default
 # unconditionally would name a directory no reader uses on a host with either
 # override set.
+# >>> team-config-dir ladder — installer-contract extracts and shape-checks this block
+# Trimmed first, for the same reason install.sh trims: PowerShell treats a
+# whitespace-only string as truthy, so an override of "   " would be installed
+# into while every reader trims it away and resolves somewhere else.
 $teamLegacyDir = Join-Path $env:USERPROFILE ".paseo-pi-team"
-$teamConfigDir = if ($env:PST_TEAM_CONFIG_DIR) { $env:PST_TEAM_CONFIG_DIR }
-                 elseif ($env:PASEO_TEAM_HOME) { $env:PASEO_TEAM_HOME }
+$teamOverride = if ($env:PST_TEAM_CONFIG_DIR) { $env:PST_TEAM_CONFIG_DIR.Trim() } else { "" }
+$teamLegacyEnv = if ($env:PASEO_TEAM_HOME) { $env:PASEO_TEAM_HOME.Trim() } else { "" }
+$teamConfigDir = if ($teamOverride) { $teamOverride }
+                 elseif ($teamLegacyEnv) { $teamLegacyEnv }
                  elseif (Test-Path $teamLegacyDir) { $teamLegacyDir }
                  else { Join-Path $env:USERPROFILE ".paseo-team-orchestration" }
+# <<< team-config-dir ladder
 New-Item -ItemType Directory -Force -Path $teamConfigDir | Out-Null
 
 Copy-Item (Join-Path $RolePackRoot "extensions\paseo-team-policy.ts") (Join-Path $extDir "paseo-team-policy.ts") -Force

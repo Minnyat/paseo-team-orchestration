@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { installDrift } from "../cli/lib/install-drift.mjs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	applyNextSteps,
@@ -48,6 +48,7 @@ import {
 	TEAM_MCP_SERVER_NAME,
 } from "../scripts/claude-setup.mjs";
 import { seatLedgerPath } from "../scripts/seat-profiles.mjs";
+import { teamConfigDir } from "../scripts/lib-common.mjs";
 
 const home = mkdtempSync(join(tmpdir(), "paseo-claude-setup-"));
 const claudeDir = join(home, ".claude");
@@ -1147,7 +1148,27 @@ function applySandbox(tag) {
 		join(dirA, "claude-provider-ledger.json"),
 		"the documented name wins, exactly as it does in lib-common",
 	);
-	assert.match(claudeProviderLedgerPath({}), /\.paseo-pi-team[\/\\]claude-provider-ledger\.json$/);
+	// Unconfigured, the ledger follows whatever teamConfigDir() resolves — which
+	// is one of TWO names now, decided by whether this host carries the pack's
+	// legacy directory. Pinning either literal makes the assertion fail for being
+	// right: it passed on a developer machine holding ~/.paseo-pi-team and failed
+	// on a clean CI runner, which is the exact asymmetry the resolver exists to
+	// absorb. Assert the rule, and assert the delegation while here.
+	assert.equal(
+		claudeProviderLedgerPath({}),
+		join(teamConfigDir({}), "claude-provider-ledger.json"),
+		"the unconfigured ledger path delegates to the shared resolver",
+	);
+	assert.match(
+		claudeProviderLedgerPath({}),
+		/[\/\\]\.(paseo-team-orchestration|paseo-pi-team)[\/\\]claude-provider-ledger\.json$/,
+		"and lands in the pack's config directory under one of its two names",
+	);
+	assert.equal(
+		claudeProviderLedgerPath({}),
+		join(homedir(), existsSync(join(homedir(), ".paseo-pi-team")) ? ".paseo-pi-team" : ".paseo-team-orchestration", "claude-provider-ledger.json"),
+		"and which of the two is not a guess",
+	);
 }
 
 rmSync(home, { recursive: true, force: true });
