@@ -232,7 +232,21 @@ export const PASEO_CLIENT_CONVENTIONAL_ENTRIES = [
  *   Error, so a bad override can never be silently ignored.
  */
 export function resolvePaseoExec(onInvalidOverride) {
-	const override = process.env.PASEO_TEAM_PASEO_EXEC?.trim();
+	const raw = process.env.PASEO_TEAM_PASEO_EXEC;
+	const override = raw?.trim();
+	// Set-but-blank is checked BEFORE the truthiness test, because it cannot be
+	// caught after it. "   ".trim() is "", "" is falsy, so the whole override
+	// branch was skipped and resolution fell through to a bare "paseo" — the
+	// one outcome the doc comment above promises cannot happen. On a host with
+	// a healthy daemon that fallback SUCCEEDS, so the operator who mistyped the
+	// override sees a normal answer from a binary they did not choose, and the
+	// "is set but empty" message below was unreachable for the value most
+	// likely to produce it.
+	if (raw !== undefined && override === "") {
+		const invalid = "is set but empty";
+		if (onInvalidOverride) onInvalidOverride(invalid);
+		throw new Error(`PASEO_TEAM_PASEO_EXEC ${invalid}`);
+	}
 	if (override) {
 		const { parts, unterminated } = splitCommandLine(override);
 		const invalid = unterminated

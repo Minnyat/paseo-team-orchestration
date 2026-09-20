@@ -174,7 +174,20 @@ assert.throws(() => splitCommandLine(["paseo"]), TypeError);
   assert.throws(() => resolvePaseoExec(onInvalid), /mapped: is set but empty/);
   process.env.PASEO_TEAM_PASEO_EXEC = '"unclosed';
   assert.throws(() => resolvePaseoExec(onInvalid), /mapped: has an unterminated quote/);
-  assert.deepEqual(seen, ["is set but empty", "has an unterminated quote"]);
+  // Whitespace only. This is the value an operator actually produces — a
+  // trailing space, a half-deleted line — and it used to resolve to a bare
+  // "paseo", which on a host with a running daemon answers normally from a
+  // binary nobody chose. Both spellings of blank must fail the same way.
+  process.env.PASEO_TEAM_PASEO_EXEC = "   ";
+  assert.throws(() => resolvePaseoExec(onInvalid), /mapped: is set but empty/);
+  process.env.PASEO_TEAM_PASEO_EXEC = "";
+  assert.throws(() => resolvePaseoExec(onInvalid), /mapped: is set but empty/);
+  assert.deepEqual(seen, [
+    "is set but empty",
+    "has an unterminated quote",
+    "is set but empty",
+    "is set but empty",
+  ]);
 
   // Without a mapper it still throws rather than returning something usable.
   assert.throws(() => resolvePaseoExec(), /PASEO_TEAM_PASEO_EXEC/);
