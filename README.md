@@ -1,6 +1,6 @@
-# paseo-pi-team
+# paseo-team-orchestration
 
-[![ci](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml/badge.svg)](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml)
+[![ci](https://github.com/Minnyat/paseo-team-orchestration/actions/workflows/ci.yml/badge.svg)](https://github.com/Minnyat/paseo-team-orchestration/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A role pack that runs directly on **Paseo**, with the same three roles served
@@ -25,10 +25,10 @@ registry, so every install below names the GitHub repo rather than a package.
 
 ```bash
 # run it once straight from GitHub — nothing to clone, nothing installed
-npx --package github:Minnyat/paseo-pi-team pteam status
+npx --package github:Minnyat/paseo-team-orchestration pteam status
 
 # or install it globally — puts both `pteam` and `paseo-team` on your PATH
-npm install -g github:Minnyat/paseo-pi-team
+npm install -g github:Minnyat/paseo-team-orchestration
 pteam web --open                         # opens http://127.0.0.1:PORT/#token=...
 ```
 
@@ -44,7 +44,7 @@ Full CLI/WebUI reference: [CLI and WebUI](#cli-and-webui) below.
 ## Structure
 
 ```text
-paseo-pi-team/
+paseo-team-orchestration/
 ├── README.md
 ├── LICENSE                             # MIT
 ├── package.json / package-lock.json    # dev dependency pins + npm test/typecheck

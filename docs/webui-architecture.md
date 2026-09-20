@@ -1,6 +1,6 @@
 # WebUI architecture — CLI là nguồn sự thật
 
-Thiết kế lớp WebUI của `paseo-pi-team`. WebUI **không phải** một ứng dụng độc
+Thiết kế lớp WebUI của `paseo-team-orchestration`. WebUI **không phải** một ứng dụng độc
 lập: nó là phần mở rộng cài thêm cho CLI `paseo-team`, và mọi thao tác đọc/ghi
 đều đi qua CLI đó.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — install the paseo-pi-team role pack into the current user's pi config.
+# install.sh — install the paseo-team-orchestration role pack into the current user's pi config.
 #
 # Copies:
 #   extensions/paseo-team-policy.ts -> ~/.pi/agent/extensions/   (pi adapter)

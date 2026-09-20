@@ -34,7 +34,7 @@ assert.equal(pickLatestTag(""), null, "no tags at all");
 assert.equal(pickLatestTag("sha\trefs/tags/nightly"), null, "only non-release tags -> null");
 
 // --- repoSlug ----------------------------------------------------------------
-assert.equal(repoSlug({ repository: { url: "github:Minnyat/paseo-pi-team" } }), "Minnyat/paseo-pi-team");
+assert.equal(repoSlug({ repository: { url: "github:Minnyat/paseo-team-orchestration" } }), "Minnyat/paseo-team-orchestration");
 assert.equal(repoSlug({ repository: { url: "git+https://github.com/a/b.git" } }), "a/b");
 assert.equal(repoSlug({ repository: { url: "https://github.com/a/b" } }), "a/b");
 assert.equal(repoSlug({ repository: { url: "git@github.com:a/b.git" } }), "a/b");

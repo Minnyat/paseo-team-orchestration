@@ -43,7 +43,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = "/home/user/paseo-pi-team";
+const ROOT = "/home/user/paseo-team-orchestration";
 const MUTATIONS = JSON.parse(readFileSync(process.argv[2], "utf8"));
 
 function run(cmd, args) {

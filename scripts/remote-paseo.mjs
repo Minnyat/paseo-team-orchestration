@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// remote-paseo.mjs — remote-host executor for the paseo-pi-team role pack.
+// remote-paseo.mjs — remote-host executor for the paseo-team-orchestration role pack.
 //
 // The MCP server injected into a pi agent ALWAYS points at that agent's LOCAL
 // daemon (verified against Paseo 0.2.5 source: daemon.mcp.injectIntoAgents

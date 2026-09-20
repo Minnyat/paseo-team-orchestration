@@ -1,5 +1,5 @@
 // model-routing.mjs — stateless logical-model-class resolver for the
-// paseo-pi-team role pack.
+// paseo-team-orchestration role pack.
 //
 // What this module is ALLOWED to do:
 //   - read + validate a host-local routing config;

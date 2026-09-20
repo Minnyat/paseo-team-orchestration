@@ -45,7 +45,16 @@ import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { isEntrypoint } from "./lib-common.mjs";
 
-/** Marker that makes the patch self-identifying, so re-running is a no-op. */
+/**
+ * Marker that makes the patch self-identifying, so re-running is a no-op.
+ *
+ * The string is frozen at the pack's former name on purpose. It is not a label
+ * we print — it is compared against bytes already written into every Paseo MCP
+ * dist file this pack has ever patched (see `source.includes(PATCH_MARKER)`
+ * below). Renaming it would make each of those files read as unpatched, so the
+ * next run would patch an already-patched file and `revert` would find nothing
+ * to undo. A rename here needs a migration that recognizes both strings.
+ */
 export const PATCH_MARKER = "paseo-pi-team:accept-newer-protocol";
 
 /** The two dist builds that carry the header check. */

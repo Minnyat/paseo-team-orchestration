@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * paseo-team.mjs — the CLI that owns every paseo-pi-team config path.
+ * paseo-team.mjs — the CLI that owns every paseo-team-orchestration config path.
  *
- * Everything paseo-pi-team configures is read/written here and only here; the
+ * Everything paseo-team-orchestration configures is read/written here and only here; the
  * WebUI extension is a *client* that spawns this binary with a subcommand and
  * renders the JSON it returns. It never touches the filesystem itself.
  *
@@ -1117,7 +1117,7 @@ function cmdUninstall(argv) {
 		...report,
 		mode,
 		binary: mode === "global"
-			? "this CLI was installed globally by npm — run `npm rm -g paseo-pi-team` to remove the `pteam`/`paseo-team` binary itself"
+			? "this CLI was installed globally by npm — run `npm rm -g paseo-team-orchestration` to remove the `pteam`/`paseo-team` binary itself; an install made before the repo was renamed is registered under the old name, so `npm rm -g paseo-pi-team` is the one that works there"
 			: "this CLI runs from a git checkout — remove the checkout to delete the binary",
 	});
 }
