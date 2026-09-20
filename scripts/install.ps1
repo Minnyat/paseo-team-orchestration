@@ -72,9 +72,11 @@ New-Item -ItemType Directory -Force -Path $extDir, $promptDir, $skillsDir | Out-
 # the PASEO_TEAM_HOME legacy alias, then the default): advertising the default
 # unconditionally would name a directory no reader uses on a host with either
 # override set.
+$teamLegacyDir = Join-Path $env:USERPROFILE ".paseo-pi-team"
 $teamConfigDir = if ($env:PST_TEAM_CONFIG_DIR) { $env:PST_TEAM_CONFIG_DIR }
                  elseif ($env:PASEO_TEAM_HOME) { $env:PASEO_TEAM_HOME }
-                 else { Join-Path $env:USERPROFILE ".paseo-pi-team" }
+                 elseif (Test-Path $teamLegacyDir) { $teamLegacyDir }
+                 else { Join-Path $env:USERPROFILE ".paseo-team-orchestration" }
 New-Item -ItemType Directory -Force -Path $teamConfigDir | Out-Null
 
 Copy-Item (Join-Path $RolePackRoot "extensions\paseo-team-policy.ts") (Join-Path $extDir "paseo-team-policy.ts") -Force

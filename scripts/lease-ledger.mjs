@@ -35,6 +35,7 @@ import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, statSync,
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { teamConfigDir } from "./lib-common.mjs";
 
 /** Where the board lives when nothing overrides it. */
 export const LEDGER_FILE_NAME = "lease-ledger.jsonl";
@@ -68,7 +69,11 @@ function bad(code, message) {
 export function defaultLedgerPath() {
 	const override = process.env.PASEO_TEAM_LEASE_LEDGER?.trim();
 	if (override) return override;
-	return join(homedir(), ".paseo-pi-team", LEDGER_FILE_NAME);
+	// Delegated, not re-derived. This used to name the config directory by
+	// literal, so a host that set PST_TEAM_CONFIG_DIR moved every pack file
+	// EXCEPT the lease board — and the board is the one file whose whole job is
+	// to be the single place two writers meet. Two boards is no board.
+	return join(teamConfigDir(), LEDGER_FILE_NAME);
 }
 
 /**

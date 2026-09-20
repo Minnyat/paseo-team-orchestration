@@ -53,7 +53,11 @@ for (const installer of ["install.sh", "install.ps1"]) {
 // first version of this check did.
 {
   const sh = readFileSync(join(root, "scripts", "install.sh"), "utf8");
-  const assignment = /^TEAM_CONFIG_DIR=.*$/m.exec(sh)?.[0];
+  // Extract the whole ladder, not one line. The resolver is four rungs across
+  // an if/elif/else block now, and grabbing a single `TEAM_CONFIG_DIR=` line
+  // would capture the first rung and then "verify" a resolver whose other
+  // three branches never ran.
+  const assignment = /^if \[ -n "\$\{PST_TEAM_CONFIG_DIR[\s\S]*?^fi$/m.exec(sh)?.[0];
   assert.ok(assignment, "install.sh must resolve the config dir into TEAM_CONFIG_DIR");
   // Executed on POSIX only. install.sh is the POSIX installer — Windows runs
   // install.ps1 — and the env below is replaced rather than merged so the
@@ -61,10 +65,10 @@ for (const installer of ["install.sh", "install.ps1"]) {
   // Windows to resolve `bash` through. The shape check on install.ps1 below is
   // the cross-platform half.
   const runnable = process.platform !== "win32";
-  const resolve = (vars) =>
+  const resolve = (vars, home = "/home/fake") =>
     execFileSync("bash", ["-c", `${assignment}; printf %s "$TEAM_CONFIG_DIR"`], {
       encoding: "utf8",
-      env: { HOME: "/home/fake", PST_TEAM_CONFIG_DIR: "", PASEO_TEAM_HOME: "", ...vars },
+      env: { HOME: home, PST_TEAM_CONFIG_DIR: "", PASEO_TEAM_HOME: "", ...vars },
     });
   if (!runnable) {
     // Still assert the assignment references both names, so a Windows-only run
@@ -79,7 +83,29 @@ for (const installer of ["install.sh", "install.ps1"]) {
     "/srv/team",
     "the documented name wins, exactly as it does in lib-common",
   );
-  assert.equal(resolve({}), "/home/fake/.paseo-pi-team");
+  // The unconfigured rungs, against real directories: the probe is a `-d` test,
+  // so a fake HOME that does not exist can only ever prove one of the two.
+  const clean = mkdtempSync(join(tmpdir(), "install-sh-clean-"));
+  const legacy = mkdtempSync(join(tmpdir(), "install-sh-legacy-"));
+  mkdirSync(join(legacy, ".paseo-pi-team"));
+  assert.equal(
+    resolve({}, clean),
+    join(clean, ".paseo-team-orchestration"),
+    "a new host is installed under the current name",
+  );
+  assert.equal(
+    resolve({}, legacy),
+    join(legacy, ".paseo-pi-team"),
+    "a host already installed under the old name keeps its state",
+  );
+  // Same four rungs, same order, as teamConfigDir() in lib-common. A shell
+  // ladder that drifts from the JS one installs into a directory the readers
+  // never look at, which is this whole block's reason to exist.
+  assert.equal(
+    resolve({ PST_TEAM_CONFIG_DIR: "/srv/team" }, legacy),
+    "/srv/team",
+    "the documented override still beats an existing legacy directory",
+  );
   }
 
   // Whatever it resolved is what gets created and advertised — not a literal.
@@ -93,6 +119,8 @@ for (const installer of ["install.sh", "install.ps1"]) {
   const assignment = /\$teamConfigDir\s*=[\s\S]*?\n\n/.exec(ps)?.[0] ?? "";
   assert.match(assignment, /\$env:PST_TEAM_CONFIG_DIR/, "install.ps1: honours the documented override");
   assert.match(assignment, /\$env:PASEO_TEAM_HOME/, "install.ps1: honours the legacy alias");
+  assert.match(assignment, /Test-Path \$teamLegacyDir/, "install.ps1: probes for the legacy directory");
+  assert.match(assignment, /\.paseo-team-orchestration/, "install.ps1: defaults to the current name");
   assert.match(ps, /-Path \$teamConfigDir/, "install.ps1: creates what it resolved");
   assert.doesNotMatch(ps, /~\/\.paseo-pi-team\//);
 }

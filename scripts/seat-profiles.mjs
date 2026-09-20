@@ -27,6 +27,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { teamConfigDir } from "./lib-common.mjs";
 import {
 	ROLE_PROVIDERS,
 	RUNTIME_FAMILIES,
@@ -130,9 +131,14 @@ export const SEAT_LEDGER_FILENAME = "seat-providers.json";
  * something this module resolves itself: a second resolution of "where does
  * pack config live" is a second thing that can point at the user's real home
  * while the rest of a test run is sandboxed.
+ *
+ * The no-argument default delegates to that same resolver rather than naming a
+ * directory by literal, so the env overrides and the legacy-directory fallback
+ * reach this file too. `home` stays a parameter so a sandboxed run still steers
+ * it without touching the real home.
  */
 export function defaultTeamDir(home = homedir()) {
-	return join(home, ".paseo-pi-team");
+	return teamConfigDir(process.env, home);
 }
 
 export function seatsPath(dir = defaultTeamDir()) {

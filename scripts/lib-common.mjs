@@ -343,13 +343,28 @@ export function paseoHomeDir(env = process.env) {
  * and `seat-profiles.mjs` document; `PASEO_TEAM_HOME` is still honoured so a
  * host configured the old way keeps working — everywhere, now, rather than in
  * half the commands.
+ *
+ * The unconfigured default is two names for the same reason. The pack used to
+ * be called paseo-pi-team, and a host installed under that name holds the only
+ * copy of its routing files, seat ledger, permit log and provider env — moving
+ * it would stop a daemon that loads that env, so an existing legacy directory
+ * keeps winning forever. A host that has none gets the current name instead,
+ * so the directory a NEW machine creates is not already wrong on the day it is
+ * created. When both exist the legacy one still wins: whichever holds the
+ * state is the one the rest of the pack has been reading.
+ *
+ * `home` is a parameter, not a call to `homedir()` inside the branch, because
+ * the branch is the part worth testing and `homedir()` cannot be steered by
+ * `$HOME` on Windows, where this suite also runs.
  */
-export function teamConfigDir(env = process.env) {
-	return (
-		env.PST_TEAM_CONFIG_DIR?.trim() ||
-		env.PASEO_TEAM_HOME?.trim() ||
-		join(homedir(), ".paseo-pi-team")
-	);
+export const TEAM_CONFIG_DIR_NAME = ".paseo-team-orchestration";
+export const LEGACY_TEAM_CONFIG_DIR_NAME = ".paseo-pi-team";
+
+export function teamConfigDir(env = process.env, home = homedir()) {
+	const configured = env.PST_TEAM_CONFIG_DIR?.trim() || env.PASEO_TEAM_HOME?.trim();
+	if (configured) return configured;
+	const legacy = join(home, LEGACY_TEAM_CONFIG_DIR_NAME);
+	return existsSync(legacy) ? legacy : join(home, TEAM_CONFIG_DIR_NAME);
 }
 
 /**

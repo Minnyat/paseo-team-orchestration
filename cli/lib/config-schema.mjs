@@ -24,6 +24,7 @@
 // Claude runtime family landed — so the routing form could not select any
 // claude-* role provider even though the daemon had them registered. Import,
 // never re-type; test/config-schema.test.mjs locks the two together.
+import { join } from "node:path";
 import {
 	MODEL_CLASSES,
 	ROLE_PROVIDERS,
@@ -40,6 +41,16 @@ import {
 	SEATS_SEED,
 	capabilitiesByBase,
 } from "../../scripts/seat-profiles.mjs";
+import { teamConfigDir } from "../../scripts/lib-common.mjs";
+
+/**
+ * Seeded from the resolved config directory, not from a `~/...` literal. The
+ * literal was the pack's old directory name spelled out, so a host that set
+ * `PST_TEAM_CONFIG_DIR` — or a new host that never had the old directory —
+ * was offered a key file in a directory nothing else reads, and the daemon
+ * came up without a key. It is only a seed; the field stays editable.
+ */
+const PROVIDER_KEY_FILE_SEED = join(teamConfigDir(), "pi-provider.env");
 
 /**
  * Fallback list for `thinking`: the union of every family's levels. A renderer
@@ -456,7 +467,7 @@ export const CONFIG_SCHEMAS = {
 							seed: {
 								api: "openai-completions",
 								keyEnv: "CODING_API_KEY",
-								keyFile: "~/.paseo-pi-team/pi-provider.env",
+								keyFile: PROVIDER_KEY_FILE_SEED,
 								probe: true,
 								concurrency: 5,
 								contextWindow: 200000,

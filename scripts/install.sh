@@ -81,11 +81,21 @@ mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
 # live here; create it so the documented copy commands work out of the box.
 #
 # Resolved the same way every reader resolves it — PST_TEAM_CONFIG_DIR first,
-# then the PASEO_TEAM_HOME legacy alias, then the default. Creating and
-# advertising $HOME/.paseo-pi-team unconditionally would name a directory no
-# reader uses on a host with either override set: the same mistake preflight
-# used to make in the other direction.
-TEAM_CONFIG_DIR="${PST_TEAM_CONFIG_DIR:-${PASEO_TEAM_HOME:-$HOME/.paseo-pi-team}}"
+# then the PASEO_TEAM_HOME legacy alias, then an existing legacy directory,
+# then the current name. Creating and advertising one literal unconditionally
+# would name a directory no reader uses on a host with an override set: the
+# same mistake preflight used to make in the other direction. Keep this ladder
+# identical to teamConfigDir() in lib-common.mjs; installer-contract asserts
+# that both halves name the same four rungs.
+if [ -n "${PST_TEAM_CONFIG_DIR:-}" ]; then
+  TEAM_CONFIG_DIR="$PST_TEAM_CONFIG_DIR"
+elif [ -n "${PASEO_TEAM_HOME:-}" ]; then
+  TEAM_CONFIG_DIR="$PASEO_TEAM_HOME"
+elif [ -d "$HOME/.paseo-pi-team" ]; then
+  TEAM_CONFIG_DIR="$HOME/.paseo-pi-team"
+else
+  TEAM_CONFIG_DIR="$HOME/.paseo-team-orchestration"
+fi
 mkdir -p "$TEAM_CONFIG_DIR"
 
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"

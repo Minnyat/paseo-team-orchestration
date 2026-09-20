@@ -8,7 +8,9 @@
  * and the WebUI can point at a throwaway HOME:
  *   PI_HOME               -> default ~/.pi
  *   PI_CODING_AGENT_DIR   -> default $PI_HOME/agent
- *   PST_TEAM_CONFIG_DIR   -> default ~/.paseo-pi-team (PASEO_TEAM_HOME also honoured)
+ *   PST_TEAM_CONFIG_DIR   -> default ~/.paseo-team-orchestration, or ~/.paseo-pi-team
+ *                            when that legacy directory already exists
+ *                            (PASEO_TEAM_HOME also honoured)
  *   PASEO_CONFIG_JSON     -> default ~/.paseo/config.json
  */
 

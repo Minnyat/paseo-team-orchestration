@@ -2,8 +2,8 @@
 // six near-identical private copies; the behaviours pinned here are the ones
 // that differed between those copies and are therefore easy to regress.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -296,6 +296,12 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
 	const cw = await import("../cli/lib/config-walker.mjs");
 	const routing = await import("../scripts/model-routing.mjs");
 	const hook = await import("../scripts/claude-hook.mjs");
+	// Both of these used to name the directory by literal instead of asking.
+	// lease-ledger was the worse of the two: a host that set the override moved
+	// every pack file EXCEPT the lease board, and the board is the one file
+	// whose entire job is to be the single place two writers meet.
+	const lease = await import("../scripts/lease-ledger.mjs");
+	const seats = await import("../scripts/seat-profiles.mjs");
 
 	const prevPst = process.env.PST_TEAM_CONFIG_DIR;
 	const prevHome = process.env.PASEO_TEAM_HOME;
@@ -318,6 +324,8 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
 			assert.equal(cw.teamConfigDir(), expected, `config-walker: ${why}`);
 			assert.equal(routing.defaultRoutingDir(), expected, `model-routing: ${why}`);
 			assert.equal(hook.teamHome(process.env), expected, `claude-hook: ${why}`);
+			assert.equal(lease.defaultLedgerPath(), join(expected, "lease-ledger.jsonl"), `lease-ledger: ${why}`);
+			assert.equal(seats.defaultTeamDir(), expected, `seat-profiles: ${why}`);
 			assert.equal(
 				routing.defaultClusterRoutingPath(),
 				join(expected, "cluster-routing.local.json"),
@@ -327,16 +335,84 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
 		// With neither set, all four fall back to the same default.
 		set(null, null);
 		const fallback = teamConfigDir();
-		assert.match(fallback, /\.paseo-pi-team$/);
+		// Which of the two names that is depends on the host, so assert the
+		// RULE rather than a literal: a developer machine carrying the legacy
+		// directory and a clean CI runner must both be correct here, and
+		// pinning either literal makes one of them fail for being right.
+		assert.equal(
+			fallback,
+			existsSync(join(homedir(), ".paseo-pi-team"))
+				? join(homedir(), ".paseo-pi-team")
+				: join(homedir(), ".paseo-team-orchestration"),
+			"the unconfigured default follows the legacy-directory rule",
+		);
 		assert.equal(cw.teamConfigDir(), fallback);
 		assert.equal(routing.defaultRoutingDir(), fallback);
 		assert.equal(hook.teamHome(process.env), fallback);
+		assert.equal(lease.defaultLedgerPath(), join(fallback, "lease-ledger.jsonl"));
+		assert.equal(seats.defaultTeamDir(), fallback);
 		// A blank value is not a configured value.
 		set("   ", null);
 		assert.equal(teamConfigDir(), fallback, "whitespace is not a path");
 	} finally {
 		set(prevPst ?? null, prevHome ?? null);
 	}
+}
+
+// --- the unconfigured default is two names, and which one is not a guess -----
+//
+// The pack was renamed. A host installed under the old name holds the only copy
+// of its routing files, seat ledger, permit log and provider env — and systemd
+// may be loading that env — so the legacy directory has to keep winning there
+// forever. A host that never had one must NOT be handed the old name, or every
+// machine installed from here on is born already wrong.
+//
+// `home` is injected rather than steered through $HOME because os.homedir()
+// ignores $HOME on Windows, where this suite also runs.
+{
+	const { teamConfigDir } = await import("../scripts/lib-common.mjs");
+
+	const withLegacy = mkdtempSync(join(tmpdir(), "pst-legacy-"));
+	mkdirSync(join(withLegacy, ".paseo-pi-team"));
+	const clean = mkdtempSync(join(tmpdir(), "pst-clean-"));
+
+	assert.equal(
+		teamConfigDir({}, clean),
+		join(clean, ".paseo-team-orchestration"),
+		"a host with no legacy directory gets the current name",
+	);
+	assert.equal(
+		teamConfigDir({}, withLegacy),
+		join(withLegacy, ".paseo-pi-team"),
+		"an installed host keeps the directory that holds its state",
+	);
+
+	// Both present is not a tie to break by recency: the legacy one is the one
+	// every other reader has been writing to, so it still wins.
+	mkdirSync(join(withLegacy, ".paseo-team-orchestration"));
+	assert.equal(
+		teamConfigDir({}, withLegacy),
+		join(withLegacy, ".paseo-pi-team"),
+		"with both present the directory holding the state still wins",
+	);
+
+	// An explicit override outranks the probe entirely — otherwise a host that
+	// pointed the pack somewhere else would silently get its state back home.
+	assert.equal(
+		teamConfigDir({ PST_TEAM_CONFIG_DIR: "/tmp/pst-explicit" }, withLegacy),
+		"/tmp/pst-explicit",
+		"the documented override beats an existing legacy directory",
+	);
+	assert.equal(
+		teamConfigDir({ PASEO_TEAM_HOME: "/tmp/pst-legacy-env" }, withLegacy),
+		"/tmp/pst-legacy-env",
+		"the legacy alias beats an existing legacy directory too",
+	);
+	assert.equal(
+		teamConfigDir({ PST_TEAM_CONFIG_DIR: "   " }, clean),
+		join(clean, ".paseo-team-orchestration"),
+		"whitespace is not a configured value here either",
+	);
 }
 
 // --- Paseo's own home is one answer too --------------------------------------

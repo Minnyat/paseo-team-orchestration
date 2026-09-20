@@ -567,7 +567,7 @@ const DOC_ENV = [
 	{ key: "PASEO_PI_ROLE", scope: "per-provider", where: "Paseo config agents.providers.<name>.env", purpose: "role selection (supervisor|lead|peer)" },
 	{ key: "PASEO_TEAM_LEAD_WRITE", scope: "host", where: "machine env", purpose: "grant Lead write/edit tools ('1' to enable)" },
 	{ key: "PASEO_TEAM_EXTRA_TOOLS", scope: "host", where: "machine env", purpose: "comma-separated extra tools per profile" },
-	{ key: "PST_TEAM_CONFIG_DIR", scope: "host", where: "machine env", purpose: "override the pack's config directory (routing files, seat ledger, permit log, Claude session state). Default ~/.paseo-pi-team; PASEO_TEAM_HOME is honoured as a legacy alias and loses to this one" },
+	{ key: "PST_TEAM_CONFIG_DIR", scope: "host", where: "machine env", purpose: "override the pack's config directory (routing files, seat ledger, permit log, Claude session state). Default ~/.paseo-team-orchestration, or ~/.paseo-pi-team when that legacy directory already exists so an installed host keeps its state; PASEO_TEAM_HOME is honoured as a legacy alias and loses to this one" },
 	{ key: "PASEO_TEAM_HOME", scope: "host", where: "machine env", purpose: "legacy alias for PST_TEAM_CONFIG_DIR — still read, and only used when PST_TEAM_CONFIG_DIR is unset" },
 	{ key: "PASEO_TEAM_PROMPTS_DIR", scope: "host", where: "machine env", purpose: "override prompts directory" },
 	{ key: "PASEO_TEAM_SCRIPTS_DIR", scope: "host", where: "machine env", purpose: "override support-scripts directory" },
@@ -1371,7 +1371,7 @@ usage:
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
   pteam install
-  pteam uninstall [--purge]                (remove what install wrote; --purge also deletes ~/.paseo-pi-team)
+  pteam uninstall [--purge]                (remove what install wrote; --purge also deletes the config dir that 'pteam env' resolves)
   pteam update [--check]                    (compare with the latest GitHub release tag)
 
 live plane (talks to the Paseo daemon):

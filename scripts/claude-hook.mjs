@@ -11,7 +11,7 @@
 //
 // The per-turn brief therefore cannot live in memory the way it does in the Pi
 // extension. It is written once per prompt to
-// ~/.paseo-pi-team/claude-sessions/<session>.json and re-read per tool call,
+// <config dir>/claude-sessions/<session>.json and re-read per tool call,
 // with the session transcript as a second, independent source when that file
 // is missing or stale. Both paths are fail-closed: no readable brief means a
 // read-only turn, exactly like an unbriefed Pi peer.
