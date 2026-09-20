@@ -180,7 +180,7 @@ plus a name and a set of capabilities from a catalog that lives in code
 (`scripts/seat-profiles.mjs`), materialized into an ordinary Paseo provider:
 
 ```jsonc
-// ~/.paseo-pi-team/seat-profiles.local.json — edited by hand or in the WebUI
+// ~/.paseo-team-orchestration/seat-profiles.local.json — edited by hand or in the WebUI
 { "version": 1, "seats": {
   "researcher": { "base": "claude-peer", "label": "Claude Peer (Researcher)",
                   "capabilities": ["web-research"] }
@@ -217,7 +217,7 @@ Four rules make this safe to expose in a browser:
   env knob (`lead-write`) cannot leave the static layer stripping the tool it
   just enabled.
 - **Generation never overwrites what it did not create.** `seats apply` keeps a
-  ledger (`~/.paseo-pi-team/seat-providers.json`) and touches only names in it;
+  ledger (`~/.paseo-team-orchestration/seat-providers.json`) and touches only names in it;
   a hand-written provider whose name collides is reported as `skipped`. One
   consequence: `pteam uninstall --purge` deletes that ledger, so any seat
   providers still in `~/.paseo/config.json` become unowned and must be removed
@@ -720,6 +720,26 @@ What the installers copy:
 | `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` and `~/.claude/skills/paseo-ocr-reviewer/` |
 | support scripts (see below) | `~/.pi/agent/extensions/paseo-team-scripts/` |
 
+### Where the pack's own config lives
+
+Routing files, the seat ledger, the permit audit log and the Claude session
+state live in one directory, resolved the same way by every reader and by both
+installers:
+
+```text
+PST_TEAM_CONFIG_DIR → PASEO_TEAM_HOME → an existing ~/.paseo-pi-team → ~/.paseo-team-orchestration
+```
+
+A fresh host gets `~/.paseo-team-orchestration`. A host installed before the
+rename keeps `~/.paseo-pi-team` forever — it holds the only copy of that host's
+state, and a daemon may be loading `pi-provider.env` out of it, so nothing
+migrates it and nothing should. Both present: the legacy one still wins, because
+it is the one everything has been writing to.
+
+`pteam env list` names the directory this host actually resolved. Paths written
+`~/.paseo-team-orchestration/...` below mean *that* directory — read them as
+`~/.paseo-pi-team/...` if you are on a host that predates the rename.
+
 `~/.claude/skills/` is the user's own directory, and the names this pack ships
 are ordinary English, so a skill already sitting there under one of those names
 may well be one the user wrote. Install refuses to overwrite such a directory —
@@ -728,7 +748,8 @@ reports the refused one as a missing skill, because from the Lead's point of
 view it is: the role prompt sends it to this pack's procedure and it would find
 somebody else's. Uninstall is the same rule in reverse; it removes only the
 directories the pack can prove it wrote, either by the `.paseo-pi-team` marker
-it leaves inside each one or by a `SKILL.md` byte-identical to the shipped copy
+it leaves inside each one (frozen at the pack's former name: installed copies
+are located by that exact filename, so renaming it would strand them) or by a `SKILL.md` byte-identical to the shipped copy
 (which is how installs from before the marker existed are still recognised).
 Edit an installed skill and it becomes yours, and the pack stops touching it.
 
@@ -920,7 +941,7 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
 1. Per host (layer 1, never committed): pi + credentials + `~/.pi/agent/models.json`
    when using a custom provider. pi has no model discovery, so that file IS the
    catalog. For an OpenAI-compatible endpoint, copy
-   `config/pi-models.example.json` → `~/.paseo-pi-team/pi-models.local.json` and
+   `config/pi-models.example.json` → `~/.paseo-team-orchestration/pi-models.local.json` and
    run `pteam models sync`: it probes every model each endpoint lists, writes only
    the ones that answer, and derives each model's `reasoning` flag from that
    answer rather than from its name (`--no-probe`, or `probe: false` on one
@@ -936,7 +957,7 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
    (`--dry-run`, `--no-refresh`) or fails, both commands say so and name the
    restart that finishes the job.
 2. Copy `config/model-routing.example.json` →
-   `~/.paseo-pi-team/model-routing.local.json` and fill in the host's REAL model
+   `~/.paseo-team-orchestration/model-routing.local.json` and fill in the host's REAL model
    IDs (5 classes: `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`,
    `REASONING_HIGH`, `REVIEW_HIGH`). `pteam models` lists what every role
    provider on the host actually offers, both runtime families at once;
@@ -944,7 +965,7 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
    options. The WebUI routing form suggests the same list inline and narrows
    the thinking levels to the family of the provider you picked.
 3. Cross-host: copy `config/cluster-routing.example.json` →
-   `~/.paseo-pi-team/cluster-routing.local.json` on the CONTROLLER — a single
+   `~/.paseo-team-orchestration/cluster-routing.local.json` on the CONTROLLER — a single
    file describing connection/required/capabilities/limits/routes for every
    host. Remote endpoints are referenced by **env var name** only, never by
    value. See [`docs/multi-host.md`](docs/multi-host.md). (The
@@ -1249,7 +1270,7 @@ Two different things are called "permission", and the UI keeps them apart:
 
 - **Runtime permit** — one tool call is blocked right now and a human has to
   answer: `paseo-team permits list|allow|deny`, delegating to `paseo permit`.
-  Every decision is appended to `~/.paseo-pi-team/permit-audit.jsonl` *before*
+  Every decision is appended to `~/.paseo-team-orchestration/permit-audit.jsonl` *before*
   the daemon is asked, so a decision that was made stays visible even if the
   delegate call then fails.
 - **Policy authority** — what a role may do at all: the allowlists in
@@ -1299,7 +1320,7 @@ shape of question for a fifteen-Peer project:
 Cost note, because it shapes the whole design: every `paseo` invocation costs
 ~3s of process startup on Windows regardless of the query. `paseo-team graph`
 therefore batches a whole snapshot per call, caches the spawn tree in
-`~/.paseo-pi-team/graph-cache.json` (`paseo ls` does not carry the parent link —
+`~/.paseo-team-orchestration/graph-cache.json` (`paseo ls` does not carry the parent link —
 only `inspect` does), and spends at most `--max-inspect` lookups per run. A cold
 cache fills over a few polls; a warm one answers in ~3.8s. Anything that could
 not be collected is reported in `degraded[]` rather than quietly missing.
@@ -1413,6 +1434,16 @@ PASEO_PI_ROLE=lead pi -e ./extensions/paseo-team-policy.ts -p "/team-tools"
   directs Peers.
 - Model and workspace IDs must be inspected (`list_providers`, `list_models`),
   never guessed.
+
+## Star history
+
+<a href="https://star-history.com/#Minnyat/paseo-team-orchestration&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Minnyat/paseo-team-orchestration&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Minnyat/paseo-team-orchestration&type=Date" />
+    <img alt="Star history chart for Minnyat/paseo-team-orchestration" src="https://api.star-history.com/svg?repos=Minnyat/paseo-team-orchestration&type=Date" width="640" />
+  </picture>
+</a>
 
 ## License
 
