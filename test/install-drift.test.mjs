@@ -27,6 +27,14 @@ const piHome = mkdtempSync(join(tmpdir(), "paseo-drift-pi-"));
 const claudeHome = mkdtempSync(join(tmpdir(), "paseo-drift-claude-"));
 process.env.PI_HOME = piHome;
 delete process.env.PI_CODING_AGENT_DIR;
+// The Claude half needs the same sandbox, and for the same reason. Without it
+// this file redirects pi into a throwaway home and then reads the DEVELOPER'S
+// real ~/.claude/skills: a machine with the pack installed there reports its
+// own installed copy as `changed`, so "an absent install is all missing" and
+// "a faithful install reports no drift at all" both fail — on the machines
+// where the pack is actually used, and nowhere else. CI passed because its
+// runners have no ~/.claude to find.
+process.env.CLAUDE_CONFIG_DIR = join(claudeHome, ".claude");
 
 // Imported AFTER the env is set: config-walker resolves paths per call, but
 // reading the module with the developer's real HOME in scope is the kind of
@@ -217,6 +225,11 @@ assert.deepEqual(drift(), [], "an unknown file in the shared prompts dir is not 
 
 	appendFileSync(join(claudeSkills, "paseo-team-lead", "SKILL.md"), "\nstale\n");
 	assert.deepEqual(verdicts(drift(env), "claude-skill"), ["paseo-team-lead/SKILL.md:changed"]);
+
+	// This block deliberately leaves a stale Claude copy behind, so it removes
+	// it again. Every later block calls drift() with no env and would otherwise
+	// inherit this one's damage and fail describing something else entirely.
+	rmSync(claudeSkills, { recursive: true, force: true });
 }
 
 // --- CRLF is not a version difference ----------------------------------------
