@@ -279,8 +279,14 @@ export function seatEnv(seat) {
  */
 export function materializeSeat(seat, disallowedFor = () => []) {
 	const env = seatEnv(seat);
+	// `extends` is the base provider's runtime family, verbatim — not a
+	// pi/claude coin flip. The old ternary coerced any unknown base to "claude",
+	// which would have silently mis-typed a seat once a third runtime existed;
+	// listSeats has already validated base ∈ ROLE_PROVIDERS, so the family is
+	// always a real one here.
+	const family = providerFamily(seat.base);
 	const entry = {
-		extends: providerFamily(seat.base) === "pi" ? "pi" : "claude",
+		extends: family,
 		label: seat.label || `${seat.base} — ${seat.id}`,
 		env,
 	};

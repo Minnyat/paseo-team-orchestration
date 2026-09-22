@@ -25,23 +25,125 @@ export const MODEL_CLASSES = Object.freeze([
 ]);
 
 /**
- * Thinking levels are per RUNTIME FAMILY, not global: `minimal` exists only on
- * pi and `ultracode` only on Claude, so a single union would silently accept a
- * level the target runtime clamps away. Verify against the real inventory with
- * `paseo provider models <role-provider> --json`.
+ * RUNTIME DESCRIPTORS — the single source of every per-runtime fact this
+ * module and its consumers key off. The pack runs the SAME three roles on more
+ * than one coding agent; what differs between agents is captured here ONCE, so
+ * teaching the pack a new coding agent is adding one entry, not hunting down a
+ * dozen `family === "claude"` branches scattered across the tree.
+ *
+ * Insertion order IS the pack's canonical family order (RUNTIME_FAMILIES, and
+ * through it ROLE_PROVIDERS) — test/model-routing.test.mjs pins it, so a new
+ * entry goes at the END unless a reorder is intended.
+ *
+ * `policy-core.ts` keeps its OWN descriptor for the authority facts it owns
+ * (permission modes), deliberately not importing this file because it loads
+ * inside pi's runtime; the cross-check test locks the families and the
+ * model-shape facts the two share.
  */
-export const THINKING_LEVELS_BY_FAMILY = Object.freeze({
-	pi: Object.freeze(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
-	claude: Object.freeze([
-		"off",
-		"low",
-		"medium",
-		"high",
-		"xhigh",
-		"max",
-		"ultracode",
-	]),
+export const RUNTIME_DESCRIPTORS = Object.freeze({
+	pi: Object.freeze({
+		family: "pi",
+		/** Human label for the UI's family badge and dropdowns. */
+		label: "Pi",
+		/** The CLI whose presence means this runtime is installed on a host. */
+		cli: "pi",
+		/**
+		 * Thinking levels for this family. `minimal` exists only on pi and
+		 * `ultracode` only on Claude, so a single union would silently accept a
+		 * level the target runtime clamps away. Verify against the real inventory
+		 * with `paseo provider models <role-provider> --json`.
+		 */
+		thinkingLevels: Object.freeze([
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]),
+		/**
+		 * Whether a seat of this family has permission modes at all. pi declares
+		 * none (AvailableModes: []), so a --mode passed to it is an error; only a
+		 * moded family gets a default mode at create time. Mirrored — and locked
+		 * by test/model-routing.test.mjs — against policy-core's descriptor, which
+		 * owns the mode VALUES themselves.
+		 */
+		hasPermissionModes: false,
+		model: Object.freeze({
+			/**
+			 * pi model ids carry their own provider segment
+			 * ("<pi-provider>/<model-id>", and the model id may itself contain
+			 * slashes — Paseo splits at the FIRST slash only), so the rule is "must
+			 * carry a provider segment", never "exactly two segments".
+			 */
+			carriesProvider: true,
+			/** Prefix shown in "how to write it" hints and error messages. */
+			hintPrefix: "<pi-provider>/",
+			/** Shorthand for the whole reference shape, for hints. */
+			hint: "<pi-provider>/<model-id>",
+			/**
+			 * Minimum segment count of a full route string
+			 * "<family>-<role>/<pi-provider>/<model-id>". Rejecting a bare
+			 * "pi-supervisor" that lets the daemon pick a default model is an
+			 * authority check in policy-core; the count lives here so both agree.
+			 */
+			minRouteSegments: 3,
+		}),
+	}),
+	claude: Object.freeze({
+		family: "claude",
+		label: "Claude",
+		cli: "claude",
+		thinkingLevels: Object.freeze([
+			"off",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+			"ultracode",
+		]),
+		hasPermissionModes: true,
+		model: Object.freeze({
+			/** Claude model ids are a single segment ("claude-opus-5"); a slash
+			 * there means the author pasted a pi-shaped value by mistake. */
+			carriesProvider: false,
+			hintPrefix: "",
+			hint: "id trần (claude-opus-5)",
+			/** Route string is "<family>-<role>/<model-id>": two segments. */
+			minRouteSegments: 2,
+		}),
+	}),
 });
+
+export const RUNTIME_FAMILIES = Object.freeze(
+	Object.keys(RUNTIME_DESCRIPTORS),
+);
+export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
+
+/**
+ * The descriptor for a family, or null when the name is not a known runtime.
+ * Every consumer that used to branch on `family === "..."` asks this instead,
+ * so a new runtime reaches all of them the moment its descriptor exists.
+ */
+export function runtimeDescriptor(family) {
+	return RUNTIME_DESCRIPTORS[String(family ?? "")] ?? null;
+}
+
+/**
+ * Thinking levels are per RUNTIME FAMILY, derived from the descriptors so the
+ * table cannot drift from them. Kept as an exported map because it is the
+ * `optionsBy` source the routing form paints from.
+ */
+export const THINKING_LEVELS_BY_FAMILY = Object.freeze(
+	Object.fromEntries(
+		Object.entries(RUNTIME_DESCRIPTORS).map(([family, d]) => [
+			family,
+			d.thinkingLevels,
+		]),
+	),
+);
 
 /** Kept for compatibility: the pi levels, which predate the Claude family. */
 export const THINKING_LEVELS = THINKING_LEVELS_BY_FAMILY.pi;
@@ -53,9 +155,6 @@ export const THINKING_LEVELS = THINKING_LEVELS_BY_FAMILY.pi;
  * can still be routed at exactly this level and no other.
  */
 export const NO_THINKING_LEVEL = "off";
-
-export const RUNTIME_FAMILIES = Object.freeze(["pi", "claude"]);
-export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 
 /**
  * The durable Paseo role profiles — one per (family, role). Model-per-role
@@ -80,19 +179,24 @@ export function providerFamily(paseoProvider) {
 }
 
 /**
- * Model reference shape per family.
+ * Model reference shape per family, resolved through the descriptor's
+ * `model.carriesProvider` rather than a hard-coded family name — the whole
+ * point of the table is that this function does not grow a branch per runtime.
  *
- * pi model ids carry their own provider segment ("<pi-provider>/<model-id>",
- * and the model id may itself contain slashes — Paseo splits at the FIRST
- * slash only). Claude model ids are a single segment ("claude-opus-5"), so a
- * slash there means the author pasted a pi-shaped value by mistake.
+ * A provider-carrying family (pi) requires "<provider>/<model-id>"; a
+ * bare-id family (claude) rejects a slash as a pi-shaped value pasted by
+ * mistake. An unknown family is a fail-closed error, never a silent pass.
  */
 export function validateModelForFamily(family, model, fail, context = {}) {
 	const trimmed = String(model).trim();
-	if (family === "claude") {
+	const descriptor = runtimeDescriptor(family);
+	if (!descriptor) {
+		throw fail(`unknown runtime family "${family}"`, { ...context, family });
+	}
+	if (!descriptor.model.carriesProvider) {
 		if (trimmed.includes("/")) {
 			throw fail(
-				`model "${trimmed}" must be a bare Claude model id (no "/"), e.g. claude-opus-5`,
+				`model "${trimmed}" must be a bare ${descriptor.label} model id (no "/"), e.g. claude-opus-5`,
 				{ ...context, model: trimmed },
 			);
 		}
@@ -105,10 +209,10 @@ export function validateModelForFamily(family, model, fail, context = {}) {
 		return trimmed;
 	}
 	if (!trimmed.includes("/")) {
-		throw fail(`model "${trimmed}" must be in <pi-provider>/<model-id> form`, {
-			...context,
-			model: trimmed,
-		});
+		throw fail(
+			`model "${trimmed}" must be in ${descriptor.model.hint} form`,
+			{ ...context, model: trimmed },
+		);
 	}
 	// Split the model value DIRECTLY (not prefixed by paseoProvider):
 	// splitProviderModel rejects an empty provider segment ("/model-id") and an

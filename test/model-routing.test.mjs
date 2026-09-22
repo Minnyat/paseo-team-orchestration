@@ -6,9 +6,12 @@ import {
 	ERROR_CODES,
 	MODEL_CLASSES,
 	ROLE_PROVIDERS,
+	RUNTIME_DESCRIPTORS,
+	RUNTIME_FAMILIES,
 	THINKING_LEVELS,
 	THINKING_LEVELS_BY_FAMILY,
 	RoutingError,
+	runtimeDescriptor,
 	buildProviderInventory,
 	cmdPercentExpansionRisk,
 	composeProviderModel,
@@ -233,6 +236,45 @@ assert.equal(providerFamily("codex-peer"), null);
 {
 	const core = await import("../extensions/paseo-team-core/policy-core.ts");
 	assert.deepEqual([...ROLE_PROVIDERS].sort(), [...core.ROLE_PROVIDERS].sort());
+
+	// The two runtime-descriptor tables are deliberate siblings, not one import
+	// (policy-core loads inside pi's runtime). They MUST agree on the families
+	// and on every fact they both carry, or a new coding agent that only lands
+	// in one table becomes a silent split-brain: routing would compose a seat
+	// the authority gates measure by different rules.
+	assert.deepEqual(
+		[...RUNTIME_FAMILIES],
+		[...core.RUNTIME_FAMILIES],
+		"the two descriptor tables must list the same families in the same order",
+	);
+	for (const family of RUNTIME_FAMILIES) {
+		const routing = runtimeDescriptor(family);
+		const authority = core.runtimeDescriptor(family);
+		assert.ok(routing && authority, `both tables must describe ${family}`);
+		assert.equal(
+			routing.model.minRouteSegments,
+			authority.minRouteSegments,
+			`${family}: route-segment minimum disagrees across the boundary`,
+		);
+		assert.equal(
+			routing.model.hintPrefix,
+			authority.modelHintPrefix,
+			`${family}: model hint prefix disagrees across the boundary`,
+		);
+		assert.equal(
+			routing.hasPermissionModes,
+			authority.hasPermissionModes,
+			`${family}: permission-mode capability disagrees across the boundary`,
+		);
+	}
+	// pi carries its own provider segment (3), Claude is a bare id (2): the fact
+	// every route-length gate keys off, pinned to concrete values so a typo in
+	// either table is caught, not just a mutual drift.
+	assert.equal(core.runtimeDescriptor("pi").minRouteSegments, 3);
+	assert.equal(core.runtimeDescriptor("claude").minRouteSegments, 2);
+	assert.equal(core.familyHasPermissionModes("claude"), true);
+	assert.equal(core.familyHasPermissionModes("pi"), false);
+	assert.equal(core.familyHasPermissionModes("codex"), false, "unknown family has no modes");
 }
 
 // --- resolveRoute --------------------------------------------------------------

@@ -2602,9 +2602,9 @@ export function leadCreateSupervisorArgsBlockReason(
 	if (!parsed || parsed.role !== "supervisor") return null;
 
 	const segments = provider.split("/").filter((part) => part.length > 0);
-	const minimum = parsed.family === "pi" ? 3 : 2;
-	if (segments.length < minimum) {
-		return `Refusing create_agent: a Supervisor seat must be routed explicitly — "${parsed.family}-supervisor/${parsed.family === "pi" ? "<pi-provider>/" : ""}<model-id>", never a bare "${parsed.family}-supervisor" that lets the daemon pick a default. The governance seat is the one whose reasoning quality decides what the Human never gets asked.`;
+	const descriptor = runtimeDescriptor(parsed.family);
+	if (segments.length < minRouteSegmentsFor(parsed.family)) {
+		return `Refusing create_agent: a Supervisor seat must be routed explicitly — "${parsed.family}-supervisor/${descriptor?.modelHintPrefix ?? ""}<model-id>", never a bare "${parsed.family}-supervisor" that lets the daemon pick a default. The governance seat is the one whose reasoning quality decides what the Human never gets asked.`;
 	}
 	const labels =
 		typeof rec.labels === "object" && rec.labels !== null
@@ -3060,8 +3060,90 @@ export function forkModelBlockReason({
 // ---------------------------------------------------------------------------
 
 export type RuntimeFamily = "pi" | "claude";
-export const RUNTIME_FAMILIES: RuntimeFamily[] = ["pi", "claude"];
+
+/**
+ * The runtime facts THIS module owns, one entry per coding agent. It is a
+ * deliberate sibling of RUNTIME_DESCRIPTORS in scripts/model-routing.mjs, not
+ * an import: this file loads inside pi's own runtime and cannot reach the .mjs.
+ * The two are locked where they overlap by test/model-routing.test.mjs, which
+ * compares the families and the model-shape facts (minRouteSegments,
+ * hintPrefix) across the boundary.
+ *
+ * What lives here that the routing copy does not: `hasPermissionModes`, an
+ * authority fact. Only Claude declares permission modes; pi declares none
+ * (AvailableModes: []). Adding a coding agent means adding one entry — the mode
+ * gates below ask this table, not a hard-coded family name.
+ */
+export interface RuntimeDescriptor {
+	family: RuntimeFamily;
+	/**
+	 * Minimum segment count of a full route string. pi carries its own provider
+	 * segment ("pi-<role>/<pi-provider>/<model>" = 3); a bare-id family
+	 * ("claude-<role>/<model>" = 2). Rejecting a shorter string is what stops a
+	 * bare "pi-supervisor" from letting the daemon pick a default model.
+	 */
+	minRouteSegments: number;
+	/** Prefix shown in the "route it explicitly" hint for this family. */
+	modelHintPrefix: string;
+	/**
+	 * Whether a seat of this family has permission modes at all. Only a family
+	 * with modes is gated by the mode checks below; a modeless one (pi) must be
+	 * passed no mode, because the daemon answers `--mode` to it with an error.
+	 * NOTE: the mode VALUES (CLAUDE_SEAT_MODES, the default, the forbidden one)
+	 * are still Claude's alone. A second family that sets this true must bring
+	 * its own vocabulary here before the gates can speak for it.
+	 */
+	hasPermissionModes: boolean;
+}
+
+export const RUNTIME_DESCRIPTORS: Record<RuntimeFamily, RuntimeDescriptor> = {
+	pi: {
+		family: "pi",
+		minRouteSegments: 3,
+		modelHintPrefix: "<pi-provider>/",
+		hasPermissionModes: false,
+	},
+	claude: {
+		family: "claude",
+		minRouteSegments: 2,
+		modelHintPrefix: "",
+		hasPermissionModes: true,
+	},
+};
+
+export const RUNTIME_FAMILIES: RuntimeFamily[] = Object.keys(
+	RUNTIME_DESCRIPTORS,
+) as RuntimeFamily[];
 export const ROLES: TeamRole[] = ["supervisor", "lead", "peer"];
+
+/**
+ * The descriptor for a family. Every place that used to branch on
+ * `family === "claude"` asks this instead, so a new runtime reaches them all
+ * the moment its entry exists.
+ */
+export function runtimeDescriptor(
+	family: RuntimeFamily | null | undefined,
+): RuntimeDescriptor | null {
+	return family ? (RUNTIME_DESCRIPTORS[family] ?? null) : null;
+}
+
+/**
+ * Minimum route-string segments for a family; a large sentinel for an unknown
+ * one so an unrecognised provider fails the "routed explicitly" check closed
+ * rather than sneaking through a low bound.
+ */
+export function minRouteSegmentsFor(
+	family: RuntimeFamily | null | undefined,
+): number {
+	return runtimeDescriptor(family)?.minRouteSegments ?? Number.MAX_SAFE_INTEGER;
+}
+
+/** Whether a family has permission modes at all — the mode gates' entry test. */
+export function familyHasPermissionModes(
+	family: RuntimeFamily | null | undefined,
+): boolean {
+	return runtimeDescriptor(family)?.hasPermissionModes === true;
+}
 
 /** Every role provider name the pack owns, e.g. "pi-peer", "claude-lead". */
 export const ROLE_PROVIDERS: string[] = RUNTIME_FAMILIES.flatMap((family) =>
@@ -3117,7 +3199,7 @@ export function isLeadRecoveryProvider(provider: string): boolean {
 	const parsed = parseRoleProvider(provider);
 	if (!parsed || parsed.role !== "lead") return false;
 	const segments = provider.split("/").filter((part) => part.length > 0);
-	return parsed.family === "pi" ? segments.length >= 3 : segments.length >= 2;
+	return segments.length >= minRouteSegmentsFor(parsed.family);
 }
 
 // ---------------------------------------------------------------------------
@@ -3198,7 +3280,10 @@ export function isClaudeSeatMode(value: unknown): value is ClaudeSeatMode {
 export function defaultSeatMode(
 	family: RuntimeFamily | null | undefined,
 ): ClaudeSeatMode | null {
-	return family === "claude" ? CLAUDE_DEFAULT_SEAT_MODE : null;
+	// Only a family with permission modes gets a default; a modeless one (pi)
+	// gets null, which means "pass no mode", not "pass a default". Claude is the
+	// only moded family today, so its default is the one to hand back.
+	return familyHasPermissionModes(family) ? CLAUDE_DEFAULT_SEAT_MODE : null;
 }
 
 /**
@@ -3212,7 +3297,7 @@ export function seatModeBlockReason(
 	{ family, what }: { family: RuntimeFamily | null; what: string },
 ): string | null {
 	if (mode === undefined || mode === null || mode === "") return null;
-	if (family !== "claude") {
+	if (!familyHasPermissionModes(family)) {
 		return `Refusing ${what}: provider family "${family ?? "<unknown>"}" declares no permission modes (AvailableModes is empty), so "${String(mode)}" cannot be applied to it. Pass no mode at all.`;
 	}
 	if (!isClaudeSeatMode(mode)) {
@@ -3247,7 +3332,7 @@ export function createAgentModeArgsBlockReason(args: unknown): string | null {
 			? (rec.settings as Record<string, unknown>)
 			: {};
 	const modeId = settings.modeId;
-	if (parsed.family !== "claude") {
+	if (!familyHasPermissionModes(parsed.family)) {
 		// Nothing to demand — but a mode passed to a modeless family is still a
 		// mistake worth naming here: the daemon answers it with "Invalid mode
 		// 'auto' for provider 'pi-peer'. Available modes: (none)", which reads
@@ -3323,7 +3408,7 @@ export function forkModeBlockReason({
 	// UNREADABLE mode is left alone, because deleting a correctly moved fork
 	// over a state file that has not caught up yet is the same over-strictness
 	// the model comparison is careful to avoid.
-	if (family !== "claude" || !actualMode) return null;
+	if (!familyHasPermissionModes(family) || !actualMode) return null;
 	if (actualMode === "default") {
 		return `BLOCKED: FORK_MODE_UNROUTABLE — the fork is still on "default" (Always Ask): \`paseo import\` cannot carry a mode and Paseo applies no provider default, so nothing ever moved it. Every tool call it makes will park in the permission queue. Delete it and fork again.`;
 	}

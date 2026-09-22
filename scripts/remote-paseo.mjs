@@ -79,6 +79,7 @@ import {
 	composeProviderModel,
 	loadClusterConfig,
 	providerFamily,
+	runtimeDescriptor,
 	splitProviderModel,
 	validateModelForFamily,
 	validateRemoteEndpoint,
@@ -716,7 +717,7 @@ export function buildArgv(command, opts, endpoint) {
 			const mode =
 				typeof opts.mode === "string" && opts.mode.trim() !== ""
 					? opts.mode.trim()
-					: family === "claude"
+					: runtimeDescriptor(family)?.hasPermissionModes
 						? CLAUDE_DEFAULT_MODE
 						: null;
 			if (typeof opts.workspace !== "string" || opts.workspace.trim() === "") {
