@@ -42,9 +42,12 @@ const pin = (name) => {
 	assert.ok(found, `could not read the ${name} pin out of preflight.mjs`);
 	return found;
 };
-const PINNED_PASEO = pin("paseo");
-const PINNED_PI = pin("pi");
 const PINNED_ADAPTER = pin("adapter");
+// The paseo and pi CLIs carry no pin, so the stubs just need SOME plausible
+// version to report. These are stub values, not pins: nothing compares
+// against them.
+const STUB_PASEO_VERSION = "0.8.0";
+const STUB_PI_VERSION = "0.85.1";
 
 // The stubs are executable node scripts on PATH. Windows resolves
 // executables by extension and `tryExec` routes through a shell there, so the
@@ -96,7 +99,7 @@ if (at(0) === "status" && at(1) === "--porcelain") { process.stdout.write(env.FA
 	stub(
 		"paseo",
 		`
-if (at(0) === "--version") { process.stdout.write((env.FAKE_PASEO_VERSION ?? "${PINNED_PASEO}") + "\\n"); process.exit(0); }
+if (at(0) === "--version") { process.stdout.write((env.FAKE_PASEO_VERSION ?? "${STUB_PASEO_VERSION}") + "\\n"); process.exit(0); }
 if (at(0) === "status" && at(1) === "--json") {
   if (env.FAKE_DAEMON_DOWN) { process.stderr.write("daemon unreachable\\n"); process.exit(1); }
   process.stdout.write(env.FAKE_PASEO_STATUS ?? JSON.stringify({ localDaemon: "running", listen: "127.0.0.1:6767" }));
@@ -135,7 +138,7 @@ if (hostAt >= 0) {
 		`
 if (at(0) === "--version") {
   if (env.FAKE_NO_PI) process.exit(127);
-  process.stdout.write((env.FAKE_PI_VERSION ?? "${PINNED_PI}") + "\\n"); process.exit(0);
+  process.stdout.write((env.FAKE_PI_VERSION ?? "${STUB_PI_VERSION}") + "\\n"); process.exit(0);
 }
 if (at(0) === "list") { process.stdout.write(env.FAKE_PI_LIST ?? "pi-mcp-adapter\\n"); process.exit(0); }`,
 	);
@@ -437,23 +440,35 @@ test("runtime: auto-detection reports what is installed", { skip: !POSIX }, () =
 	assert.equal(bare.of("pi-cli").status, "fail");
 });
 
-// --- version pins are warnings, never failures --------------------------------
+// --- the paseo and pi CLIs are REPORTED, never pinned -------------------------
 //
-// A pin is "the version this pack was verified against", not a requirement. A
-// pinned-version mismatch that blocked a preflight would make every upstream
-// release an outage.
+// Upstream ships every few days. A "verified against" pin would warn on every
+// release until somebody bumped it, so it would be warning permanently — and a
+// warning that is always on tells you nothing. What preflight owes a bug report
+// is the version that is actually installed, whatever it happens to be.
 
-test("a CLI version off the pin warns; the pinned one passes", { skip: !POSIX }, () => {
+test("any paseo/pi version passes, and preflight reports it verbatim", { skip: !POSIX }, () => {
 	install();
 	const healthy = preflight();
 	assert.equal(healthy.of("paseo-cli").status, "pass");
+	assert.equal(healthy.of("paseo-cli").detail, STUB_PASEO_VERSION);
 	assert.equal(healthy.of("pi-cli").status, "pass");
+	assert.equal(healthy.of("pi-cli").detail, STUB_PI_VERSION);
 
+	// A version nothing was ever verified against is still a pass, and the
+	// detail is the detected version rather than a complaint about it.
 	const drifted = preflight([], { FAKE_PASEO_VERSION: "9.9.9", FAKE_PI_VERSION: "0.1.0" });
-	assert.equal(drifted.of("paseo-cli").status, "warn");
-	assert.match(drifted.of("paseo-cli").detail, new RegExp(PINNED_PASEO));
-	assert.equal(drifted.of("pi-cli").status, "warn");
-	assert.match(drifted.of("pi-cli").detail, new RegExp(PINNED_PI));
+	assert.equal(drifted.of("paseo-cli").status, "pass");
+	assert.equal(drifted.of("paseo-cli").detail, "9.9.9");
+	assert.equal(drifted.of("pi-cli").status, "pass");
+	assert.equal(drifted.of("pi-cli").detail, "0.1.0");
+});
+
+// A missing CLI is still a hard failure — dropping the pin removed the opinion
+// about WHICH version, not the requirement that one be installed.
+test("a missing paseo/pi CLI still fails", { skip: !POSIX }, () => {
+	install();
+	assert.equal(preflight([], { FAKE_NO_PI: "1" }).of("pi-cli").status, "fail");
 });
 
 test("mcp-adapter: absent FAILS, present-but-unpinned warns", { skip: !POSIX }, () => {

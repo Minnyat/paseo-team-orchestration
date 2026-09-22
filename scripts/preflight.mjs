@@ -60,11 +60,24 @@ import {
 	MODEL_CLASSES,
 	PROVIDER_OK_STATUSES,
 	providerFamily,
+	runtimeDescriptor,
+	RUNTIME_FAMILIES,
 } from "./model-routing.mjs";
 
+/**
+ * Only the pins that are LOAD-BEARING live here.
+ *
+ * `nodeMajor` gates a real requirement (package.json engines). `adapter` names
+ * the version the install instructions tell you to install, and its absence is
+ * a hard failure because Paseo cannot inject MCP tools into pi without it.
+ *
+ * The paseo and pi CLI versions are deliberately NOT pinned. A "verified
+ * against" pin for an upstream that ships every few days decays into a
+ * permanent warning nobody reads, and a warning that is always on carries no
+ * information. Their versions are still REPORTED — a preflight that names what
+ * is installed is what a bug report actually needs.
+ */
 const PINNED = Object.freeze({
-	paseo: "0.2.5",
-	pi: "0.83.0",
 	adapter: "2.19.0",
 	nodeMajor: 22,
 });
@@ -191,23 +204,18 @@ function summarizeMessages() {
 {
 	const v = tryExec("paseo", ["--version"]);
 	if (!v.ok) fail("paseo-cli", "paseo CLI not found");
-	else {
-		const version = v.stdout.trim();
-		if (version === PINNED.paseo) pass("paseo-cli", version);
-		else
-			warn(
-				"paseo-cli",
-				`detected ${version}, role pack was verified against ${PINNED.paseo}`,
-			);
-	}
+	else pass("paseo-cli", v.stdout.trim());
 }
 const piCli = tryExec("pi", ["--version"]);
 const claudeCli = tryExec("claude", ["--version"]);
 const runtimes = (() => {
-	if (runtimeOpt === "pi" || runtimeOpt === "claude") return [runtimeOpt];
-	if (runtimeOpt === "both") return ["pi", "claude"];
+	if (RUNTIME_FAMILIES.includes(runtimeOpt)) return [runtimeOpt];
+	if (runtimeOpt === "both") return [...RUNTIME_FAMILIES];
 	if (runtimeOpt) {
-		fail("runtime", `unknown --runtime "${runtimeOpt}" (pi|claude|both)`);
+		fail(
+			"runtime",
+			`unknown --runtime "${runtimeOpt}" (${[...RUNTIME_FAMILIES, "both"].join("|")})`,
+		);
 		return ["pi"];
 	}
 	const detected = [
@@ -223,15 +231,7 @@ pass("runtime", runtimes.join(" + "));
 
 if (wantPi) {
 	if (!piCli.ok) fail("pi-cli", "pi CLI not found");
-	else {
-		const version = piCli.stdout.trim();
-		if (version === PINNED.pi) pass("pi-cli", version);
-		else
-			warn(
-				"pi-cli",
-				`detected ${version}, role pack was verified against ${PINNED.pi}`,
-			);
-	}
+	else pass("pi-cli", piCli.stdout.trim());
 }
 if (wantClaude) {
 	if (!claudeCli.ok) fail("claude-cli", "claude CLI not found");
@@ -647,11 +647,14 @@ if (routing && daemonUp && !skipModels) {
 				strict: wantStrict,
 			});
 			// Per-model thinkingLevelMap guard (Paseo's list does not reflect it).
-			// pi ONLY: the map lives in ~/.pi/agent/models.json, and a Claude model
-			// id is a single segment — splitting one at indexOf("/") === -1 yielded
-			// a truncated provider name ("claude-opus-") and looked it up anyway.
+			// Only for a family whose model ref carries its own provider segment
+			// (pi): the map lives in that provider's ~/.pi/agent/models.json. A
+			// bare-id family's model has no provider to split off — doing it at
+			// indexOf("/") === -1 yielded a truncated name ("claude-opus-") and
+			// looked it up anyway.
+			const routeFamily = providerFamily(route.paseoProvider);
 			const clamped =
-				providerFamily(route.paseoProvider) === "pi" &&
+				Boolean(runtimeDescriptor(routeFamily)?.model.carriesProvider) &&
 				piModelLevelUnreachable(
 					resolved.model.slice(0, resolved.model.indexOf("/")),
 					resolved.model.slice(resolved.model.indexOf("/") + 1),

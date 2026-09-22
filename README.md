@@ -1018,14 +1018,27 @@ default (`~/.pi/agent/extensions/paseo-team-scripts`) applies after a
 shell/daemon restart. See [`docs/multi-host.md`](docs/multi-host.md) and the
 Lead skill (LOCAL_CREATE_CYCLE vs REMOTE_CREATE_CYCLE).
 
-### Compatibility matrix (verified 2026-08-04)
+### Compatibility matrix
 
-| Component | Version | Notes |
-|---|---|---|
-| Paseo CLI/daemon | 0.2.5 | `create_agent` schema, split-first-slash, runtimeInfo |
-| Pi | 0.83.0 | `--model` (pattern), `--thinking` (7 levels), models.json |
-| pi-mcp-adapter | 2.19.0 | **pinned**; lazy lifecycle, tool names prefixed `paseo_` |
-| Node | ≥ 22.18 | type stripping on by default; CI runs 22.18 and 24 on ubuntu/windows/macos |
+Only two rows are enforced. The other two record what the surface below them
+was read against — provenance for a bug report, not a gate. Preflight reports
+the installed paseo and pi versions and passes whatever they are: upstream
+ships every few days, and a "verified against" check for a moving target is a
+warning that is permanently on, which is a warning nobody reads.
+
+| Component | Version | Enforced | Notes |
+|---|---|---|---|
+| Node | ≥ 22.18 | **yes** — `fail` | type stripping on by default; CI runs 22.18 and 24 on ubuntu/windows/macos |
+| pi-mcp-adapter | 2.19.0 | **yes** — absent `fail`, off-pin `warn` | lazy lifecycle, tool names prefixed `paseo_` |
+| Paseo CLI/daemon | read at 0.2.5 | no — reported only | `create_agent` schema, split-first-slash, runtimeInfo |
+| Pi | read at 0.83.0 | no — reported only | `--model` (pattern), `--thinking` (7 levels), models.json |
+
+What actually guards the Paseo surface is not a version number but
+`test/paseo-contract.test.mjs`, which asserts the shapes this pack depends on
+(`paseo inspect` fields, and the undocumented
+`$PASEO_HOME/agents/<cwd-slug>/<id>.json` state file) against a live agent. A
+version pin notices that upstream moved; the contract test notices whether the
+move broke anything, which is the question worth answering.
 
 ### Testing the tests
 
@@ -1111,7 +1124,8 @@ node scripts/preflight.mjs --strict --host-id <host-id>
                                       # thinking: off. See docs/model-routing.md.
 ```
 
-Checks: node/git/paseo + version pins, the daemon, the adapter (pin), the
+Checks: node (pin) / git / paseo + pi versions (reported, not pinned), the
+daemon, the adapter (pin), the
 extension, the shared policy modules, role prompts, the role providers of every
 runtime in scope, **each healthy provider's model inventory**, routing config
 (single-host + cluster contract), each route against the real inventory,
