@@ -1,3 +1,45 @@
+# Task: Gom cấu trúc runtime-family thành bảng descriptor + UI chọn role→tool→model
+
+## Original request (verbatim)
+> vấn đề là trên ui hiện hay có qwuas nhiều cái để chọn ấy nên cần gom lại có cấu trúc để sau thêm tool gì vô deex hơn.  bạn thử làm xem có ổn không và update paseo lên version mới luôn nhá
+> (tiếp theo) oke triển khai đi
+
+## Success criteria (observable)
+- [x] Update Paseo 0.7.2 → 0.8.0, daemon chạy binary mới, patch MCP vá lại, preflight xanh.
+- [x] Gỡ pin version paseo/pi khỏi preflight (giữ node + adapter).
+- [x] Một bảng RUNTIME_DESCRIPTORS là nguồn sự thật duy nhất cho tri thức theo-family trong model-routing.mjs; RUNTIME_FAMILIES + THINKING_LEVELS_BY_FAMILY suy ra từ nó.
+- [x] 15 nhánh hardcode `=== "pi"`/`=== "claude"` đi qua descriptor (trừ nhánh vốn là authority Claude-only, được bọc bằng helper có tên).
+- [x] UI routing: field phẳng `paseoProvider` (6→N) tách thành chọn ROLE (3, cố định) trước, rồi RUNTIME (tool), model/thinking bám theo. On-disk format KHÔNG đổi (vẫn `paseoProvider`), không cần migration.
+- [x] Thêm một tool mới = thêm một entry descriptor, không sửa rải rác.
+- [x] `npm test` xanh toàn bộ; `npm run typecheck` xanh; preflight xanh; adversarial-self-review chạy.
+
+## Constraints & decisions
+- KHÔNG đổi format `model-routing.local.json` trên đĩa (vẫn `paseoProvider`) → backward-compat, không migration. UI tách 2 dropdown nhưng ghi về đúng một path `paseoProvider` (join) / đọc bằng split.
+- Thứ tự RUNTIME_FAMILIES = ["pi","claude"] và ROLE_PROVIDERS phải giữ NGUYÊN (test khoá ở model-routing.test.mjs:635).
+- policy-core.ts cố ý KHÔNG import .mjs (extension nạp trong pi runtime); giữ bảng descriptor riêng, khoá bằng cross-check test hiện có (test:234-235) mở rộng thêm.
+- Fail-closed là invariant: KHÔNG thêm cơ chế fallback sang tool khác (model-routing.mjs:11).
+- parseRoleProvider là security property: deny-nhìn-như-allow nếu parser trả null nhầm — không đụng chữ ký, chỉ thêm bảng.
+- Mode/authority branch của Claude (CLAUDE_SEAT_MODES...) chỉ generalize khi có runtime thứ 2 thật; pass này bọc bằng helper `hasPermissionModes(family)` chứ không bịa mode cho tool tưởng tượng.
+
+## Plan
+- [x] P0: update paseo + gỡ pin (xong, 3 file chờ commit).
+- [x] P1: RUNTIME_DESCRIPTORS trong model-routing.mjs; rewire validateModelForFamily, preflight:210/657, seat:283, config-schema labels+hint. 218/218.
+- [x] P2: UI role-first — control `role-provider` (role→runtime) trong config-schema + app.js + CSS; ghi cùng path paseoProvider nên model/thinking không đổi. Thêm test compose role×runtime === ROLE_PROVIDERS.
+- [x] P3: RUNTIME_DESCRIPTORS trong policy-core.ts; rewire 8 nhánh (minRouteSegments, permission modes) qua descriptor + helper; mở rộng cross-check test. Test.
+- [x] P4: full test + typecheck + preflight + adversarial-self-review; đóng theo original request.
+
+## Open questions / risks
+- app.js không có test tự động (chỉ config-form.js có). Phần render UI phải verify bằng đọc + smoke, ghi rõ ở report cái gì không chạy được ở đây.
+- Nếu tách role/runtime ở UI mà value cũ `paseoProvider` ngoài enum → phải giữ hiển thị (đã có cơ chế "ngoài danh sách" ở app.js:1042).
+
+## Log
+- (2026-09-22) Reinstall PTIM artifacts (KHÔNG uninstall CLI binary — sẽ downgrade). `pteam install` refresh drift 16→1; file còn lại là claude skill cũ (7/9, unowned, thiếu acceptance-verifier) mà installer từ chối đè. Backup + xoá dir stale rồi `claude-setup --install` → skill owned, SKILL.md == repo, drift=0, claude-hooks ✓. Dọn phantom skill do agent-skills sync tool tạo từ backup (symlink + store entry stale). PHÁT HIỆN version: package.json=3.5.0 nhưng KHÔNG có tag v3.5.0 (tag mới nhất local+remote = v3.4.0); install mode=checkout (dev symlink) nên `pteam update` không tự cài, chỉ bảo git pull. Việc hôm nay chưa commit, version chưa bump.
+- (2026-09-22) P3+P4 xong. policy-core.ts có RuntimeDescriptor table (minRouteSegments, modelHintPrefix, hasPermissionModes) + helper runtimeDescriptor/minRouteSegmentsFor/familyHasPermissionModes; rewire 6 nhánh (supervisor route min, isLeadRecoveryProvider, defaultSeatMode, seatModeBlockReason, createAgentMode, forkMode). model-routing thêm hasPermissionModes; remote-paseo:719 đi qua descriptor. Còn 2 nhánh Claude-only cố ý giữ (cli:1242 deny-list, isClaudeSeatMode value-check). Cross-check test khoá 2 bảng (families+minRouteSegments+hintPrefix+hasPermissionModes, giá trị cụ thể 3/2/true/false). typecheck xanh, 218/218. Self-review: 0 blocker — kiểm cat.1 (validateModelForFamily unknown-family throw là code phòng thủ không reachable; cả 3 caller guard ROLE_PROVIDERS), cat.8 (seat.base luôn validated trước materializeSeat qua validateSeats ở cả 2 caller), round-trip compose/parse === ROLE_PROVIDERS, schema JSON-serialize sạch.
+- (2026-09-22) P1+P2 xong. model-routing.mjs có RUNTIME_DESCRIPTORS (label/cli/thinkingLevels/model.{carriesProvider,hint,hintPrefix,minRouteSegments}); RUNTIME_FAMILIES+THINKING_LEVELS_BY_FAMILY suy ra từ nó, thứ tự pi,claude giữ nguyên. validateModelForFamily hết hardcode. preflight/seat/config-schema đi qua descriptor. UI: field `role-provider` 2 dropdown role→runtime ghi về paseoProvider; on-disk không đổi. 218/218 + config-schema test mở rộng xanh.
+- (2026-09-22) P0 xong: paseo 0.8.0, daemon restart 12:12:27, patch-paseo-mcp áp lại, preflight xanh phần version. Gỡ pin: preflight.mjs + test + README. 218/218 pass trước khi vào P1.
+
+---
+
 # Task: Build paseo-pi-team thành CLI + WebUI extension (WebUI chỉ gọi qua CLI)
 
 ## Original request (verbatim)
@@ -35,6 +77,9 @@
 - Việc helper mcp.json / models.json merge có nên trong CLI? → MVP: đọc/ghi qua `config`; merge phức tạp (browser-setup; --attach-cdp-port) giao script có sẵn, webui nuôi qua `install --attach-cdp-port`.
 
 ## Log
+- (2026-09-22) Reinstall PTIM artifacts (KHÔNG uninstall CLI binary — sẽ downgrade). `pteam install` refresh drift 16→1; file còn lại là claude skill cũ (7/9, unowned, thiếu acceptance-verifier) mà installer từ chối đè. Backup + xoá dir stale rồi `claude-setup --install` → skill owned, SKILL.md == repo, drift=0, claude-hooks ✓. Dọn phantom skill do agent-skills sync tool tạo từ backup (symlink + store entry stale). PHÁT HIỆN version: package.json=3.5.0 nhưng KHÔNG có tag v3.5.0 (tag mới nhất local+remote = v3.4.0); install mode=checkout (dev symlink) nên `pteam update` không tự cài, chỉ bảo git pull. Việc hôm nay chưa commit, version chưa bump.
+- (2026-09-22) P3+P4 xong. policy-core.ts có RuntimeDescriptor table (minRouteSegments, modelHintPrefix, hasPermissionModes) + helper runtimeDescriptor/minRouteSegmentsFor/familyHasPermissionModes; rewire 6 nhánh (supervisor route min, isLeadRecoveryProvider, defaultSeatMode, seatModeBlockReason, createAgentMode, forkMode). model-routing thêm hasPermissionModes; remote-paseo:719 đi qua descriptor. Còn 2 nhánh Claude-only cố ý giữ (cli:1242 deny-list, isClaudeSeatMode value-check). Cross-check test khoá 2 bảng (families+minRouteSegments+hintPrefix+hasPermissionModes, giá trị cụ thể 3/2/true/false). typecheck xanh, 218/218. Self-review: 0 blocker — kiểm cat.1 (validateModelForFamily unknown-family throw là code phòng thủ không reachable; cả 3 caller guard ROLE_PROVIDERS), cat.8 (seat.base luôn validated trước materializeSeat qua validateSeats ở cả 2 caller), round-trip compose/parse === ROLE_PROVIDERS, schema JSON-serialize sạch.
+- (2026-09-22) P1+P2 xong. model-routing.mjs có RUNTIME_DESCRIPTORS (label/cli/thinkingLevels/model.{carriesProvider,hint,hintPrefix,minRouteSegments}); RUNTIME_FAMILIES+THINKING_LEVELS_BY_FAMILY suy ra từ nó, thứ tự pi,claude giữ nguyên. validateModelForFamily hết hardcode. preflight/seat/config-schema đi qua descriptor. UI: field `role-provider` 2 dropdown role→runtime ghi về paseoProvider; on-disk không đổi. 218/218 + config-schema test mở rộng xanh.
 - (bắt đầu) anchor; đã khảo sát scripts/preflight, model-routing, browser-setup, ocr-review, remote-paseo + package.json (chưa có bin), prompts/*.md, skills/SKILL.md, config/*.example.json, installer destinations (~/.pi/agent/extensions, /prompts, /skills, /mcp.json).
 - (2026-08-21) Probe live Paseo CLI 0.3.0: xác nhận bề mặt `ls/inspect/permit/chat/logs/attach`; `inspect` có `ParentAgentId` + `PendingPermissions`. Tái hiện lỗi `paseo logs` timeout (`get_state`) với agent idle nguội -> timeline là dữ liệu có thể vắng, phải degrade chứ không crash.
 - (2026-08-21) Mở rộng scope theo yêu cầu mới: thêm mặt phẳng **permission** (runtime permit vs policy authority) và **team graph** (trực quan hoá agent liên lạc). Viết `docs/webui-architecture.md` (contract CLI↔WebUI + schema graph + lộ trình PR-1..PR-5). Bước 6 xong; còn Bước 5 (webui server+SPA) và Bước 7 (smoke-test).

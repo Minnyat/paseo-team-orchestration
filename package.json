@@ -1,6 +1,6 @@
 {
   "name": "paseo-team-orchestration",
-  "version": "3.5.0",
+  "version": "3.6.0",
   "private": true,
   "description": "Paseo multi-agent role pack — one rule core, two runtimes (pi extension + Claude Code hooks), role prompts, support scripts.",
   "type": "module",
