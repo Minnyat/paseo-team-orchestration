@@ -438,6 +438,12 @@ textarea.cfg-lines {
 .cfg-kv-row { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: center; }
 
 .cfg-flags { display: flex; flex-direction: column; gap: 10px; }
+/* Role-provider control: role dropdown first, then runtime, on one row. */
+.cfg-roleprovider { display: flex; flex-direction: column; gap: 8px; }
+.cfg-roleprovider-pair { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); gap: 6px 10px; align-items: center; }
+.cfg-roleprovider-pair .cfg-sub { color: var(--muted, #888); font-size: 0.85em; white-space: nowrap; }
+.cfg-roleprovider-note { margin: 0; }
+@media (max-width: 560px) { .cfg-roleprovider-pair { grid-template-columns: auto minmax(0, 1fr); } }
 .cfg-flag { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; }
 .cfg-flag input { margin-top: 3px; }
 .cfg-flag-body { display: flex; flex-direction: column; gap: 3px; }

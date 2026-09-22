@@ -28,6 +28,9 @@ import { join } from "node:path";
 import {
 	MODEL_CLASSES,
 	ROLE_PROVIDERS,
+	RUNTIME_DESCRIPTORS,
+	RUNTIME_FAMILIES,
+	TEAM_ROLES,
 	THINKING_LEVELS_BY_FAMILY,
 	providerFamily,
 } from "../../scripts/model-routing.mjs";
@@ -62,6 +65,21 @@ const ALL_THINKING_LEVELS = [
 	...new Set(Object.values(THINKING_LEVELS_BY_FAMILY).flat()),
 ];
 
+/**
+ * "pi: <pi-provider>/<model-id>, claude: id trần" — built from the descriptors
+ * rather than spelled out, so teaching the pack a new runtime updates every
+ * hint that mentions model shapes without editing this file.
+ */
+const MODEL_SHAPE_SENTENCE = RUNTIME_FAMILIES.map(
+	(f) => `${RUNTIME_DESCRIPTORS[f].label}: ${RUNTIME_DESCRIPTORS[f].model.hint}`,
+).join(", ");
+
+/** Runtime options for the role-provider control: id + human label. */
+const RUNTIME_OPTIONS = RUNTIME_FAMILIES.map((f) => ({
+	id: f,
+	label: RUNTIME_DESCRIPTORS[f].label,
+}));
+
 /** Thinking levels keyed by role provider — the `optionsBy` map for `thinking`. */
 function thinkingByProvider() {
 	return Object.fromEntries(
@@ -77,16 +95,26 @@ function routeFields() {
 	return [
 		{
 			path: "paseoProvider",
-			type: "enum",
+			// One stored key ("claude-peer"), two dropdowns: VAI TRÒ first, then
+			// RUNTIME. Roles are the fixed axis (always three); runtimes are the
+			// growing one, so the growth lands in the second control instead of
+			// multiplying the length of one flat list. Both halves write this same
+			// path, so model/thinking below still key off paseoProvider unchanged
+			// and the on-disk format is untouched.
+			type: "role-provider",
+			roles: [...TEAM_ROLES],
+			runtimes: RUNTIME_OPTIONS,
+			// Kept so any renderer that does not know the composite type still has
+			// the full flat vocabulary to fall back to.
 			enum: [...ROLE_PROVIDERS],
-			label: "Provider Paseo",
-			hint: "Family + vai trò. pi-* chạy trên Pi, claude-* chạy trên Claude Code. Ô mô hình và mức suy nghĩ bên dưới đổi theo ô này.",
+			label: "Vai trò & runtime",
+			hint: "Chọn VAI TRÒ trước (supervisor/lead/peer), rồi RUNTIME chạy nó. Ô mô hình và mức suy nghĩ bên dưới đổi theo lựa chọn này.",
 		},
 		{
 			path: "model",
 			type: "enum",
 			label: "Mô hình",
-			hint: "Danh sách model của chính provider đã chọn, đọc từ daemon. Daemon không trả về được thì ô này lùi về nhập tay — pi: <pi-provider>/<model-id>, claude: id trần.",
+			hint: `Danh sách model của chính provider đã chọn, đọc từ daemon. Daemon không trả về được thì ô này lùi về nhập tay — ${MODEL_SHAPE_SENTENCE}.`,
 			// `source: "models"` marks this map as filled at read time from the live
 			// inventory (withModelInventory). An empty map therefore means "the
 			// daemon could not tell us", never "no model is valid" — which is why

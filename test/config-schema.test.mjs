@@ -20,6 +20,9 @@ import {
 import {
 	MODEL_CLASSES,
 	ROLE_PROVIDERS,
+	RUNTIME_DESCRIPTORS,
+	RUNTIME_FAMILIES,
+	TEAM_ROLES,
 	THINKING_LEVELS_BY_FAMILY,
 	providerFamily,
 } from "../scripts/model-routing.mjs";
@@ -72,6 +75,30 @@ for (const section of ROUTING_SECTIONS) {
 			fieldByPath(fields, "paseoProvider").enum,
 			[...ROLE_PROVIDERS],
 			`${section}: the provider dropdown must offer every role provider, not just pi-*`,
+		);
+
+		// The provider control is the ROLE-first composite, not a flat dropdown:
+		// role axis (fixed at three), runtime axis (grows with the descriptors),
+		// and the two must compose to EXACTLY the flat vocabulary the resolver
+		// enforces — no missing pair, no pair that is not a real role provider.
+		const roleProvider = fieldByPath(fields, "paseoProvider");
+		assert.equal(roleProvider.type, "role-provider", `${section}: provider is the role-first composite`);
+		assert.deepEqual(roleProvider.roles, [...TEAM_ROLES], `${section}: role axis is the three team roles`);
+		assert.deepEqual(
+			roleProvider.runtimes.map((r) => r.id),
+			[...RUNTIME_FAMILIES],
+			`${section}: runtime axis is every runtime family, in order`,
+		);
+		for (const rt of roleProvider.runtimes) {
+			assert.equal(rt.label, RUNTIME_DESCRIPTORS[rt.id].label, `${section}: runtime ${rt.id} carries its descriptor label`);
+		}
+		const composed = roleProvider.runtimes
+			.flatMap((rt) => roleProvider.roles.map((role) => `${rt.id}-${role}`))
+			.sort();
+		assert.deepEqual(
+			composed,
+			[...ROLE_PROVIDERS].sort(),
+			`${section}: role × runtime must compose to exactly ROLE_PROVIDERS`,
 		);
 
 		// Thinking levels are per family, so the form cannot offer one flat list.
