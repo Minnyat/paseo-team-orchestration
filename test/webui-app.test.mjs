@@ -124,6 +124,11 @@ validateRoutingConfig(ROUTING_DOC); // the fixture itself is a file the gate acc
 	assert.equal(info.title, "Chưa lưu: cấu hình không hợp lệ", "not 'Paseo is down' just because the text says connection");
 	assert.ok(info.advice.includes(message), "the advice carries which host/route and what is wrong");
 	assert.match(info.advice, /giữ nguyên/, "and says the file was not touched");
+	// The validator's own message arrives as "CONFIG_INVALID: route …"; the code
+	// is already in the title, so it is not repeated mid-sentence.
+	const prefixed = humanizeError({ ok: false, code: "CONFIG_INVALID", message: `CONFIG_INVALID: ${message}` });
+	assert.ok(prefixed.advice.endsWith(`— ${message}`), `prefix stripped: ${prefixed.advice}`);
+	assert.doesNotMatch(prefixed.advice, /CONFIG_INVALID/);
 }
 
 // --- the save prune keeps the empty lists a validator requires ---------------
@@ -137,6 +142,21 @@ validateRoutingConfig(ROUTING_DOC); // the fixture itself is a file the gate acc
 	assert.deepEqual(saved.hosts.a.capabilities, [], "a keepEmpty list comes back after the prune");
 	assert.equal(saved.hosts.a.routes, undefined, "a list/object without keepEmpty stays pruned");
 	assert.deepEqual(Object.keys(fillKeptEmpty(schema, { version: 1, hosts: {} }).hosts), [], "no host is invented");
+
+	// A host id is any non-empty string, dots included. Built into a dotted
+	// path and split again, "mac.local" turned into a phantom host "mac" with a
+	// "local" child, and a cluster file that saved as-is was refused.
+	const dotted = {
+		version: 1,
+		hosts: {
+			"mac.local": { connection: { type: "local" }, required: true, capabilities: [], routes: structuredClone(ROUTING_DOC.routes) },
+		},
+	};
+	const savedDotted = fillKeptEmpty(schema, pruneEmpty(structuredClone(dotted)));
+	assert.deepEqual(Object.keys(savedDotted.hosts), ["mac.local"], "the dotted host id is kept whole, no phantom host");
+	assert.deepEqual(savedDotted.hosts["mac.local"].capabilities, []);
+	validateClusterConfig(savedDotted);
+
 	// Every other section's save is unchanged: nothing in them is keepEmpty.
 	for (const section of ["routing", "pi-models", "pi-settings", "mcp", "providers", "seats"]) {
 		const before = { version: 1 };
@@ -603,6 +623,7 @@ try {
 	assert.match(errorToast(), /Chưa lưu/, "the toast says nothing was saved");
 	assert.match(errorToast(), /MONITOR_ECONOMY/, "and names the route to fix");
 	assert.match(errorToast(), /<pi-provider>\/<model-id>/, "and what form the model must take");
+	assert.match(errorToast(), /Lưu lại — route MONITOR_ECONOMY/, "the reason follows the advice without the bare error code");
 	assert.deepEqual(JSON.parse(files.routing), ROUTING_DOC, "the file on disk is still the valid one");
 
 	// Picking a model from the pi list makes it savable.

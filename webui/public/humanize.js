@@ -249,9 +249,11 @@ export function humanizeError(payload) {
 	// and matched against the table below its words — "connection", "must be one
 	// of" — would be explained as a Paseo outage or an app bug.
 	if (payload?.code === "CONFIG_INVALID") {
+		// RoutingError prefixes its own code; the title already says it.
+		const reason = String(payload.message ?? "").replace(/^CONFIG_INVALID:\s*/, "") || "xem chi tiết kỹ thuật";
 		return {
 			title: "Chưa lưu: cấu hình không hợp lệ",
-			advice: `File vẫn giữ nguyên. Sửa chỗ này rồi Lưu lại — ${payload.message ?? "xem chi tiết kỹ thuật"}`,
+			advice: `File vẫn giữ nguyên. Sửa chỗ này rồi Lưu lại — ${reason}`,
 			technical,
 		};
 	}
