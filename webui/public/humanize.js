@@ -358,3 +358,83 @@ export function degradedSentence(degraded = [], pendingParents = 0) {
 	if (pendingParents > 0) parts.push(`đang dựng sơ đồ, còn ${pendingParents} agent chưa xếp xong`);
 	return parts.length === 0 ? "" : `Lưu ý: ${parts.join("; ")}.`;
 }
+
+// --- model limits (the "Kho model Pi" sync report) -------------------------
+
+/**
+ * What an unknown limit means. The sync leaves it out of models.json and pi
+ * applies its own default. No number is named here: the page shows only what
+ * the CLI sent, and a figure copied from pi's source would be one more
+ * hard-coded context window, wrong as soon as pi changes it.
+ */
+export const UNKNOWN_LIMIT = "chưa biết (Pi tự dùng mặc định của nó)";
+
+/** 1050000 -> "1.050.000", the Vietnamese grouping, without relying on the browser's ICU data. */
+export function formatTokens(value) {
+	return String(Math.trunc(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
+/** One limit cell: the number, or a plain "unknown" that says pi decides. */
+export function limitCell(value) {
+	return Number.isInteger(value) && value > 0 ? formatTokens(value) : UNKNOWN_LIMIT;
+}
+
+const LIMIT_SOURCE_LABEL = Object.freeze({
+	override: "ghi đè",
+	"models.dev": "models.dev",
+	unknown: "chưa biết",
+});
+
+export function limitSourceLabel(source) {
+	// Own keys only: "toString" from a report is a source name, not Object's method.
+	if (typeof source === "string" && Object.hasOwn(LIMIT_SOURCE_LABEL, source)) return LIMIT_SOURCE_LABEL[source];
+	return source ? String(source) : "chưa biết";
+}
+
+/**
+ * One line for a model, context window · max output · source:
+ * "1.050.000 · 128.000 · models.dev". Each field stands on its own — a
+ * models.dev maxTokens larger than its window is dropped, leaving a model
+ * half known — so an unknown field says so in its own slot.
+ */
+export function modelLimitsLabel(model) {
+	return [limitCell(model?.contextWindow), limitCell(model?.maxTokens), limitSourceLabel(model?.limitSource)].join(" · ");
+}
+
+/**
+ * Where this run's limits came from and how old they are, with a level the
+ * page colours by: "ok" (fresh or a normal cached copy), "warn" (models.dev
+ * unreachable, an old copy in use), "bad" (no data at all — every model
+ * without an override falls back to pi's defaults). Null for a report from a
+ * CLI that predates the field.
+ */
+export function limitsOriginSentence(limits, now = Date.now()) {
+	if (!limits || typeof limits !== "object" || typeof limits.origin !== "string") return null;
+	const age = limits.fetchedAt ? `tải ${relativeTime(limits.fetchedAt, now)}` : "không rõ lúc tải";
+	const reason = limits.error ? ` (${limits.error})` : "";
+	let level = "ok";
+	let text;
+	if (limits.origin === "network") {
+		text = `Context window lấy từ models.dev, vừa tải mới (${age}).`;
+	} else if (limits.origin === "cache") {
+		text = `Context window lấy từ bản models.dev lưu sẵn trên máy, ${age}.`;
+	} else if (limits.origin === "stale-cache") {
+		level = "warn";
+		text = `Không tải được models.dev${reason}; đang dùng bản lưu CŨ, ${age}.`;
+	} else if (limits.origin === "unavailable") {
+		level = "bad";
+		text = `Không tải được models.dev${reason} và chưa có bản lưu nào: model không có ghi đè sẽ dùng mặc định của Pi.`;
+	} else {
+		text = `Nguồn context window: ${limits.origin} (${age}).`;
+	}
+	if (limits.cacheError) {
+		if (level === "ok") level = "warn";
+		text += ` Không ghi được bản lưu tạm (${limits.cacheError}), lần sau sẽ tải lại.`;
+	}
+	return { level, text };
+}
+
+/** A sync warning line without the "pi-models: " tag every one of them starts with. */
+export function syncWarningText(line) {
+	return String(line ?? "").replace(/^pi-models:\s*/, "");
+}

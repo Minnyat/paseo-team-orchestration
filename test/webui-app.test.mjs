@@ -475,7 +475,140 @@ const INVENTORY = {
 	"claude-lead": ["claude-sonnet-5-5", "claude-opus-5-5"],
 	"claude-peer": ["claude-sonnet-5-5", "claude-opus-5-5"],
 };
-const files = { routing: JSON.stringify(ROUTING_DOC, null, 2), cluster: null };
+// Two sections stand in for schemas this branch does not have yet. "mcp" serves
+// a per-model limits map keyed by model ids (`gpt-5.5`, `poolside/laguna-s-2.1`),
+// "paseo" a jobs-shaped map whose items hold a `list` of executors (contract
+// S7). The section names only pick a file slot in this fake CLI; neither has a
+// server-side validator, so what reaches `config write` is exactly what the
+// form sent.
+const ROUTE_FIELD = (name) =>
+	schemaForSection("routing")
+		.groups.flatMap((group) => group.fields)
+		.find((field) => field.path === "routes")
+		.item.fields.find((field) => field.path === name);
+const LIMITS_SCHEMA = {
+	label: "Giới hạn theo model (thử)",
+	seed: { version: 1, providers: {} },
+	groups: [
+		{
+			id: "providers",
+			label: "Điểm cuối",
+			fields: [
+				{
+					path: "providers",
+					type: "map",
+					keyLabel: "Tên provider",
+					item: {
+						fields: [
+							{
+								path: "models",
+								type: "map",
+								keyLabel: "Model id",
+								addLabel: "Thêm model",
+								item: {
+									fields: [
+										{ path: "contextWindow", type: "number", min: 1024, label: "Context window" },
+										{ path: "maxTokens", type: "number", min: 256, label: "Max output tokens" },
+									],
+								},
+							},
+						],
+					},
+				},
+			],
+		},
+	],
+};
+const LIMITS_DOC = {
+	version: 1,
+	providers: {
+		minnyat: {
+			baseUrl: "https://example.invalid/v1",
+			models: {
+				"gpt-5": { contextWindow: 400000 },
+				"gpt-5.5": { contextWindow: 1050000, maxTokens: 128000 },
+				"poolside/laguna-s-2.1": { maxTokens: 8000 },
+			},
+		},
+	},
+};
+const JOBS_SCHEMA = {
+	label: "Jobs (thử)",
+	seed: { version: 1, jobs: {} },
+	groups: [
+		{
+			id: "jobs",
+			label: "Jobs",
+			fields: [
+				{
+					path: "jobs",
+					type: "map",
+					keyLabel: "Tên job",
+					addLabel: "Thêm job",
+					item: {
+						seed: { executors: [{ kind: "class" }] },
+						fields: [
+							{ path: "run", type: "enum", enum: ["parallel", "sequential"], label: "Cách chạy" },
+							{
+								path: "executors",
+								type: "list",
+								label: "Executors",
+								addLabel: "Thêm executor",
+								minItems: 1,
+								item: {
+									seed: { kind: "class" },
+									fields: [
+										{ path: "kind", type: "enum", enum: ["class", "route", "cli"], label: "Loại" },
+										{
+											path: "modelClass",
+											type: "enum",
+											enum: ["FAST_READ", "REVIEW_HIGH"],
+											label: "Lớp việc",
+											showIf: { path: "kind", equals: "class" },
+										},
+										{ ...ROUTE_FIELD("paseoProvider"), showIf: { path: "kind", equals: "route" } },
+										{
+											...ROUTE_FIELD("model"),
+											optionsBy: { path: "paseoProvider", source: "models", map: INVENTORY },
+											showIf: { path: "kind", equals: "route" },
+										},
+										{ path: "tool", type: "string", label: "Công cụ", showIf: { path: "kind", equals: "cli" } },
+										{ path: "args", type: "lines", label: "Tham số", showIf: { path: "kind", equals: "cli" } },
+									],
+								},
+							},
+						],
+					},
+				},
+			],
+		},
+	],
+};
+const JOBS_DOC = {
+	version: 1,
+	jobs: {
+		"re.view": {
+			run: "sequential",
+			executors: [
+				{ kind: "class", modelClass: "FAST_READ" },
+				{ kind: "cli", tool: "claude", args: ["-p"] },
+			],
+		},
+	},
+};
+const SCHEMA_OVERRIDE = { mcp: LIMITS_SCHEMA, paseo: JOBS_SCHEMA };
+
+const files = {
+	routing: JSON.stringify(ROUTING_DOC, null, 2),
+	cluster: null,
+	mcp: JSON.stringify(LIMITS_DOC, null, 2),
+	paseo: JSON.stringify(JOBS_DOC, null, 2),
+	"pi-models": JSON.stringify({ version: 1, providers: { minnyat: { baseUrl: "https://example.invalid/v1" } } }, null, 2),
+	providers: JSON.stringify({ agents: { providers: { "hob.local": { extends: "pi", env: { PASEO_PI_ROLE: "supervisor" } } } } }, null, 2),
+};
+// What the next `models sync` answers, in order; a report with ok:false exits
+// non-zero, as the real CLI does.
+const syncReplies = [];
 const writes = [];
 const rev = (text) => (text === null ? "absent" : createHash("sha256").update(text).digest("hex"));
 
@@ -488,7 +621,7 @@ async function fakeCli(args, stdin) {
 			path: `/tmp/fake/${section}.local.json`,
 			rev: rev(text),
 			data: text === null ? null : JSON.parse(text),
-			schema: withModelInventory(schemaForSection(section), INVENTORY),
+			schema: SCHEMA_OVERRIDE[section] ?? withModelInventory(schemaForSection(section), INVENTORY),
 		};
 		return { exitCode: 0, stdout: JSON.stringify(payload), stderr: "" };
 	}
@@ -496,6 +629,10 @@ async function fakeCli(args, stdin) {
 		writes.push({ section, doc: JSON.parse(stdin) });
 		files[section] = stdin;
 		return { exitCode: 0, stdout: JSON.stringify({ ok: true, path: `/tmp/fake/${section}.local.json` }), stderr: "" };
+	}
+	if (command === "models" && verb === "sync" && syncReplies.length > 0) {
+		const report = syncReplies.shift();
+		return { exitCode: report.ok === false ? 1 : 0, stdout: JSON.stringify(report), stderr: "" };
 	}
 	return { exitCode: 1, stdout: "", stderr: `unexpected command in test: ${args.join(" ")}` };
 }
@@ -514,11 +651,11 @@ Object.assign(globalThis, {
 	localStorage: storage({ "paseo-team-advanced": "1" }),
 	CSS: { escape: (value) => String(value) },
 	confirm: () => true,
-	// Only the config endpoints are wired to the server. The home tab's polls
+	// Only the config and model-sync endpoints are wired to the server. The home tab's polls
 	// stay pending forever, which is harmless and keeps their render paths (not
 	// under test here) from running on half-shaped data.
 	fetch: (path, init) =>
-		String(path).startsWith("/api/config") ? realFetch(`http://127.0.0.1:${server.port}${path}`, init) : new Promise(() => {}),
+		/^\/api\/(config|models)/.test(String(path)) ? realFetch(`http://127.0.0.1:${server.port}${path}`, init) : new Promise(() => {}),
 	// The page's polls and the toast's auto-hide must not keep the test alive.
 	setInterval: () => 0,
 	setTimeout: (fn, ms, ...rest) => realSetTimeout(fn, ms, ...rest).unref(),
@@ -670,6 +807,310 @@ try {
 	assert.ok(cluster, `a new cluster host is saved (toast: "${toastText()}")`);
 	assert.deepEqual(cluster.doc.hosts.moi.capabilities, [], "capabilities is written even when empty");
 	validateClusterConfig(cluster.doc);
+
+	// --- cluster: hosts "mac" and "mac.local" side by side (S6) ---------------
+	// The reviewer's reproduction: editing mac.local's card said "Đã lưu" but
+	// wrote hosts.mac.local — a child of host mac. Every action on the dotted
+	// card is driven here, and host mac must come out byte-identical each time.
+	const HOST = (writers) => ({
+		connection: { type: "local" },
+		required: true,
+		capabilities: [],
+		limits: { writers, readers: 2 },
+		routes: structuredClone(ROUTING_DOC.routes),
+	});
+	const TWO_HOSTS = { version: 1, hosts: { mac: HOST(1), "mac.local": HOST(3) } };
+	// Hidden (the host is local) but meaningful: it is what switching to remote
+	// uses. Unlike a list element's hidden field, it must survive a save.
+	TWO_HOSTS.hosts.mac.connection.endpointEnv = "MAC_URL";
+	validateClusterConfig(TWO_HOSTS);
+	files.cluster = JSON.stringify(TWO_HOSTS, null, 2);
+	await openSection("cluster");
+	assert.equal(errorToast(), "");
+	const rowByLabel = (within, text) =>
+		within.querySelectorAll(".cfg-field").find((row) => row.querySelector(".cfg-label label")?.textContent === text);
+	const writersInput = (key) => rowByLabel(card(key), "Số agent được ghi file cùng lúc").querySelector("input");
+	const type = (input, value) => {
+		input.value = value;
+		input.dispatchEvent(new Event("input", { bubbles: true }));
+	};
+	assert.equal(writersInput("mac").value, "1");
+	assert.equal(writersInput("mac.local").value, "3", "mac.local's card shows its own value, not an empty default");
+
+	const clusterUntouched = await save();
+	assert.ok(clusterUntouched, `an unedited cluster saves (toast: "${toastText()}")`);
+	assert.deepEqual(clusterUntouched.doc, TWO_HOSTS, "opening the form and pressing Lưu changes nothing");
+
+	type(writersInput("mac.local"), "5");
+	const editedHost = await save();
+	assert.ok(editedHost, `editing mac.local saves (toast: "${toastText()}")`);
+	assert.deepEqual(Object.keys(editedHost.doc.hosts), ["mac", "mac.local"], "no host invented, none lost");
+	assert.equal(editedHost.doc.hosts["mac.local"].limits.writers, 5, "the edit lands on mac.local");
+	assert.deepEqual(editedHost.doc.hosts.mac, TWO_HOSTS.hosts.mac, "and host mac is untouched");
+
+	change(card("mac.local").querySelector(".cfg-card-key"), "mac.lan");
+	await tick();
+	assert.ok(card("mac.lan"), "the renamed card is there");
+	assert.equal(card("mac.local"), null, "and the old one is gone, not duplicated");
+	const renamedHost = await save();
+	assert.ok(renamedHost, `a renamed dotted host saves (toast: "${toastText()}")`);
+	assert.deepEqual(Object.keys(renamedHost.doc.hosts), ["mac", "mac.lan"]);
+	assert.equal(renamedHost.doc.hosts["mac.lan"].limits.writers, 5, "the renamed host keeps its settings");
+	assert.deepEqual(renamedHost.doc.hosts.mac, TWO_HOSTS.hosts.mac);
+
+	card("mac.lan").querySelector(".cfg-card-head .cfg-icon").click();
+	await tick();
+	assert.equal(card("mac.lan"), null, "the × on a dotted card removes that card");
+	const removedHost = await save();
+	assert.ok(removedHost, `removing a dotted host saves (toast: "${toastText()}")`);
+	assert.deepEqual(removedHost.doc.hosts, { mac: TWO_HOSTS.hosts.mac }, "only mac is left, as it was");
+
+	$("config-form").querySelectorAll("button").find((button) => button.textContent === "Thêm máy").click();
+	await tick();
+	change(card("moi").querySelector(".cfg-card-key"), "studio.local");
+	await tick();
+	for (const routeCard of routeCards(card("studio.local"))) fillRoute(routeCard, CLAUDE_PEER);
+	type(writersInput("studio.local"), "2");
+	const addedHost = await save();
+	assert.ok(addedHost, `a new host named with a dot saves (toast: "${toastText()}")`);
+	assert.deepEqual(Object.keys(addedHost.doc.hosts), ["mac", "studio.local"]);
+	assert.equal(addedHost.doc.hosts["studio.local"].limits.writers, 2);
+	assert.deepEqual(addedHost.doc.hosts["studio.local"].capabilities, [], "keepEmpty still reaches a dotted host");
+	assert.deepEqual(addedHost.doc.hosts.mac, TWO_HOSTS.hosts.mac);
+	validateClusterConfig(addedHost.doc);
+
+	// --- model ids with dots as map keys ---------------------------------------
+	// `gpt-5` next to `gpt-5.5`: the dotted path for gpt-5.5 split into
+	// models["gpt-5"]["5"], so the card showed nothing, edits went under gpt-5,
+	// and the range check looked at the wrong number.
+	await openSection("mcp");
+	assert.equal(errorToast(), "");
+	const limitInput = (id, label) => rowByLabel(card(id), label).querySelector("input");
+	assert.equal(limitInput("gpt-5.5", "Context window").value, "1050000", "gpt-5.5 shows its own limit");
+	assert.equal(limitInput("gpt-5", "Context window").value, "400000");
+	assert.equal(limitInput("poolside/laguna-s-2.1", "Max output tokens").value, "8000", "a slash-and-dot id too");
+
+	const limitsUntouched = await save();
+	assert.ok(limitsUntouched, `an unedited limits map saves (toast: "${toastText()}")`);
+	assert.deepEqual(limitsUntouched.doc, LIMITS_DOC, "opening the form and pressing Lưu changes nothing");
+
+	type(limitInput("gpt-5.5", "Context window"), "10");
+	assert.equal(await save(), null, "an out-of-range value under a dotted key is refused before the write");
+	assert.match(errorToast(), /providers\.minnyat\.models\."gpt-5\.5": Context window phải là số từ 1024/, "and the message says which model");
+	type(limitInput("gpt-5.5", "Context window"), "2000000");
+	const limitsEdited = await save();
+	assert.ok(limitsEdited, `a valid edit saves (toast: "${toastText()}")`);
+	assert.deepEqual(limitsEdited.doc.providers.minnyat.models["gpt-5.5"], { contextWindow: 2000000, maxTokens: 128000 });
+	assert.deepEqual(limitsEdited.doc.providers.minnyat.models["gpt-5"], { contextWindow: 400000 }, "gpt-5 untouched");
+
+	card("poolside/laguna-s-2.1").querySelector(".cfg-card-head .cfg-icon").click();
+	await tick();
+	const limitsRemoved = await save();
+	assert.ok(limitsRemoved);
+	assert.deepEqual(Object.keys(limitsRemoved.doc.providers.minnyat.models), ["gpt-5", "gpt-5.5"], "the × removed exactly that model");
+
+	// A key Object.prototype also carries is still a free name: `next in {}` is
+	// true for "constructor", and the rename used to be refused as a duplicate.
+	change(card("gpt-5").querySelector(".cfg-card-key"), "constructor");
+	await tick();
+	assert.equal(errorToast(), "", "renaming to constructor is not refused as a duplicate");
+	change(card("gpt-5.5").querySelector(".cfg-card-key"), "toString");
+	await tick();
+	assert.equal(errorToast(), "", "nor to toString");
+	const protoNames = await save();
+	assert.ok(protoNames, `keys named like prototype members save (toast: "${toastText()}")`);
+	assert.deepEqual(protoNames.doc.providers.minnyat.models, {
+		constructor: { contextWindow: 400000 },
+		toString: { contextWindow: 2000000, maxTokens: 128000 },
+	});
+
+	// --- `list` fields: a job's executors (S7) ---------------------------------
+	await openSection("paseo");
+	assert.equal(errorToast(), "", "a list inside a map item renders without error");
+	const items = () => card("re.view").querySelectorAll(".cfg-list-item");
+	const shown = (item, label) => !rowByLabel(item, label).classList.contains("hidden");
+	const tool = (item, name) => item.querySelector(`.cfg-list-${name}`);
+	assert.equal(items().length, 2);
+	assert.deepEqual(
+		items().map((item) => [shown(item, "Lớp việc"), shown(item, "Công cụ"), shown(item, "Vai trò & runtime")]),
+		[
+			[true, false, false],
+			[false, true, false],
+		],
+		"each element shows the fields of its own kind",
+	);
+	assert.equal(tool(items()[0], "up").disabled, true, "the first cannot move up");
+	assert.equal(tool(items()[1], "down").disabled, true, "the last cannot move down");
+	assert.equal(tool(items()[0], "remove").disabled, false, "above minItems an element can go");
+
+	const jobsUntouched = await save();
+	assert.ok(jobsUntouched, `an unedited jobs document saves (toast: "${toastText()}")`);
+	assert.deepEqual(jobsUntouched.doc, JOBS_DOC, "opening the form and pressing Lưu changes nothing");
+
+	tool(items()[1], "up").click();
+	await tick();
+	assert.deepEqual(
+		items().map((item) => rowByLabel(item, "Loại").querySelector("select").value),
+		["cli", "class"],
+		"move up reorders the cards",
+	);
+	// The class executor becomes a route: its modelClass is hidden now, and must not be saved.
+	change(rowByLabel(items()[1], "Loại").querySelector("select"), "route");
+	await tick();
+	assert.equal(shown(items()[1], "Lớp việc"), false, "switching kind hides the old kind's field");
+	assert.equal(shown(items()[1], "Vai trò & runtime"), true, "and shows the new kind's");
+	const [roleSel, runtimeSel] = items()[1].querySelectorAll(".cfg-roleprovider select");
+	change(roleSel, "peer");
+	change(runtimeSel, "claude");
+	await tick();
+	change(items()[1].querySelector(".cfg-swap select"), "claude-opus-5-5");
+	const jobsEdited = await save();
+	assert.ok(jobsEdited, `the edited executors save (toast: "${toastText()}")`);
+	assert.deepEqual(
+		jobsEdited.doc.jobs["re.view"].executors,
+		[
+			{ kind: "cli", tool: "claude", args: ["-p"] },
+			{ kind: "route", paseoProvider: "claude-peer", model: "claude-opus-5-5" },
+		],
+		"order kept, the hidden modelClass left out",
+	);
+
+	tool(items()[0], "remove").click();
+	await tick();
+	assert.equal(items().length, 1);
+	assert.equal(tool(items()[0], "remove").disabled, true, "at minItems the last element cannot be removed");
+	card("re.view").querySelector(".cfg-list-add").click();
+	await tick();
+	assert.equal(items().length, 2, "Thêm executor adds one");
+	assert.equal(rowByLabel(items()[1], "Loại").querySelector("select").value, "class", "from the item seed");
+	change(rowByLabel(items()[1], "Lớp việc").querySelector("select"), "REVIEW_HIGH");
+
+	$("config-form").querySelectorAll("button").find((button) => button.textContent === "Thêm job").click();
+	await tick();
+	change(card("moi").querySelector(".cfg-card-key"), "nightly.v2");
+	await tick();
+	assert.equal(card("nightly.v2").querySelectorAll(".cfg-list-item").length, 1, "a new job starts from the map seed's executor");
+	change(rowByLabel(card("nightly.v2"), "Lớp việc").querySelector("select"), "FAST_READ");
+	const jobsAdded = await save();
+	assert.ok(jobsAdded, `jobs save (toast: "${toastText()}")`);
+	assert.deepEqual(jobsAdded.doc.jobs, {
+		"re.view": {
+			run: "sequential",
+			executors: [
+				{ kind: "route", paseoProvider: "claude-peer", model: "claude-opus-5-5" },
+				{ kind: "class", modelClass: "REVIEW_HIGH" },
+			],
+		},
+		"nightly.v2": { executors: [{ kind: "class", modelClass: "FAST_READ" }] },
+	});
+
+	// A list below its minItems is refused by the form, with the place named.
+	files.paseo = JSON.stringify({ version: 1, jobs: { "re.view": { executors: [] } } }, null, 2);
+	await openSection("paseo");
+	assert.match(card("re.view").querySelector(".cfg-list-short").textContent, /Cần ít nhất 1 mục/, "the card says it is short");
+	assert.equal(await save(), null, "a job with no executor never reaches config write");
+	assert.match(errorToast(), /jobs\."re\.view"\.executors: Executors cần ít nhất 1 mục/);
+
+	// --- a kv row keyed __proto__ (the real providers section's env editor) ---
+	// `next[key] = value` with key "__proto__" sets the object's prototype
+	// instead of adding a key, so the variable silently vanished on save.
+	await openSection("providers");
+	assert.equal(errorToast(), "");
+	const envField = rowByLabel(card("hob.local"), "Biến môi trường");
+	envField.querySelector(".cfg-add").click();
+	const newRow = envField.querySelectorAll(".cfg-kv-row").at(-1);
+	type(newRow.querySelector(".cfg-kv-key"), "__proto__");
+	type(newRow.querySelector(".cfg-kv-value"), "polluted");
+	const kvSaved = await save();
+	assert.ok(kvSaved, `a kv row named __proto__ saves (toast: "${toastText()}")`);
+	const env = kvSaved.doc.agents.providers["hob.local"].env;
+	assert.deepEqual(Object.keys(env), ["PASEO_PI_ROLE", "__proto__"], "the __proto__ row is an own key of the saved env");
+	assert.equal(Object.getOwnPropertyDescriptor(env, "__proto__").value, "polluted");
+	assert.equal({}.polluted, undefined, "and Object.prototype is untouched");
+	assert.equal(Object.getPrototypeOf({}), Object.prototype);
+
+	// --- the model sync result says where each limit came from ----------------
+	await openSection("pi-models");
+	const syncButton = () => $("config-actions").querySelectorAll("button").find((button) => button.textContent === "Cập nhật danh sách model");
+	const output = () => $("config-actions").querySelector(".cfg-actions-out");
+	async function runSync(report) {
+		syncReplies.push(report);
+		clear(output());
+		syncButton().click();
+		await until(() => output().querySelector(".cfg-actions-head") && !syncButton().disabled, "the sync result");
+		return output();
+	}
+	const clear = (node) => {
+		for (const child of [...node.childNodes]) node.removeChild(child);
+	};
+	const fetchedAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+	const okOut = await runSync({
+		ok: true,
+		command: "models sync",
+		path: "/tmp/fake/models.json",
+		dryRun: false,
+		limits: { origin: "stale-cache", fetchedAt, error: "fetch failed" },
+		warnings: [
+			`pi-models: models.dev unreachable (fetch failed); using the cached copy from ${fetchedAt} (3h old)`,
+			"pi-models: minnyat/gpt-5.5: override maxTokens 2000000 is above models.dev's contextWindow 1050000; contextWindow is now unknown",
+		],
+		providers: [
+			{
+				ok: true,
+				provider: "minnyat",
+				baseUrl: "https://example.invalid/v1",
+				listed: 3,
+				written: 3,
+				models: [
+					{ id: "gpt-5.6-terra", reasoning: false, contextWindow: 1050000, maxTokens: 128000, limitSource: "models.dev" },
+					{ id: "gpt-5.5", reasoning: true, maxTokens: 64000, limitSource: "override" },
+					{ id: "review", reasoning: false, limitSource: "unknown" },
+					null,
+					"not-a-model",
+				],
+			},
+		],
+	});
+	assert.equal(okOut.classList.contains("good"), true, "a malformed model entry does not turn the report into an error line");
+	assert.equal(okOut.querySelectorAll(".cfg-model-limit").length, 3, "it is skipped; the three real models are listed");
+	assert.match(okOut.querySelector(".cfg-actions-head").textContent, /Đã cập nhật xong — 2 cảnh báo/);
+	const warnBox = okOut.querySelector(".cfg-actions-warn");
+	assert.ok(warnBox, "warnings are shown, set apart");
+	assert.deepEqual(
+		warnBox.querySelectorAll("li").map((li) => li.textContent),
+		[
+			`models.dev unreachable (fetch failed); using the cached copy from ${fetchedAt} (3h old)`,
+			"minnyat/gpt-5.5: override maxTokens 2000000 is above models.dev's contextWindow 1050000; contextWindow is now unknown",
+		],
+	);
+	const originLine = okOut.querySelector(".cfg-actions-origin");
+	assert.ok(originLine.classList.contains("warn"), "an old cached copy is a warning");
+	assert.match(originLine.textContent, /bản lưu CŨ, tải 3 giờ trước/);
+	const limitRow = (id) => okOut.querySelector(`.cfg-model-limit[data-model="${id}"]`)?.textContent;
+	assert.equal(limitRow("gpt-5.6-terra"), "gpt-5.6-terra1.050.000 · 128.000 · models.dev");
+	assert.equal(limitRow("gpt-5.5"), "gpt-5.5chưa biết (Pi tự dùng mặc định của nó) · 64.000 · ghi đè", "half known: only the unknown half says so");
+	assert.equal(limitRow("review"), "reviewchưa biết (Pi tự dùng mặc định của nó) · chưa biết (Pi tự dùng mặc định của nó) · chưa biết");
+	assert.doesNotMatch(okOut.textContent, /128\.000\/16\.384|16\.384/, "no pi default is quoted as a number");
+
+	// A partial failure exits non-zero; the report still arrives and is shown.
+	const badOut = await runSync({
+		ok: false,
+		command: "models sync",
+		path: "/tmp/fake/models.json",
+		dryRun: false,
+		limits: { origin: "unavailable", error: "getaddrinfo ENOTFOUND models.dev" },
+		warnings: [],
+		providers: [
+			{ ok: false, provider: "dead", baseUrl: "https://dead.invalid/v1", code: "LIST_FAILED", message: "HTTP 503" },
+			{ ok: true, provider: "minnyat", baseUrl: "https://example.invalid/v1", written: 1, models: [{ id: "review", limitSource: "unknown" }] },
+		],
+	});
+	assert.equal(badOut.classList.contains("bad"), true);
+	assert.equal(badOut.querySelector(".cfg-actions-warn"), null, "no warnings, no warning box");
+	assert.ok(badOut.querySelector(".cfg-actions-origin").classList.contains("bad"));
+	assert.match(badOut.querySelector(".cfg-actions-origin").textContent, /ENOTFOUND models\.dev.*mặc định của Pi\.$/);
+	assert.equal(badOut.querySelector('.cfg-model-limit[data-model="review"]').textContent, "reviewchưa biết (Pi tự dùng mặc định của nó) · chưa biết (Pi tự dùng mặc định của nó) · chưa biết");
+	assert.match(badOut.querySelector(".cfg-actions-list li.no").textContent, /^dead — /, "the failed endpoint is still named");
 } finally {
 	Object.assign(globalThis, { fetch: realFetch, setTimeout: realSetTimeout, setInterval: realSetInterval });
 	await server.close();
