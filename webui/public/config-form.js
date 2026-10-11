@@ -76,6 +76,33 @@ export function pruneEmpty(value) {
 	return value;
 }
 
+/**
+ * Put back the empty lists a reader insists on, after pruneEmpty took them out.
+ *
+ * pruneEmpty treats `[]` as "not set", which holds for almost every list here,
+ * but not for a field the schema marks `keepEmpty`: a cluster host's
+ * `capabilities` must be an array even when it is empty, and without it
+ * validateClusterConfig refuses the whole file. A field is restored only inside
+ * an item that survived the prune — a removed host does not come back as a husk.
+ */
+export function fillKeptEmpty(schema, doc) {
+	if (doc === null || typeof doc !== "object") return doc;
+	for (const group of schema?.groups ?? []) {
+		for (const field of group.fields ?? []) visit(field, "");
+	}
+	function visit(field, base) {
+		const path = base ? `${base}.${field.path}` : field.path;
+		if (field.keepEmpty && getPath(doc, path) === undefined) setPath(doc, path, []);
+		if (field.type === "map" && field.item) {
+			const object = getPath(doc, path);
+			for (const key of Object.keys(object ?? {})) {
+				for (const child of field.item.fields ?? []) visit(child, `${path}.${key}`);
+			}
+		}
+	}
+	return doc;
+}
+
 /** One entry per number field outside its range, with the label to show the user. */
 export function numberRangeProblems(schema, doc, prefix = "") {
 	const problems = [];

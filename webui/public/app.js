@@ -22,6 +22,7 @@ import {
 	deletePath,
 	dependentOptionProblems,
 	dependentOptions,
+	fillKeptEmpty,
 	getPath,
 	numberRangeProblems,
 	optionalEntryProblems,
@@ -1368,14 +1369,19 @@ function roleProviderControl(field, path) {
 		return { runtime: "", role: "" };
 	};
 
-	const paint = () => {
+	const paintNote = () => {
 		const current = String(getPath(configState.doc, path) ?? "");
 		const { runtime, role } = parse(current);
-		roleSel.value = role;
-		runtimeSel.value = runtime;
 		const stranded = current !== "" && (runtime === "" || role === "");
 		note.classList.toggle("hidden", !stranded);
 		if (stranded) note.textContent = `Giá trị đang lưu "${current}" không khớp vai trò/runtime nào — giữ nguyên, chọn lại để thay.`;
+	};
+
+	const paint = () => {
+		const { runtime, role } = parse(String(getPath(configState.doc, path) ?? ""));
+		roleSel.value = role;
+		runtimeSel.value = runtime;
+		paintNote();
 	};
 
 	const commit = () => {
@@ -1384,8 +1390,11 @@ function roleProviderControl(field, path) {
 		if (role && runtime) setPath(configState.doc, path, `${runtime}-${role}`);
 		else deletePath(configState.doc, path);
 		// The delegated form listener repaints model/thinking off the new
-		// paseoProvider; this only has to keep its own note current.
-		paint();
+		// paseoProvider; this only has to keep its own note current. It must NOT
+		// re-read the dropdowns from the document: half a choice (a role with no
+		// runtime yet) stores nothing, and repainting from that wiped the half
+		// just picked — a fresh route card could never be filled in.
+		paintNote();
 	};
 
 	roleSel.addEventListener("change", commit);
@@ -2032,7 +2041,7 @@ $("config-save").addEventListener("click", async () => {
 			toast(problems.join(" · "), true);
 			return;
 		}
-		text = JSON.stringify(pruneEmpty(configState.doc) ?? {}, null, 2);
+		text = JSON.stringify(fillKeptEmpty(configState.schema, pruneEmpty(configState.doc) ?? {}), null, 2);
 	}
 	try {
 		JSON.parse(text); // fail here, before anything touches the file

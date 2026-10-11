@@ -613,6 +613,9 @@ export const CONFIG_SCHEMAS = {
 								{
 									path: "capabilities",
 									type: "lines",
+									// validateClusterConfig requires the array even when empty;
+									// the form's save prune would otherwise drop it.
+									keepEmpty: true,
 									label: "Khả năng",
 									hint: "Mỗi dòng một khả năng: git-read, git-write, focused-test, docker, integration-test, independent-review…",
 								},

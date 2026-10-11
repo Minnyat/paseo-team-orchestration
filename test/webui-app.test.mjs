@@ -26,8 +26,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { schemaForSection, withModelInventory } from "../cli/lib/config-schema.mjs";
-import { validateRoutingConfig } from "../scripts/model-routing.mjs";
+import { validateClusterConfig, validateRoutingConfig } from "../scripts/model-routing.mjs";
 import { handleApi, startServer } from "../webui/server.mjs";
+import { fillKeptEmpty, pruneEmpty } from "../webui/public/config-form.js";
 import { humanizeError } from "../webui/public/humanize.js";
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "webui", "public");
@@ -123,6 +124,24 @@ validateRoutingConfig(ROUTING_DOC); // the fixture itself is a file the gate acc
 	assert.equal(info.title, "Chưa lưu: cấu hình không hợp lệ", "not 'Paseo is down' just because the text says connection");
 	assert.ok(info.advice.includes(message), "the advice carries which host/route and what is wrong");
 	assert.match(info.advice, /giữ nguyên/, "and says the file was not touched");
+}
+
+// --- the save prune keeps the empty lists a validator requires ---------------
+{
+	const schema = schemaForSection("cluster");
+	const doc = {
+		version: 1,
+		hosts: { a: { connection: { type: "local" }, required: true, capabilities: [], routes: {} } },
+	};
+	const saved = fillKeptEmpty(schema, pruneEmpty(doc));
+	assert.deepEqual(saved.hosts.a.capabilities, [], "a keepEmpty list comes back after the prune");
+	assert.equal(saved.hosts.a.routes, undefined, "a list/object without keepEmpty stays pruned");
+	assert.deepEqual(Object.keys(fillKeptEmpty(schema, { version: 1, hosts: {} }).hosts), [], "no host is invented");
+	// Every other section's save is unchanged: nothing in them is keepEmpty.
+	for (const section of ["routing", "pi-models", "pi-settings", "mcp", "providers", "seats"]) {
+		const before = { version: 1 };
+		assert.deepEqual(fillKeptEmpty(schemaForSection(section), structuredClone(before)), before, `${section}: untouched`);
+	}
 }
 
 // --- a DOM just big enough for app.js -----------------------------------------
@@ -513,12 +532,23 @@ try {
 		within.querySelectorAll(".cfg-card").filter((node) => node.querySelector(".cfg-roleprovider"));
 	const runtimeSelect = (routeCard) => routeCard.querySelectorAll(".cfg-roleprovider select")[1];
 	const modelSelect = (routeCard) => routeCard.querySelector(".cfg-swap select");
-	async function openSection(section) {
+	async function openSection(section, meta = `${section}.local.json`) {
 		resetToast();
+		$("config-meta").textContent = "";
 		change($("config-section"), section);
-		await until(() => $("config-meta").textContent.includes(`${section}.local.json`), `${section} form loaded`);
+		await until(() => $("config-meta").textContent.includes(meta), `${section} form loaded`);
 		await tick();
 	}
+	// Fill a route card through its controls, in the order a person would.
+	function fillRoute(routeCard, { role, runtime, model, thinking }) {
+		const [roleSel, runtimeSel] = routeCard.querySelectorAll(".cfg-roleprovider select");
+		change(roleSel, role);
+		change(runtimeSel, runtime);
+		change(modelSelect(routeCard), model);
+		const thinkingSel = routeCard.querySelectorAll("select").at(-1);
+		change(thinkingSel, thinking);
+	}
+	const CLAUDE_PEER = { role: "peer", runtime: "claude", model: "claude-opus-5-5", thinking: "high" };
 	async function save() {
 		const before = writes.length;
 		resetToast();
@@ -582,6 +612,24 @@ try {
 	assert.deepEqual(fixed.doc.routes.MONITOR_ECONOMY, { paseoProvider: "pi-supervisor", model: "box/flash", thinking: "low" });
 	validateRoutingConfig(fixed.doc);
 
+	// --- routing from nothing: a form filled from the seed is savable --------
+	// A refusal on THIS path would leave a new machine with no way to write its
+	// first routing file from the browser.
+	files.routing = null;
+	await openSection("routing", "chưa tồn tại");
+	assert.equal(errorToast(), "", "an absent routing file opens without error");
+	const hostRow = $("config-form").querySelectorAll(".cfg-field").find((row) => row.textContent.includes("hostId"));
+	const hostInput = hostRow.querySelector("input");
+	hostInput.value = "box-2";
+	hostInput.dispatchEvent(new Event("input", { bubbles: true }));
+	for (const key of ["MONITOR_ECONOMY", "FAST_READ", "CODING_MEDIUM", "REASONING_HIGH", "REVIEW_HIGH"]) {
+		fillRoute(card(key), CLAUDE_PEER);
+	}
+	const first = await save();
+	assert.ok(first, `a routing file filled in from scratch is saved (toast: "${toastText()}")`);
+	assert.equal(first.doc.hostId, "box-2");
+	validateRoutingConfig(first.doc);
+
 	// --- cluster: a new host gets its route cards ----------------------------
 	await openSection("cluster");
 	assert.equal(errorToast(), "", "opening the cluster form raises no error");
@@ -593,6 +641,14 @@ try {
 	const host = card("moi");
 	assert.ok(host, "the new host card is there");
 	assert.equal(routeCards(host).length, 5, "the new host shows the five required route cards");
+
+	// Filled in and saved: the host's empty capability list must survive the
+	// save prune, or validateClusterConfig refuses every host without one.
+	for (const routeCard of routeCards(host)) fillRoute(routeCard, CLAUDE_PEER);
+	const cluster = await save();
+	assert.ok(cluster, `a new cluster host is saved (toast: "${toastText()}")`);
+	assert.deepEqual(cluster.doc.hosts.moi.capabilities, [], "capabilities is written even when empty");
+	validateClusterConfig(cluster.doc);
 } finally {
 	Object.assign(globalThis, { fetch: realFetch, setTimeout: realSetTimeout, setInterval: realSetInterval });
 	await server.close();
