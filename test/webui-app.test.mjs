@@ -604,6 +604,7 @@ const files = {
 	mcp: JSON.stringify(LIMITS_DOC, null, 2),
 	paseo: JSON.stringify(JOBS_DOC, null, 2),
 	"pi-models": JSON.stringify({ version: 1, providers: { minnyat: { baseUrl: "https://example.invalid/v1" } } }, null, 2),
+	providers: JSON.stringify({ agents: { providers: { "hob.local": { extends: "pi", env: { PASEO_PI_ROLE: "supervisor" } } } } }, null, 2),
 };
 // What the next `models sync` answers, in order; a report with ok:false exits
 // non-zero, as the real CLI does.
@@ -895,7 +896,7 @@ try {
 
 	type(limitInput("gpt-5.5", "Context window"), "10");
 	assert.equal(await save(), null, "an out-of-range value under a dotted key is refused before the write");
-	assert.match(errorToast(), /Context window phải là số từ 1024/);
+	assert.match(errorToast(), /providers\.minnyat\.models\."gpt-5\.5": Context window phải là số từ 1024/, "and the message says which model");
 	type(limitInput("gpt-5.5", "Context window"), "2000000");
 	const limitsEdited = await save();
 	assert.ok(limitsEdited, `a valid edit saves (toast: "${toastText()}")`);
@@ -907,6 +908,21 @@ try {
 	const limitsRemoved = await save();
 	assert.ok(limitsRemoved);
 	assert.deepEqual(Object.keys(limitsRemoved.doc.providers.minnyat.models), ["gpt-5", "gpt-5.5"], "the × removed exactly that model");
+
+	// A key Object.prototype also carries is still a free name: `next in {}` is
+	// true for "constructor", and the rename used to be refused as a duplicate.
+	change(card("gpt-5").querySelector(".cfg-card-key"), "constructor");
+	await tick();
+	assert.equal(errorToast(), "", "renaming to constructor is not refused as a duplicate");
+	change(card("gpt-5.5").querySelector(".cfg-card-key"), "toString");
+	await tick();
+	assert.equal(errorToast(), "", "nor to toString");
+	const protoNames = await save();
+	assert.ok(protoNames, `keys named like prototype members save (toast: "${toastText()}")`);
+	assert.deepEqual(protoNames.doc.providers.minnyat.models, {
+		constructor: { contextWindow: 400000 },
+		toString: { contextWindow: 2000000, maxTokens: 128000 },
+	});
 
 	// --- `list` fields: a job's executors (S7) ---------------------------------
 	await openSection("paseo");
@@ -995,6 +1011,24 @@ try {
 	assert.equal(await save(), null, "a job with no executor never reaches config write");
 	assert.match(errorToast(), /jobs\."re\.view"\.executors: Executors cần ít nhất 1 mục/);
 
+	// --- a kv row keyed __proto__ (the real providers section's env editor) ---
+	// `next[key] = value` with key "__proto__" sets the object's prototype
+	// instead of adding a key, so the variable silently vanished on save.
+	await openSection("providers");
+	assert.equal(errorToast(), "");
+	const envField = rowByLabel(card("hob.local"), "Biến môi trường");
+	envField.querySelector(".cfg-add").click();
+	const newRow = envField.querySelectorAll(".cfg-kv-row").at(-1);
+	type(newRow.querySelector(".cfg-kv-key"), "__proto__");
+	type(newRow.querySelector(".cfg-kv-value"), "polluted");
+	const kvSaved = await save();
+	assert.ok(kvSaved, `a kv row named __proto__ saves (toast: "${toastText()}")`);
+	const env = kvSaved.doc.agents.providers["hob.local"].env;
+	assert.deepEqual(Object.keys(env), ["PASEO_PI_ROLE", "__proto__"], "the __proto__ row is an own key of the saved env");
+	assert.equal(Object.getOwnPropertyDescriptor(env, "__proto__").value, "polluted");
+	assert.equal({}.polluted, undefined, "and Object.prototype is untouched");
+	assert.equal(Object.getPrototypeOf({}), Object.prototype);
+
 	// --- the model sync result says where each limit came from ----------------
 	await openSection("pi-models");
 	const syncButton = () => $("config-actions").querySelectorAll("button").find((button) => button.textContent === "Cập nhật danh sách model");
@@ -1031,11 +1065,14 @@ try {
 					{ id: "gpt-5.6-terra", reasoning: false, contextWindow: 1050000, maxTokens: 128000, limitSource: "models.dev" },
 					{ id: "gpt-5.5", reasoning: true, maxTokens: 64000, limitSource: "override" },
 					{ id: "review", reasoning: false, limitSource: "unknown" },
+					null,
+					"not-a-model",
 				],
 			},
 		],
 	});
-	assert.equal(okOut.classList.contains("good"), true);
+	assert.equal(okOut.classList.contains("good"), true, "a malformed model entry does not turn the report into an error line");
+	assert.equal(okOut.querySelectorAll(".cfg-model-limit").length, 3, "it is skipped; the three real models are listed");
 	assert.match(okOut.querySelector(".cfg-actions-head").textContent, /Đã cập nhật xong — 2 cảnh báo/);
 	const warnBox = okOut.querySelector(".cfg-actions-warn");
 	assert.ok(warnBox, "warnings are shown, set apart");

@@ -386,7 +386,9 @@ const LIMIT_SOURCE_LABEL = Object.freeze({
 });
 
 export function limitSourceLabel(source) {
-	return LIMIT_SOURCE_LABEL[source] ?? (source ? String(source) : "chưa biết");
+	// Own keys only: "toString" from a report is a source name, not Object's method.
+	if (typeof source === "string" && Object.hasOwn(LIMIT_SOURCE_LABEL, source)) return LIMIT_SOURCE_LABEL[source];
+	return source ? String(source) : "chưa biết";
 }
 
 /**

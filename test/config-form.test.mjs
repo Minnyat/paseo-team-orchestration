@@ -155,11 +155,10 @@ import {
 		1,
 		"number fields inside map cards are checked too",
 	);
-	assert.equal(
-		numberRangeProblems(schema, { hosts: { mac: { limits: { writers: 1 } }, "mac.local": { limits: { writers: 44 } } } }).length,
-		1,
-		"a dotted key's own value is the one checked (not a phantom mac.local under mac)",
-	);
+	const dotted = numberRangeProblems(schema, { hosts: { mac: { limits: { writers: 1 } }, "mac.local": { limits: { writers: 44 } } } });
+	assert.equal(dotted.length, 1, "a dotted key's own value is the one checked (not a phantom mac.local under mac)");
+	assert.equal(dotted[0], 'hosts."mac.local": Số agent ghi phải là số từ 0 đến 16', "the message says which item, like every other check");
+	assert.match(numberRangeProblems(schema, { retry: { maxRetries: 99 } })[0], /^retry\.maxRetries: Số lần thử lại phải là số/, "a top-level field names its path");
 	assert.deepEqual(
 		numberRangeProblems(schema, { hosts: { mac: { limits: { writers: 44 } }, "mac.local": { limits: { writers: 1 } } } }).length,
 		1,

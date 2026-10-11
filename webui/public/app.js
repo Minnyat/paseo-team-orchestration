@@ -1946,7 +1946,8 @@ function paintActionResult(output, action, data) {
 		const list = el("ul", { class: "cfg-actions-list" });
 		for (const entry of data.providers) {
 			const dead = (entry.probed ?? []).filter((x) => !x.live).length;
-			const models = Array.isArray(entry.models) ? entry.models : [];
+			// One malformed entry must not take the whole report down with it.
+			const models = Array.isArray(entry.models) ? entry.models.filter((m) => m && typeof m === "object") : [];
 			list.appendChild(
 				el("li", { class: entry.ok ? "ok" : "no" }, [
 					el("b", { text: entry.provider }),

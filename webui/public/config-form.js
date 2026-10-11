@@ -256,7 +256,7 @@ export function cleanListItems(schema, doc) {
 	return doc;
 }
 
-/** One entry per number field outside its range, with the label to show the user. */
+/** One entry per number field outside its range, saying where it is and what range it needs. */
 export function numberRangeProblems(schema, doc, prefix = []) {
 	const problems = [];
 	eachField(schema, doc, prefix, (field, base) => {
@@ -265,7 +265,9 @@ export function numberRangeProblems(schema, doc, prefix = []) {
 		if (value === undefined || value === null || value === "") return;
 		const numeric = Number(value);
 		if (!Number.isFinite(numeric) || numeric < (field.min ?? -Infinity) || numeric > (field.max ?? Infinity)) {
-			problems.push(`${field.label} phải là số từ ${field.min ?? "−∞"} đến ${field.max ?? "∞"}`);
+			problems.push(
+				`${base.length > 0 ? displayPath(base) : field.path}: ${field.label} phải là số từ ${field.min ?? "−∞"} đến ${field.max ?? "∞"}`,
+			);
 		}
 	});
 	return problems;

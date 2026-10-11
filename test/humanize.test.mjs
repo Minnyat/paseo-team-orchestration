@@ -5,6 +5,7 @@ import {
 	formatTokens,
 	humanizeError,
 	limitCell,
+	limitSourceLabel,
 	limitsOriginSentence,
 	missingSetup,
 	modelLimitsLabel,
@@ -237,6 +238,11 @@ assert.equal(statusLabel("initializing"), "Đang khởi động");
 	assert.equal(unwritable.level, "warn", "a cache that could not be written is worth knowing");
 	assert.match(unwritable.text, /EACCES/);
 
+	assert.equal(limitSourceLabel("models.dev"), "models.dev");
+	assert.equal(limitSourceLabel("override"), "ghi đè");
+	assert.equal(limitSourceLabel("toString"), "toString", "a name Object.prototype carries is shown as itself, not as a function");
+	assert.equal(limitSourceLabel("constructor"), "constructor");
+	assert.equal(limitSourceLabel(undefined), "chưa biết");
 	assert.equal(syncWarningText("pi-models: models.dev unreachable"), "models.dev unreachable");
 	assert.equal(syncWarningText("other: kept"), "other: kept");
 }
