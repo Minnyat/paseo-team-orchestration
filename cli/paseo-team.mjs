@@ -60,7 +60,7 @@ import { configProblems, normalizeConfig, resolveApiKey, syncModels } from "../s
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, inferSeat, normalizePermits } from "./lib/graph.mjs";
 import { readAgentStates, isAgentId } from "./lib/agent-state.mjs";
-import { agentCluster, normalizeCluster } from "../extensions/paseo-team-core/policy-core.js";
+import { agentCluster, extraToolDiagnostics, normalizeCluster } from "../extensions/paseo-team-core/policy-core.js";
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
 import * as routing from "./lib/routing.mjs";
@@ -629,7 +629,7 @@ function cmdSkillsWrite(name) {
 const DOC_ENV = [
 	{ key: "PASEO_PI_ROLE", scope: "per-provider", where: "Paseo config agents.providers.<name>.env", purpose: "role selection (supervisor|lead|peer)" },
 	{ key: "PASEO_TEAM_LEAD_WRITE", scope: "host", where: "machine env", purpose: "grant Lead write/edit tools ('1' to enable)" },
-	{ key: "PASEO_TEAM_EXTRA_TOOLS", scope: "host", where: "machine env", purpose: "comma-separated extra tools per profile" },
+	{ key: "PASEO_TEAM_EXTRA_TOOLS", scope: "host", where: "machine env", purpose: "comma-separated catalogued role-compatible extras (WebFetch, WebSearch for Peer/Lead); unknown entries are dropped" },
 	{ key: "PST_TEAM_CONFIG_DIR", scope: "host", where: "machine env", purpose: "override the pack's config directory (routing files, seat ledger, permit log, Claude session state). Default ~/.paseo-team-orchestration, or ~/.paseo-pi-team when that legacy directory already exists so an installed host keeps its state; PASEO_TEAM_HOME is honoured as a legacy alias and loses to this one" },
 	{ key: "PASEO_TEAM_HOME", scope: "host", where: "machine env", purpose: "legacy alias for PST_TEAM_CONFIG_DIR — still read, and only used when PST_TEAM_CONFIG_DIR is unset" },
 	{ key: "PASEO_TEAM_PROMPTS_DIR", scope: "host", where: "machine env", purpose: "override prompts directory" },
@@ -643,6 +643,7 @@ const DOC_ENV = [
 function cmdEnvList() {
 	json({
 		env: DOC_ENV.map((e) => ({ ...e, current: process.env[e.key] ?? null })),
+		extraTools: extraToolDiagnostics(),
 	});
 }
 

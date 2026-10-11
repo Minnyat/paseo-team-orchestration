@@ -275,7 +275,7 @@ const CLAUDE_KNOWN_TOOLS = [
 ];
 
 export function claudeDisallowedTools(role: TeamRole): string[] {
-	const allowed = new Set([...claudeBaseTools(role), ...extraTools()]);
+	const allowed = new Set([...claudeBaseTools(role), ...extraTools(role)]);
 	return [...new Set(CLAUDE_KNOWN_TOOLS.filter((tool) => !allowed.has(tool)))];
 }
 
@@ -338,7 +338,7 @@ export function claudeToolBlockReason(
 ): string | null {
 	const { role, toolName, brief } = input;
 	const classified = classifyClaudeTool(toolName);
-	const allowedExtra = new Set(extraTools());
+	const allowedExtra = new Set(extraTools(role));
 	const authority = peerAuthority(brief);
 	const peerMode = resolvePeerMode(brief);
 

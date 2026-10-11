@@ -65,6 +65,25 @@ try {
 		assert.match(badSub.stderr, /unknown subcommand/);
 	}
 
+	// --- env diagnostics identify host extras the policy will drop ----------
+	{
+		const env = run(["env", "list"], { PASEO_TEAM_EXTRA_TOOLS: " WebFetch, mcp__unrelated__do, bash, , " });
+		assert.equal(env.status, 0);
+		assert.deepEqual(env.json.extraTools.accepted, { peer: ["WebFetch"], lead: ["WebFetch"], supervisor: [] });
+		assert.deepEqual(
+			env.json.extraTools.dropped.map(({ tool, role, reason }) => ({ tool, role, reason })),
+			[
+				{ tool: "WebFetch", role: "supervisor", reason: "Supervisor cannot receive extra tools" },
+				{ tool: "mcp__unrelated__do", role: "peer", reason: "not a catalogued extra capability" },
+				{ tool: "mcp__unrelated__do", role: "lead", reason: "not a catalogued extra capability" },
+				{ tool: "mcp__unrelated__do", role: "supervisor", reason: "Supervisor cannot receive extra tools" },
+				{ tool: "bash", role: "peer", reason: "not a catalogued extra capability" },
+				{ tool: "bash", role: "lead", reason: "not a catalogued extra capability" },
+				{ tool: "bash", role: "supervisor", reason: "Supervisor cannot receive extra tools" },
+			],
+		);
+	}
+
 	// --- agents: role inference travels with the row -----------------------
 	{
 		const agents = run(["agents"]);

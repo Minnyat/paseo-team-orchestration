@@ -5774,11 +5774,62 @@ export function loadRolePrompt(r: TeamRole): string | undefined {
 	}
 }
 
-export function extraTools(): string[] {
-	return (process.env.PASEO_TEAM_EXTRA_TOOLS ?? "")
+/**
+ * Catalogued host-level additions. PASEO_TEAM_EXTRA_TOOLS is intentionally not
+ * a general tool-name escape hatch: only entries in this table can survive it.
+ * The seat catalogue materializes `web-research` as these two names.
+ */
+export const EXTRA_TOOL_CATALOG: Readonly<Record<string, readonly TeamRole[]>> = {
+	WebFetch: ["peer", "lead"],
+	WebSearch: ["peer", "lead"],
+};
+
+function configuredExtraToolNames(
+	env: Record<string, string | undefined> = process.env,
+): string[] {
+	return (env.PASEO_TEAM_EXTRA_TOOLS ?? "")
 		.split(",")
-		.map((s) => s.trim())
+		.map((tool) => tool.trim())
 		.filter(Boolean);
+}
+
+/** Catalogued configured extras compatible with one role. */
+export function extraTools(
+	role: TeamRole,
+	env: Record<string, string | undefined> = process.env,
+): string[] {
+	return configuredExtraToolNames(env).filter(
+		(tool) => EXTRA_TOOL_CATALOG[tool]?.includes(role) ?? false,
+	);
+}
+
+export interface ExtraToolDiagnostic {
+	tool: string;
+	role: TeamRole;
+	reason: string;
+}
+
+/** Operator-facing inventory of extras the role clamp will discard. */
+export function extraToolDiagnostics(
+	env: Record<string, string | undefined> = process.env,
+): { accepted: Record<TeamRole, string[]>; dropped: ExtraToolDiagnostic[] } {
+	const roles: TeamRole[] = ["peer", "lead", "supervisor"];
+	const names = configuredExtraToolNames(env);
+	const accepted = Object.fromEntries(roles.map((role) => [role, extraTools(role, env)])) as Record<TeamRole, string[]>;
+	const dropped: ExtraToolDiagnostic[] = [];
+	for (const tool of names) {
+		for (const role of roles) {
+			if (EXTRA_TOOL_CATALOG[tool]?.includes(role)) continue;
+			dropped.push({
+				tool,
+				role,
+				reason: role === "supervisor"
+					? "Supervisor cannot receive extra tools"
+					: "not a catalogued extra capability",
+			});
+		}
+	}
+	return { accepted, dropped };
 }
 
 export function teamToolBlockReason(

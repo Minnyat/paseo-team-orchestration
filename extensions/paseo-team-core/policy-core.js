@@ -4654,11 +4654,45 @@ export function loadRolePrompt(r) {
         return undefined;
     }
 }
-export function extraTools() {
-    return (process.env.PASEO_TEAM_EXTRA_TOOLS ?? "")
+/**
+ * Catalogued host-level additions. PASEO_TEAM_EXTRA_TOOLS is intentionally not
+ * a general tool-name escape hatch: only entries in this table can survive it.
+ * The seat catalogue materializes `web-research` as these two names.
+ */
+export const EXTRA_TOOL_CATALOG = {
+    WebFetch: ["peer", "lead"],
+    WebSearch: ["peer", "lead"],
+};
+function configuredExtraToolNames(env = process.env) {
+    return (env.PASEO_TEAM_EXTRA_TOOLS ?? "")
         .split(",")
-        .map((s) => s.trim())
+        .map((tool) => tool.trim())
         .filter(Boolean);
+}
+/** Catalogued configured extras compatible with one role. */
+export function extraTools(role, env = process.env) {
+    return configuredExtraToolNames(env).filter((tool) => EXTRA_TOOL_CATALOG[tool]?.includes(role) ?? false);
+}
+/** Operator-facing inventory of extras the role clamp will discard. */
+export function extraToolDiagnostics(env = process.env) {
+    const roles = ["peer", "lead", "supervisor"];
+    const names = configuredExtraToolNames(env);
+    const accepted = Object.fromEntries(roles.map((role) => [role, extraTools(role, env)]));
+    const dropped = [];
+    for (const tool of names) {
+        for (const role of roles) {
+            if (EXTRA_TOOL_CATALOG[tool]?.includes(role))
+                continue;
+            dropped.push({
+                tool,
+                role,
+                reason: role === "supervisor"
+                    ? "Supervisor cannot receive extra tools"
+                    : "not a catalogued extra capability",
+            });
+        }
+    }
+    return { accepted, dropped };
 }
 export function teamToolBlockReason(role, toolName, brief) {
     if (toolName === PEER_COMMUNICATION_TOOL) {

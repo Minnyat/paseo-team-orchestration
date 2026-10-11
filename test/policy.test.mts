@@ -30,6 +30,7 @@ import {
 	isPaseoBrowserTool,
 	resolvePeerMode,
 	packSkillFromPath,
+	extraTools,
 	skillAdmission,
 	skillBlockReason,
 	PACK_SKILL_NAMES,
@@ -1199,6 +1200,14 @@ assert.ok(
 );
 assert.ok(!peerW.deny.includes("peer_ask_lead"), "peer communication remains available in write mode");
 
+const previousExtraTools = process.env.PASEO_TEAM_EXTRA_TOOLS;
+process.env.PASEO_TEAM_EXTRA_TOOLS = " WebFetch, WebSearch, bash, mcp__unrelated__do, , ";
+assert.deepEqual(extraTools("peer"), ["WebFetch", "WebSearch"], "Pi Peer admits only catalogued research extras");
+assert.deepEqual(extraTools("lead"), ["WebFetch", "WebSearch"], "Pi Lead admits only catalogued research extras");
+assert.deepEqual(extraTools("supervisor"), [], "Supervisor never receives extras from host env");
+if (previousExtraTools === undefined) delete process.env.PASEO_TEAM_EXTRA_TOOLS;
+else process.env.PASEO_TEAM_EXTRA_TOOLS = previousExtraTools;
+
 const prevLeadWrite = process.env.PASEO_TEAM_LEAD_WRITE;
 delete process.env.PASEO_TEAM_LEAD_WRITE;
 const lead = policyFor("lead", "read-only");
@@ -1392,7 +1401,7 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 {
 	const activeTools: string[] = [];
 	const { piStub, handlers } = makePiStub(
-		["read", "write", "edit", "bash", "mcp", "mcp_script"],
+		["read", "write", "edit", "bash", "mcp", "mcp_script", "WebFetch", "mcp__unrelated__do"],
 		activeTools,
 	);
 
@@ -1433,6 +1442,16 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 		"PASEO_TEAM_TASK_V3_BEGIN\nTASK_ID: T-x\nPASEO_TEAM_TASK_V3_END\n",
 	);
 	assert.ok(!tools.includes("write"), "missing MODE → read-only");
+
+	// Extra tools are catalogued and role-clamped, not arbitrary registered names.
+	const previousExtraTools = process.env.PASEO_TEAM_EXTRA_TOOLS;
+	process.env.PASEO_TEAM_EXTRA_TOOLS = " WebFetch, bash, mcp__unrelated__do, , ";
+	tools = await fire(v3WriteBrief);
+	assert.ok(tools.includes("WebFetch"), "catalogued Peer research tool is active in Pi");
+	assert.ok(!tools.includes("bash") || policyFor("peer", "write").allow.includes("bash"), "the native Peer bash grant is unaffected by extras");
+	assert.ok(!tools.includes("mcp__unrelated__do"), "arbitrary MCP tool never becomes active in Pi");
+	if (previousExtraTools === undefined) delete process.env.PASEO_TEAM_EXTRA_TOOLS;
+	else process.env.PASEO_TEAM_EXTRA_TOOLS = previousExtraTools;
 
 	// turn 6: legacy V1/V2 write briefs NEVER grant write (injection surface).
 	tools = await fire("PASEO_TEAM_TASK_V1\nMODE: write\nOBJECTIVE: z3");
