@@ -110,6 +110,41 @@ const API = {
 		},
 	},
 	"no-models": { id: "no-models" },
+
+	// Round-two review: canonical labels that name ANOTHER id. Shaped on the
+	// real records (models.dev 2026-10-11); each owner record is a different
+	// model, so following the label silently read wrong limits.
+	nano: {
+		models: {
+			"x-ai/grok-4.20": { id: "x-ai/grok-4.20", limit: { context: 2_000_000, output: 131_072 } },
+			"gemini-img": { id: "gemini-img", limit: { context: 65_536, output: 32_768 }, canonical_model_id: "google/gemini-img" },
+		},
+	},
+	kilo: { models: { "x-ai/grok-4.20": { id: "x-ai/grok-4.20", limit: { context: 2_000_000, output: 1_800_000 } } } },
+	ofox: {
+		models: {
+			"x-ai/grok-4.20": { id: "x-ai/grok-4.20", limit: { context: 2_000_000, output: 128_000 }, canonical_model_id: "xai/grok-4.20-0309-reasoning" },
+			"gemini-img": { id: "gemini-img", limit: { context: 65_536, output: 32_768 }, canonical_model_id: "google/gemini-img" },
+		},
+	},
+	xai: { models: { "grok-4.20-0309-reasoning": { id: "grok-4.20-0309-reasoning", limit: { context: 1_000_000, output: 30_000 } } } },
+	deepinfra: {
+		models: {
+			"Qwen/Qwen3-Next-80B-A3B-Instruct": {
+				id: "Qwen/Qwen3-Next-80B-A3B-Instruct",
+				limit: { context: 262_144, output: 32_768 },
+				canonical_model_id: "alibaba/qwen3-next-80b-a3b-instruct",
+			},
+		},
+	},
+	huggingface: { models: { "Qwen/Qwen3-Next-80B-A3B-Instruct": { id: "Qwen/Qwen3-Next-80B-A3B-Instruct", limit: { context: 262_144, output: 66_536 } } } },
+	"io-net": { models: { "Qwen/Qwen3-Next-80B-A3B-Instruct": { id: "Qwen/Qwen3-Next-80B-A3B-Instruct", limit: { context: 262_144, output: 4_096 } } } },
+	alibaba: { models: { "qwen3-next-80b-a3b-instruct": { id: "qwen3-next-80b-a3b-instruct", limit: { context: 131_072, output: 32_768 } } } },
+	"umans-ai": { models: { "umans-kimi-k3": { id: "umans-kimi-k3", limit: { context: 1_048_576, output: 131_072 }, canonical_model_id: "moonshotai/kimi-k3" } } },
+	"umans-ai-coding-plan": { models: { "umans-kimi-k3": { id: "umans-kimi-k3", limit: { context: 1_048_576, output: 131_072 }, canonical_model_id: "moonshotai/kimi-k3" } } },
+	moonshotai: { models: { "kimi-k3": { id: "kimi-k3", limit: { context: 2_097_152, output: 1_048_576 } } } },
+	// The owner's own record disagrees with every reseller: the owner wins.
+	google: { models: { "gemini-img": { id: "gemini-img", limit: { context: 131_072, output: 32_768 }, canonical_model_id: "google/gemini-img" } } },
 };
 const API_TEXT = JSON.stringify(API);
 
@@ -218,6 +253,24 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	assert.equal(loneEndpoint.rule, "endpoint", "and so is the endpoint's own record");
 	assert.equal(loneEndpoint.maxTokens, 16_000);
 
+	// A canonical label naming ANOTHER id is not followed (round-two review).
+	const grok = match("x-ai/grok-4.20");
+	assert.equal(grok.rule, "unanimous", "ofox's label points at a different xai model");
+	assert.equal(grok.contextWindow, 2_000_000, "every record agrees on 2M; xai's 1M belongs to another model");
+	assert.equal(grok.maxTokens, undefined, "and the outputs disagree");
+	const qwen = match("Qwen/Qwen3-Next-80B-A3B-Instruct");
+	assert.equal(qwen.contextWindow, 262_144, "not alibaba's 131072 for a differently named id");
+	assert.equal(qwen.maxTokens, undefined);
+	const kimi = match("umans-kimi-k3");
+	assert.equal(kimi.rule, "unanimous", "a plan alias labelled with its base model is not the base model");
+	assert.equal(kimi.contextWindow, 1_048_576);
+	assert.equal(kimi.maxTokens, 131_072, "not moonshotai's 1048576");
+	// A label that does name this id still makes the owner's record win.
+	const gemini = match("gemini-img");
+	assert.equal(gemini.rule, "canonical");
+	assert.equal(gemini.record, "google/gemini-img");
+	assert.equal(gemini.contextWindow, 131_072, "the owner's own record beats the resellers' 65536");
+
 	// No model outputs more than its window.
 	const inverted = match("inverted");
 	assert.equal(inverted.contextWindow, 8_000);
@@ -272,6 +325,39 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	assert.equal(narrowed.contextWindow, 100_000);
 	assert.equal(narrowed.maxTokens, undefined);
 	assert.equal(narrowed.fields.maxTokens, "unknown");
+	assert.equal(narrowed.warnings.length, 1);
+	assert.match(narrowed.warnings[0], /^gpt-5\.6-terra: models\.dev maxTokens 128000 exceeds overridden contextWindow 100000; maxTokens left unknown$/);
+
+	// An overridden maxTokens above models.dev's window: the override is the
+	// user's intent and stands; the window it contradicts becomes unknown.
+	const widened = resolve("same-everywhere", { "same-everywhere": { maxTokens: 200_000 } });
+	assert.equal(widened.maxTokens, 200_000, "the override is kept");
+	assert.equal(widened.contextWindow, undefined, "models.dev's 64000 cannot hold it: unknown, not 64000");
+	assert.deepEqual(widened.fields, { contextWindow: "unknown", maxTokens: "override" });
+	assert.equal(widened.source, "override");
+	assert.equal(widened.warnings.length, 1);
+	assert.match(widened.warnings[0], /^same-everywhere: overridden maxTokens 200000 exceeds models\.dev contextWindow 64000; contextWindow left unknown$/);
+
+	// Both fields overridden: both written as given, models.dev not consulted.
+	const both = resolve("gpt-5.6-terra", { "gpt-5.6-terra": { contextWindow: 300_000, maxTokens: 200_000 } });
+	assert.deepEqual([both.contextWindow, both.maxTokens, both.source], [300_000, 200_000, "override"]);
+	assert.deepEqual(both.warnings, []);
+	assert.deepEqual(both.problems, []);
+	assert.equal(both.match, undefined);
+	// Two overrides that contradict each other are the user's to fix: kept,
+	// and reported (the sync path refuses them before writing).
+	const clash = resolve("gpt-5.6-terra", { "gpt-5.6-terra": { contextWindow: 8_000, maxTokens: 16_000 } });
+	assert.deepEqual([clash.contextWindow, clash.maxTokens], [8_000, 16_000]);
+	assert.match(clash.problems.join(" "), /maxTokens \(16000\) exceeds its contextWindow \(8000\)/);
+
+	// A bad override is skipped as before, but no longer silently.
+	const skipped = resolve("gpt-5.6-terra", { "gpt-5.6-terra": { contextWindow: -1, context: 5 } });
+	assert.equal(skipped.contextWindow, 1_050_000, "the bad value is not used");
+	assert.match(skipped.problems.join(" "), /models\.gpt-5\.6-terra\.contextWindow must be a positive integer/);
+	assert.match(skipped.problems.join(" "), /models\.gpt-5\.6-terra\.context is not an override/);
+	assert.deepEqual(resolve("review", { review: "big" }).problems, ["models.review must be an object"]);
+	assert.deepEqual(fromDev.problems, [], "no override, no problem");
+	assert.deepEqual(fromDev.warnings, []);
 }
 
 // --- cache: fresh, reused, stale when offline, absent when never fetched ----
@@ -330,6 +416,13 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	assert.ok(unwritable.cacheError, "the failed write is reported");
 	assert.deepEqual(readdirSync(blocked), [CACHE_FILE_NAME], "and the temp file is cleaned up");
 
+	// A fetchedAt that is a number but not a moment is a broken cache.
+	const bogus = freshDir();
+	mkdirSync(bogus, { recursive: true });
+	writeFileSync(join(bogus, CACHE_FILE_NAME), JSON.stringify({ ...doc, version: onDisk.version, fetchedAt: 1e20 }));
+	const ignoredBogus = await loadModelsDev({ fetchImpl: offline(), cacheDir: bogus, now: t0 });
+	assert.equal(ignoredBogus.origin, "unavailable", "fetchedAt 1e20 is not trusted, and does not crash");
+
 	const never = await loadModelsDev({ fetchImpl: offline(), cacheDir: freshDir(), now: t0 });
 	assert.equal(never.origin, "unavailable");
 	assert.equal(never.catalog, null);
@@ -382,7 +475,10 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	);
 
 	// Every answer obeys the contract: a positive integer or absent.
-	for (const modelId of ["gpt-5.6-terra", "half-agree", "two-owners", "review", "no-limit", "deepseek-v4.1-flash", "stitched", "one-carries", "lone-reseller", "inverted"]) {
+	for (const modelId of [
+		"gpt-5.6-terra", "half-agree", "two-owners", "review", "no-limit", "deepseek-v4.1-flash", "stitched", "one-carries",
+		"lone-reseller", "inverted", "x-ai/grok-4.20", "Qwen/Qwen3-Next-80B-A3B-Instruct", "umans-kimi-k3", "gemini-img",
+	]) {
 		const result = await lookupModelLimits({ endpointId: "minnyat", modelId, fetchImpl: offline(), cacheDir });
 		for (const field of ["contextWindow", "maxTokens"]) {
 			const value = result[field];
@@ -392,6 +488,7 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 			assert.ok(result.maxTokens <= result.contextWindow, `${modelId}: maxTokens fits its window`);
 		}
 		assert.ok(["override", "models.dev", "unknown"].includes(result.source));
+		assert.ok(Array.isArray(result.warnings) && Array.isArray(result.problems), "warnings and problems are always arrays");
 	}
 }
 

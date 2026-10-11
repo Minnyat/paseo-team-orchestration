@@ -25,9 +25,16 @@
  *   1. endpoint: the pi provider name is itself a models.dev provider that
  *      lists the id — that provider's own record.
  *   2. canonical: every hit that names a `canonical_model_id` names the same
- *      one, and that model's owner (the id's first segment) lists it — the
- *      owner's record. This is how `gpt-5.6-terra` resolves to openai's
- *      1050000/128000 instead of a reseller's 372000.
+ *      one, that label names THIS id (its part after the owner equals the id,
+ *      or the label is the id itself), and the owner (the label's first
+ *      segment) lists it — the owner's record. This is how `gpt-5.6-terra`
+ *      resolves to openai's 1050000/128000 instead of a reseller's 372000. A
+ *      label naming some other id is ignored: resellers tag variants with
+ *      their base model (`x-ai/grok-4.20` -> `xai/grok-4.20-0309-reasoning`),
+ *      and following it reads another model's limits. When the owner's own
+ *      record disagrees with every reseller (google lists its own
+ *      gemini-3-pro-image-preview at 131072, resellers at 65536), the owner
+ *      wins: that is what the rule is for.
  *   3. unanimous: per field, EVERY hit carries the field and all give the
  *      same value. A field only some hits carry is unknown, so the two limits
  *      can never be stitched together from different records. This needs at
@@ -38,6 +45,12 @@
  * Whichever rule matched, a maxTokens larger than the contextWindow it sits
  * beside cannot be right (no model outputs more than its window), so that
  * maxTokens becomes unknown; the contextWindow stands.
+ *
+ * Mixing an override with models.dev: the override is the user's stated
+ * intent and always stands. When it no longer fits the models.dev value next
+ * to it — an overridden maxTokens above models.dev's contextWindow, or an
+ * overridden contextWindow below models.dev's maxTokens — the models.dev
+ * value becomes unknown and a warning says which model and why.
  *
  * Anything else is unknown. In particular there is no majority vote, no
  * minimum, no case folding, and no stripping of proxy prefixes (`cx/`) or
@@ -62,6 +75,41 @@ const CACHE_VERSION = 1;
 
 export function isPositiveInteger(value) {
 	return Number.isInteger(value) && value > 0;
+}
+
+/** A time a Date can hold; 1e20 is a number but not a moment. */
+function isTimestamp(value) {
+	return isPositiveInteger(value) && !Number.isNaN(new Date(value).getTime());
+}
+
+/** The only keys a per-model override may hold. */
+export const OVERRIDE_KEYS = Object.freeze(["contextWindow", "maxTokens"]);
+
+/**
+ * What is wrong with one per-model override, as `models.<id>...` messages.
+ * Shared by pi-models-sync's configProblems (which stops the run) and
+ * resolveModelLimits (which skips the bad value and reports it).
+ */
+export function overrideProblems(modelId, override) {
+	if (override === undefined) return [];
+	if (!override || typeof override !== "object" || Array.isArray(override)) return [`models.${modelId} must be an object`];
+	const problems = [];
+	// Only the two limits: anything else (`context`, `reasoning`, a misspelling)
+	// would be read by nobody and look like it worked.
+	for (const key of Object.keys(override)) {
+		if (!OVERRIDE_KEYS.includes(key)) {
+			problems.push(`models.${modelId}.${key} is not an override (allowed: ${OVERRIDE_KEYS.join(", ")})`);
+		}
+	}
+	for (const field of OVERRIDE_KEYS) {
+		if (override[field] !== undefined && !isPositiveInteger(override[field])) {
+			problems.push(`models.${modelId}.${field} must be a positive integer`);
+		}
+	}
+	if (isPositiveInteger(override.contextWindow) && isPositiveInteger(override.maxTokens) && override.maxTokens > override.contextWindow) {
+		problems.push(`models.${modelId}.maxTokens (${override.maxTokens}) exceeds its contextWindow (${override.contextWindow})`);
+	}
+	return problems;
 }
 
 export function defaultCacheDir(env = process.env) {
@@ -103,7 +151,7 @@ export function slimCatalog(raw) {
 function readCache(path) {
 	try {
 		const doc = JSON.parse(readFileSync(path, "utf8"));
-		if (doc?.version !== CACHE_VERSION || !Number.isFinite(doc.fetchedAt)) return null;
+		if (doc?.version !== CACHE_VERSION || !isTimestamp(doc.fetchedAt)) return null;
 		if (!doc.providers || typeof doc.providers !== "object") return null;
 		return doc;
 	} catch {
@@ -236,7 +284,12 @@ export function matchModelsDev(catalog, { endpointId, modelId }) {
 		// (poolside: "poolside/laguna-s-2.1").
 		const ownerModels = catalog[owner] ?? {};
 		const key = rest in ownerModels ? rest : id in ownerModels ? id : null;
-		if (key !== null) return recordFrom({ provider: owner, key, ...ownerModels[key] }, "canonical", hits.length);
+		// Only a label that names THIS id. Resellers label variants with their
+		// base model (x-ai/grok-4.20 -> xai/grok-4.20-0309-reasoning,
+		// umans-kimi-k3 -> moonshotai/kimi-k3); following such a label reads
+		// another model's limits.
+		const sameId = rest === modelId || id === modelId;
+		if (key !== null && sameId) return recordFrom({ provider: owner, key, ...ownerModels[key] }, "canonical", hits.length);
 	}
 
 	if (hits.length === 1) {
@@ -260,6 +313,8 @@ export function matchModelsDev(catalog, { endpointId, modelId }) {
  *
  * `source` is "override" when any field came from an override, "models.dev"
  * when any came from a match, "unknown" otherwise; `fields` says it per field.
+ * `warnings` (an override and a models.dev value that did not fit together)
+ * and `problems` (an override that was invalid and skipped) are always arrays.
  */
 export function resolveModelLimits(catalog, { endpointId, modelId, overrides }) {
 	const own = overrides && typeof overrides === "object" ? overrides[modelId] : undefined;
@@ -279,13 +334,28 @@ export function resolveModelLimits(catalog, { endpointId, modelId, overrides }) 
 			result.fields[field] = "unknown";
 		}
 	}
-	// An overridden window smaller than models.dev's output: that output
-	// cannot fit, so it is unknown. (Two overrides that disagree are stopped
-	// earlier, by pi-models-sync's configProblems.)
-	if (result.fields.maxTokens === "models.dev" && isPositiveInteger(result.contextWindow) && result.maxTokens > result.contextWindow) {
-		delete result.maxTokens;
-		result.fields.maxTokens = "unknown";
+	// An override and a models.dev value that no longer fit together: the
+	// override stands, the models.dev value becomes unknown, and it is said.
+	// (Two overrides that disagree are reported in `problems`, and stopped
+	// before any write by pi-models-sync's configProblems.)
+	result.warnings = [];
+	if (isPositiveInteger(result.contextWindow) && isPositiveInteger(result.maxTokens) && result.maxTokens > result.contextWindow) {
+		if (result.fields.contextWindow === "models.dev" && result.fields.maxTokens === "override") {
+			result.warnings.push(
+				`${modelId}: overridden maxTokens ${result.maxTokens} exceeds models.dev contextWindow ${result.contextWindow}; contextWindow left unknown`,
+			);
+			delete result.contextWindow;
+			result.fields.contextWindow = "unknown";
+		} else if (result.fields.contextWindow === "override" && result.fields.maxTokens === "models.dev") {
+			result.warnings.push(
+				`${modelId}: models.dev maxTokens ${result.maxTokens} exceeds overridden contextWindow ${result.contextWindow}; maxTokens left unknown`,
+			);
+			delete result.maxTokens;
+			result.fields.maxTokens = "unknown";
+		}
 	}
+	// A bad override is skipped, never silently: the caller can show why.
+	result.problems = overrideProblems(modelId, own);
 	const origins = Object.values(result.fields);
 	result.source = origins.includes("override") ? "override" : origins.includes("models.dev") ? "models.dev" : "unknown";
 	if (match) result.match = match;

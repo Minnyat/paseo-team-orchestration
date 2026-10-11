@@ -36,7 +36,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { isPositiveInteger, loadModelsDev, MODELS_DEV_URL, resolveModelLimits } from "./models-dev.mjs";
+import { isPositiveInteger, loadModelsDev, MODELS_DEV_URL, OVERRIDE_KEYS, overrideProblems, resolveModelLimits } from "./models-dev.mjs";
 
 // --- config ----------------------------------------------------------------
 
@@ -70,7 +70,7 @@ export const DEFAULT_CONFIG = Object.freeze({
 export const LEGACY_LIMIT_KEYS = Object.freeze(["contextWindow", "maxTokens"]);
 
 /** The only keys a per-model override (`providers.<name>.models.<id>`) may hold. */
-export const OVERRIDE_KEYS = Object.freeze(["contextWindow", "maxTokens"]);
+export { OVERRIDE_KEYS };
 
 /**
  * Accept either shape and hand one shape onward.
@@ -138,25 +138,7 @@ export function configProblems(entries) {
 				continue;
 			}
 			for (const [id, override] of Object.entries(entry.models)) {
-				if (!override || typeof override !== "object" || Array.isArray(override)) {
-					problems.push(`provider "${entry.name}": models.${id} must be an object`);
-					continue;
-				}
-				// Only the two limits: anything else (`context`, `reasoning`, a
-				// misspelling) would be read by nobody and look like it worked.
-				for (const key of Object.keys(override)) {
-					if (!OVERRIDE_KEYS.includes(key)) {
-						problems.push(`provider "${entry.name}": models.${id}.${key} is not an override (allowed: ${OVERRIDE_KEYS.join(", ")})`);
-					}
-				}
-				for (const field of OVERRIDE_KEYS) {
-					if (override[field] !== undefined && !isPositiveInteger(override[field])) {
-						problems.push(`provider "${entry.name}": models.${id}.${field} must be a positive integer`);
-					}
-				}
-				if (isPositiveInteger(override.contextWindow) && isPositiveInteger(override.maxTokens) && override.maxTokens > override.contextWindow) {
-					problems.push(`provider "${entry.name}": models.${id}.maxTokens (${override.maxTokens}) exceeds its contextWindow (${override.contextWindow})`);
-				}
+				for (const problem of overrideProblems(id, override)) problems.push(`provider "${entry.name}": ${problem}`);
 			}
 		}
 	}
@@ -466,7 +448,10 @@ export async function syncProvider(options) {
  *       error?: string,               // why the network was not used
  *       cacheError?: string,          // fetched, but the cache could not be written
  *     },
- *     warnings: string[],             // one line each, also written via `warn`
+ *     warnings: string[],             // one line each, also written via `warn`:
+ *                                     // ignored endpoint-level keys, models.dev
+ *                                     // unreachable / stale cache, and an override
+ *                                     // that pushed a models.dev value to unknown
  *     providers: [{
  *       ok, provider, baseUrl, listed?, written?, probed?, code?, message?,
  *       models?: [{
@@ -516,6 +501,14 @@ export async function syncModels(options) {
 		const line = `pi-models: models.dev unreachable and no cached copy (${limitsCatalog.error}); contextWindow/maxTokens are left out except per-model overrides, so pi uses its own defaults until a sync can reach ${MODELS_DEV_URL}`;
 		warnings.push(line);
 		warn(line);
+	} else if (limitsCatalog.origin === "stale-cache") {
+		// Usable, but the user should know the numbers may be out of date.
+		const ageMs = Math.max(0, (modelsDev.now ?? Date.now()) - limitsCatalog.fetchedAt);
+		const hours = Math.floor(ageMs / 3_600_000);
+		const age = hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+		const line = `pi-models: models.dev unreachable (${limitsCatalog.error}); using the cached copy from ${new Date(limitsCatalog.fetchedAt).toISOString()} (${age} old)`;
+		warnings.push(line);
+		warn(line);
 	}
 
 	const results = [];
@@ -533,8 +526,16 @@ export async function syncModels(options) {
 				probe: probe === undefined ? entry.probe !== false : probe,
 				keepAll,
 				previousReasoning,
-				limitsFor: (modelId) =>
-					resolveModelLimits(limitsCatalog.catalog, { endpointId: entry.name, modelId, overrides: entry.models }),
+				limitsFor: (modelId) => {
+					const limits = resolveModelLimits(limitsCatalog.catalog, { endpointId: entry.name, modelId, overrides: entry.models });
+					// An override that did not fit models.dev: one line per model.
+					for (const note of limits.warnings) {
+						const line = `pi-models: ${entry.name}/${note}`;
+						warnings.push(line);
+						warn(line);
+					}
+					return limits;
+				},
 				...(listTimeoutMs === undefined ? {} : { listTimeoutMs }),
 			}),
 		);

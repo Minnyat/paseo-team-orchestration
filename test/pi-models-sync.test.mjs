@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -419,11 +419,14 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 		keys: new Map([["proxy", "sk"]]),
 		modelsPath,
 		fetchImpl: endpointFetch,
-		modelsDev: { cacheDir: modelsDev.cacheDir, now: Date.now() + 2 * 24 * 60 * 60 * 1000, fetchImpl: offlineDev().fetchImpl },
+		modelsDev: { cacheDir: modelsDev.cacheDir, now: Date.now() + 3 * 24 * 60 * 60 * 1000, fetchImpl: offlineDev().fetchImpl },
 		warn: quiet,
 	});
 	assert.equal(offlineRun.limits.origin, "stale-cache");
 	assert.match(offlineRun.limits.error, /fetch failed/);
+	const staleLines = offlineRun.warnings.filter((line) => /cached copy/.test(line));
+	assert.equal(staleLines.length, 1, "a stale cache is said, once");
+	assert.match(staleLines[0], /models\.dev unreachable \(fetch failed\); using the cached copy from \d{4}-\d\d-\d\dT[^ ]+ \(3d old\)/);
 	assert.equal(offlineRun.providers[0].models.find((m) => m.id === "gpt-5.6-terra").contextWindow, 1_050_000);
 
 	// A file without the old keys says nothing.
@@ -463,6 +466,46 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 		assert.deepEqual(unreachable.warnings, lines, "the same line is in the report for the UI");
 		const sources = Object.fromEntries(unreachable.providers[0].models.map((m) => [m.id, m.limitSource]));
 		assert.deepEqual(sources, { "cx/gpt-6-astra": "override", "gpt-5.6-terra": "unknown", review: "unknown" });
+	}
+
+	// A cache whose fetchedAt is not a real moment is ignored, not a crash.
+	{
+		const bogusDir = join(sandbox, "models-dev-bogus");
+		mkdirSync(bogusDir, { recursive: true });
+		writeFileSync(join(bogusDir, "models-dev.json"), JSON.stringify({ version: 1, fetchedAt: 1e20, providers: { openai: {} } }));
+		const bogus = await syncModels({
+			entries: [clean],
+			keys: new Map([["proxy", "sk"]]),
+			modelsPath: join(sandbox, "bogus-models.json"),
+			fetchImpl: endpointFetch,
+			modelsDev: { cacheDir: bogusDir, fetchImpl: offlineDev().fetchImpl },
+			dryRun: true,
+			warn: quiet,
+		});
+		assert.equal(bogus.ok, true);
+		assert.equal(bogus.limits.origin, "unavailable");
+	}
+
+	// An overridden maxTokens above models.dev's window: kept, the window
+	// becomes unknown, and one line names the model and the reason.
+	{
+		const lines = [];
+		const widened = await syncModels({
+			entries: [{ ...clean, models: { "gpt-5.6-terra": { maxTokens: 2_000_000 } } }],
+			keys: new Map([["proxy", "sk"]]),
+			modelsPath: join(sandbox, "widened-models.json"),
+			fetchImpl: endpointFetch,
+			modelsDev,
+			dryRun: true,
+			warn: (line) => lines.push(line),
+		});
+		const terra = widened.providers[0].models.find((m) => m.id === "gpt-5.6-terra");
+		assert.equal(terra.maxTokens, 2_000_000);
+		assert.equal(terra.contextWindow, undefined);
+		assert.equal(terra.limitSource, "override");
+		assert.equal(lines.length, 1);
+		assert.match(lines[0], /^pi-models: proxy\/gpt-5\.6-terra: overridden maxTokens 2000000 exceeds models\.dev contextWindow 1050000; contextWindow left unknown$/);
+		assert.deepEqual(widened.warnings, lines);
 	}
 
 	// --dry-run writes nothing at all, the models.dev cache included.
