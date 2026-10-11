@@ -152,11 +152,12 @@ export function deepMerge(target, patch) {
 export function pruneEmpty(value) {
 	if (Array.isArray(value)) return value.length > 0 ? value : undefined;
 	if (value !== null && typeof value === "object") {
-		const out = {};
-		for (const [key, child] of Object.entries(value)) {
-			const kept = pruneEmpty(child);
-			if (kept !== undefined) out[key] = kept;
-		}
+		// fromEntries, not `out[key] = …`: a key spelled __proto__ must stay a key.
+		const out = Object.fromEntries(
+			Object.entries(value)
+				.map(([key, child]) => [key, pruneEmpty(child)])
+				.filter(([, kept]) => kept !== undefined),
+		);
 		return Object.keys(out).length > 0 ? out : undefined;
 	}
 	return value;

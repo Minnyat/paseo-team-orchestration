@@ -1502,11 +1502,12 @@ function linesControl(field, path) {
 function kvControl(field, path) {
 	const wrap = el("div", { class: "cfg-kv" });
 	const rebuild = () => {
-		const next = {};
+		const entries = [];
 		for (const row of wrap.querySelectorAll(".cfg-kv-row")) {
 			const key = row.querySelector(".cfg-kv-key").value.trim();
-			if (key) next[key] = row.querySelector(".cfg-kv-value").value;
+			if (key) entries.push([key, row.querySelector(".cfg-kv-value").value]);
 		}
+		const next = Object.fromEntries(entries);
 		if (Object.keys(next).length === 0) deletePath(configState.doc, path);
 		else setPath(configState.doc, path, next);
 	};

@@ -819,6 +819,9 @@ try {
 		routes: structuredClone(ROUTING_DOC.routes),
 	});
 	const TWO_HOSTS = { version: 1, hosts: { mac: HOST(1), "mac.local": HOST(3) } };
+	// Hidden (the host is local) but meaningful: it is what switching to remote
+	// uses. Unlike a list element's hidden field, it must survive a save.
+	TWO_HOSTS.hosts.mac.connection.endpointEnv = "MAC_URL";
 	validateClusterConfig(TWO_HOSTS);
 	files.cluster = JSON.stringify(TWO_HOSTS, null, 2);
 	await openSection("cluster");
@@ -984,6 +987,13 @@ try {
 		},
 		"nightly.v2": { executors: [{ kind: "class", modelClass: "FAST_READ" }] },
 	});
+
+	// A list below its minItems is refused by the form, with the place named.
+	files.paseo = JSON.stringify({ version: 1, jobs: { "re.view": { executors: [] } } }, null, 2);
+	await openSection("paseo");
+	assert.match(card("re.view").querySelector(".cfg-list-short").textContent, /Cần ít nhất 1 mục/, "the card says it is short");
+	assert.equal(await save(), null, "a job with no executor never reaches config write");
+	assert.match(errorToast(), /jobs\."re\.view"\.executors: Executors cần ít nhất 1 mục/);
 
 	// --- the model sync result says where each limit came from ----------------
 	await openSection("pi-models");

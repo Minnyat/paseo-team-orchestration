@@ -454,6 +454,40 @@ import {
 	const filled = fillKeptEmpty(schema, { jobs: { a: { executors: [{ kind: "class" }, "not-an-object"] } } });
 	assert.deepEqual(filled.jobs.a.executors, [{ kind: "class", tags: [] }, "not-an-object"]);
 
+	// The whole save pipeline keeps a key spelled __proto__ (S2's job-name
+	// pattern allows it): as a job id, and as a key inside a list element.
+	const proto = JSON.parse('{"jobs":{"__proto__":{"executors":[{"kind":"cli","tool":"pi","__proto__":"x"}]}}}');
+	const savedProto = fillKeptEmpty(schema, pruneEmpty(cleanListItems(schema, clone(proto))));
+	assert.deepEqual(Object.keys(savedProto.jobs), ["__proto__"], "a job named __proto__ survives the save");
+	assert.equal(Object.getPrototypeOf(savedProto.jobs), Object.prototype);
+	assert.deepEqual(
+		JSON.parse(JSON.stringify(savedProto)),
+		JSON.parse('{"jobs":{"__proto__":{"executors":[{"kind":"cli","tool":"pi","__proto__":"x","tags":[]}]}}}'),
+	);
+
+	// A field hidden by showIf in a MAP item (not a list element) is kept: a
+	// local host's endpointEnv is not rubbish, it is what "remote" will use.
+	const hostSchema = {
+		groups: [
+			{
+				fields: [
+					{
+						path: "hosts",
+						type: "map",
+						item: {
+							fields: [
+								{ path: "connection.type", type: "enum" },
+								{ path: "connection.endpointEnv", type: "string", showIf: { path: "connection.type", equals: "remote" } },
+							],
+						},
+					},
+				],
+			},
+		],
+	};
+	const localHost = { hosts: { "mac.local": { connection: { type: "local", endpointEnv: "MAC_URL" } } } };
+	assert.deepEqual(cleanListItems(hostSchema, clone(localHost)), localHost, "map items keep their hidden fields");
+
 	// optionalKeys in a map that lives inside a list element.
 	const nested = {
 		groups: [
