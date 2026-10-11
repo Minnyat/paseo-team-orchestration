@@ -42,7 +42,6 @@ import {
 	copyFileSync,
 	readdirSync,
 	readFileSync,
-	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -50,7 +49,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isEntrypoint, teamConfigDir } from "./lib-common.mjs";
+import { PRIVATE_DIR_MODE, isEntrypoint, teamConfigDir, writeFileAtomic } from "./lib-common.mjs";
 // The SAME merge `pteam seats apply` uses. Reused rather than reimplemented: a
 // second merge would be a second ownership rule to keep in step with the first.
 import { applySeatsToPaseoConfig } from "./seat-profiles.mjs";
@@ -394,16 +393,12 @@ export function readJsonOrNull(path) {
 }
 
 export function writeJsonAtomic(path, value) {
-	mkdirSync(dirname(path), { recursive: true });
-	if (existsSync(path)) copyFileSync(path, `${path}.bak-${Date.now()}`);
-	const temp = `${path}.${process.pid}.tmp`;
-	writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-	try {
-		renameSync(temp, path);
-	} catch (error) {
-		rmSync(temp, { force: true });
-		throw error;
-	}
+	// These files (~/.claude.json, settings.json, the Paseo config, the ledger)
+	// carry provider env blocks and MCP tokens: an existing one keeps its mode,
+	// a new one starts 0600, and a directory made here is 0700.
+	mkdirSync(dirname(path), { recursive: true, mode: PRIVATE_DIR_MODE });
+	if (existsSync(path)) copyFileSync(path, `${path}.bak-${Date.now()}`); // copyFileSync keeps the source's mode
+	writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function applyToFile(path, transform, { label, createIfMissing = true }) {
@@ -636,9 +631,6 @@ export function providerIsOurs(live, ledgerEntry) {
  *   removes them. Config-first is the deliberate order — the opposite failure
  *   (a ledger claiming providers that were never written) would make uninstall
  *   delete entries it did not create, which is the worse of the two.
- * - writeJsonAtomic leaves its `.tmp` sibling behind if writeFileSync throws
- *   (the rename is guarded, the write is not). Pre-existing and shared with the
- *   install path; noted, not fixed here.
  */
 export async function applyProviders(env = process.env, { force = false } = {}) {
 	const configPath = paseoConfigPath(env);

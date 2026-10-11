@@ -31,6 +31,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { PRIVATE_FILE_MODE } from "./lib-common.mjs";
 
 // --- config ----------------------------------------------------------------
 
@@ -442,6 +443,8 @@ export async function syncModels(options) {
 		report.backup = backup;
 	}
 	mkdirSync(dirname(modelsPath), { recursive: true });
-	writeFileSync(modelsPath, `${JSON.stringify(next, null, 2)}\n`);
+	// The catalog can carry provider credentials. An existing file is rewritten
+	// in place and keeps the mode its owner chose; a new one starts private.
+	writeFileSync(modelsPath, `${JSON.stringify(next, null, 2)}\n`, { mode: PRIVATE_FILE_MODE });
 	return report;
 }

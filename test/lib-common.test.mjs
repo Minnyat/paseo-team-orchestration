@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -501,6 +501,72 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
       /could not find the paseo CLI/,
     );
     assert.ok(Array.isArray(reported.tried), "the failure names what it tried");
+
+    // The directory the user is standing in is not a place to load code from:
+    // a hostile checkout that plants node_modules/@getpaseo/cli/dist/utils/
+    // client.js must be ignored. The module is import()ed, so using it would
+    // run the checkout's JavaScript with the user's rights.
+    const hostile = join(sandbox, "hostile");
+    const planted = join(hostile, "node_modules", "@getpaseo", "cli", "dist", "utils", "client.js");
+    mkdirSync(dirname(planted), { recursive: true });
+    writeFileSync(planted, "export function connectToDaemon() {}\n");
+    const realCwd = process.cwd();
+    try {
+      process.chdir(hostile);
+      process.env.PATH = join(sandbox, "empty");
+      reported = null;
+      assert.throws(
+        () => resolvePaseoClientModule((reason, tried) => { reported = { reason, tried }; throw new Error(reason); }),
+        /could not find the paseo CLI/,
+        "no paseo on PATH must not fall back to the cwd",
+      );
+      // Compare real paths too: on macOS the cwd comes back as /private/var/...
+      // while `hostile` was built from /var/...
+      const hostileReal = realpathSync(hostile);
+      assert.ok(
+        !reported.tried.some((entry) => entry.startsWith(hostile) || entry.startsWith(hostileReal)),
+        "the cwd is never even a candidate",
+      );
+      // The replacement is the pack's own install dir, derived from where
+      // lib-common.mjs lives (<pack>/scripts/lib-common.mjs), not from the cwd.
+      const packRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+      assert.deepEqual(
+        reported.tried.map((entry) => resolve(entry)),
+        [join(packRoot, "node_modules", "@getpaseo", "cli", "dist", "utils", "client.js")],
+        "the only fallback is the pack's own node_modules",
+      );
+
+      // A relative PATH entry resolves against the cwd, so a paseo reached through
+      // one must not lead the SDK lookup back into the hostile checkout.
+      {
+        mkdirSync(join(hostile, "rel", "bin"), { recursive: true });
+        mkdirSync(join(hostile, "rel", "dist", "utils"), { recursive: true });
+        writeFileSync(join(hostile, "rel", "bin", "paseo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        writeFileSync(join(hostile, "rel", "dist", "utils", "client.js"), "export function connectToDaemon() {}\n");
+        process.env.PATH = join("rel", "bin");
+        assert.throws(
+          () => resolvePaseoClientModule(),
+          /could not find the paseo CLI/,
+          "a paseo found through a relative PATH entry is not trusted to locate code",
+        );
+      }
+
+      // A paseo on PATH that is not laid out like the package (a mise/asdf/volta
+      // shim resolves to the manager's own binary) used to fall through to the cwd.
+      if (process.platform !== "win32") {
+        const shimDir = join(sandbox, "shim");
+        mkdirSync(shimDir, { recursive: true });
+        writeFileSync(join(shimDir, "paseo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        process.env.PATH = shimDir;
+        assert.throws(
+          () => resolvePaseoClientModule(),
+          /found the paseo CLI but not its client SDK/,
+          "a shim that does not sit beside the SDK is a fault, not a reason to search the cwd",
+        );
+      }
+    } finally {
+      process.chdir(realCwd);
+    }
   } finally {
     process.env.PATH = realPath;
     if (realOverride === undefined) delete process.env.PASEO_TEAM_PASEO_CLIENT;

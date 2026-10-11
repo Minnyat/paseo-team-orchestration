@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -173,6 +173,20 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 		calls.some((c) => c.model === "plain" && c.reasoning_effort === null),
 		"a model that rejects reasoning_effort is retried without it rather than written off as dead",
 	);
+
+	// A catalog this run CREATES starts private (it can carry provider
+	// credentials); POSIX modes only. An existing one keeps its owner's mode, which
+	// the real write below exercises.
+	if (process.platform !== "win32") {
+		const freshPath = join(sandbox, "fresh-dir", "models.json");
+		const realUmask = process.umask(0o022);
+		try {
+			await syncModels({ entries, keys, modelsPath: freshPath });
+		} finally {
+			process.umask(realUmask);
+		}
+		assert.equal((statSync(freshPath).mode & 0o777).toString(8), "600", "a new models.json is owner-only");
+	}
 
 	// A real write preserves other providers and leaves a backup behind.
 	writeFileSync(modelsPath, JSON.stringify({ providers: { untouched: { models: [] } } }));
