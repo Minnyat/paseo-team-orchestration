@@ -22,6 +22,7 @@ import {
 	deletePath,
 	dependentOptionProblems,
 	dependentOptions,
+	fillKeptEmpty,
 	getPath,
 	numberRangeProblems,
 	optionalEntryProblems,
@@ -41,6 +42,7 @@ import {
 	projectLabel,
 	relativeTime,
 	RISK_LABEL,
+	roleLabel,
 	runtimeLabel,
 	statusLabel,
 	toolMeaning,
@@ -1294,7 +1296,10 @@ function enumControl(field, path, prefix) {
 		for (const value of values) select.appendChild(el("option", { value, text: value }));
 		const current = getPath(configState.doc, path);
 		select.value = current === undefined ? "" : String(current);
-		if (current !== undefined && ![...select.options].some((option) => option.value === select.value)) {
+		// Compare against the stored value, not `select.value`: assigning a value
+		// no option carries makes the browser fall back to "", which matches the
+		// default option and would hide the stray value behind "— mặc định —".
+		if (current !== undefined && ![...select.options].some((option) => option.value === String(current))) {
 			// A value outside the list (hand-written, from a newer version, or left
 			// over after switching family) stays visible instead of silently
 			// snapping back to the default — losing it would rewrite the config.
@@ -1364,14 +1369,19 @@ function roleProviderControl(field, path) {
 		return { runtime: "", role: "" };
 	};
 
-	const paint = () => {
+	const paintNote = () => {
 		const current = String(getPath(configState.doc, path) ?? "");
 		const { runtime, role } = parse(current);
-		roleSel.value = role;
-		runtimeSel.value = runtime;
 		const stranded = current !== "" && (runtime === "" || role === "");
 		note.classList.toggle("hidden", !stranded);
 		if (stranded) note.textContent = `Giá trị đang lưu "${current}" không khớp vai trò/runtime nào — giữ nguyên, chọn lại để thay.`;
+	};
+
+	const paint = () => {
+		const { runtime, role } = parse(String(getPath(configState.doc, path) ?? ""));
+		roleSel.value = role;
+		runtimeSel.value = runtime;
+		paintNote();
 	};
 
 	const commit = () => {
@@ -1380,8 +1390,11 @@ function roleProviderControl(field, path) {
 		if (role && runtime) setPath(configState.doc, path, `${runtime}-${role}`);
 		else deletePath(configState.doc, path);
 		// The delegated form listener repaints model/thinking off the new
-		// paseoProvider; this only has to keep its own note current.
-		paint();
+		// paseoProvider; this only has to keep its own note current. It must NOT
+		// re-read the dropdowns from the document: half a choice (a role with no
+		// runtime yet) stores nothing, and repainting from that wiped the half
+		// just picked — a fresh route card could never be filled in.
+		paintNote();
 	};
 
 	roleSel.addEventListener("change", commit);
@@ -2028,7 +2041,7 @@ $("config-save").addEventListener("click", async () => {
 			toast(problems.join(" · "), true);
 			return;
 		}
-		text = JSON.stringify(pruneEmpty(configState.doc) ?? {}, null, 2);
+		text = JSON.stringify(fillKeptEmpty(configState.schema, pruneEmpty(configState.doc) ?? {}), null, 2);
 	}
 	try {
 		JSON.parse(text); // fail here, before anything touches the file

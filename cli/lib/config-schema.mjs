@@ -519,8 +519,6 @@ export const CONFIG_SCHEMAS = {
 								keyFile: PROVIDER_KEY_FILE_SEED,
 								probe: true,
 								concurrency: 5,
-								contextWindow: 200000,
-								maxTokens: 32000,
 							},
 							fields: [
 								{ path: "baseUrl", type: "string", label: "Địa chỉ endpoint", hint: "Ví dụ: https://ten-mien/v1" },
@@ -546,8 +544,25 @@ export const CONFIG_SCHEMAS = {
 								},
 								{ path: "api", type: "enum", enum: ["openai-completions"], default: "openai-completions", label: "Giao thức" , advanced: true },
 								{ path: "concurrency", type: "number", default: 5, min: 1, max: 16, label: "Số model gọi thử cùng lúc" , advanced: true },
-								{ path: "contextWindow", type: "number", default: 200000, min: 1024, label: "Context window" , advanced: true },
-								{ path: "maxTokens", type: "number", default: 32000, min: 256, label: "Max output tokens" , advanced: true },
+								// No default on purpose: an absent limit means "unknown", and the
+								// sync looks it up per model instead of stamping one number on
+								// every model behind the endpoint.
+								{
+									path: "contextWindow",
+									type: "number",
+									min: 1024,
+									label: "Context window",
+									hint: "Để trống = tự tra từ models.dev.",
+									advanced: true,
+								},
+								{
+									path: "maxTokens",
+									type: "number",
+									min: 256,
+									label: "Max output tokens",
+									hint: "Để trống = tự tra từ models.dev.",
+									advanced: true,
+								},
 							],
 						},
 					},
@@ -598,6 +613,9 @@ export const CONFIG_SCHEMAS = {
 								{
 									path: "capabilities",
 									type: "lines",
+									// validateClusterConfig requires the array even when empty;
+									// the form's save prune would otherwise drop it.
+									keepEmpty: true,
 									label: "Khả năng",
 									hint: "Mỗi dòng một khả năng: git-read, git-write, focused-test, docker, integration-test, independent-review…",
 								},

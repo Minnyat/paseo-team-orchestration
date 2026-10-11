@@ -76,6 +76,39 @@ export function pruneEmpty(value) {
 	return value;
 }
 
+/**
+ * Put back the empty lists a reader insists on, after pruneEmpty took them out.
+ *
+ * pruneEmpty treats `[]` as "not set", which holds for almost every list here,
+ * but not for a field the schema marks `keepEmpty`: a cluster host's
+ * `capabilities` must be an array even when it is empty, and without it
+ * validateClusterConfig refuses the whole file. A field is restored only inside
+ * an item that survived the prune — a removed host does not come back as a husk.
+ *
+ * It walks the objects themselves rather than building "hosts.<id>.capabilities"
+ * strings: a map key is user data and may contain a dot ("mac.local"), and a
+ * dotted path split back apart would invent a host "mac" with a child "local".
+ * Only the schema's own field paths go through getPath/setPath.
+ */
+export function fillKeptEmpty(schema, doc) {
+	if (doc === null || typeof doc !== "object") return doc;
+	for (const group of schema?.groups ?? []) {
+		for (const field of group.fields ?? []) visit(field, doc);
+	}
+	function visit(field, node) {
+		if (field.keepEmpty && getPath(node, field.path) === undefined) setPath(node, field.path, []);
+		if (field.type === "map" && field.item) {
+			const object = getPath(node, field.path);
+			if (object === null || typeof object !== "object") return;
+			for (const item of Object.values(object)) {
+				if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+				for (const child of field.item.fields ?? []) visit(child, item);
+			}
+		}
+	}
+	return doc;
+}
+
 /** One entry per number field outside its range, with the label to show the user. */
 export function numberRangeProblems(schema, doc, prefix = "") {
 	const problems = [];
