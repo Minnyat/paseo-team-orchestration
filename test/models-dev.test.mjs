@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -84,6 +84,14 @@ const API = {
 			"same-everywhere": { id: "same-everywhere", limit: { context: 64_000, output: 8_000 } },
 			"half-agree": { id: "half-agree", limit: { context: 200_000, output: 8_000 } },
 			"two-owners": { id: "two-owners", limit: { context: 100_000, output: 4_000 }, canonical_model_id: "a/two-owners" },
+			// Only context here, only output at azure: must not be stitched.
+			stitched: { id: "stitched", limit: { context: 64_000 } },
+			// Both fields here, only context at azure: output is not unanimous.
+			"one-carries": { id: "one-carries", limit: { context: 64_000, output: 8_000 } },
+			// Listed only here, and engy is its canonical owner.
+			"lone-owner": { id: "lone-owner", limit: { context: 32_000, output: 4_000 }, canonical_model_id: "engy/lone-owner" },
+			// The owner's own record claims more output than window.
+			inverted: { id: "inverted", limit: { context: 8_000, output: 16_000 }, canonical_model_id: "engy/inverted" },
 		},
 	},
 	azure: {
@@ -94,6 +102,11 @@ const API = {
 			"half-agree": { id: "half-agree", limit: { context: 200_000, output: 16_000 } },
 			"two-owners": { id: "two-owners", limit: { context: 200_000, output: 4_000 }, canonical_model_id: "b/two-owners" },
 			"no-limit": { id: "no-limit" },
+			stitched: { id: "stitched", limit: { output: 8_000 } },
+			"one-carries": { id: "one-carries", limit: { context: 64_000 } },
+			// Listed by one reseller only, no canonical id.
+			"lone-reseller": { id: "lone-reseller", limit: { context: 128_000, output: 16_000 } },
+			inverted: { id: "inverted", limit: { context: 8_000, output: 16_000 }, canonical_model_id: "engy/inverted" },
 		},
 	},
 	"no-models": { id: "no-models" },
@@ -183,6 +196,33 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 		assert.equal(unknown.maxTokens, undefined);
 	}
 	assert.equal(match("no-limit").contextWindow, undefined, "a record with no limit gives none");
+
+	// Unanimous means every hit carries the field, with one value.
+	const stitched = match("stitched");
+	assert.equal(stitched.contextWindow, undefined, "context from one record and output from another is never stitched");
+	assert.equal(stitched.maxTokens, undefined);
+	const oneCarries = match("one-carries");
+	assert.equal(oneCarries.contextWindow, 64_000, "every hit carries the same context");
+	assert.equal(oneCarries.maxTokens, undefined, "a field only one hit carries is unknown");
+
+	// One provider only: its record counts only when it is provably the owner.
+	const lone = match("lone-reseller");
+	assert.equal(lone.candidates, 1);
+	assert.equal(lone.contextWindow, undefined, "one reseller's word, not the owner's: unknown");
+	assert.equal(lone.maxTokens, undefined);
+	assert.match(lone.reason, /only azure lists/);
+	const loneOwner = match("lone-owner");
+	assert.equal(loneOwner.rule, "canonical", "the single record IS its canonical owner: kept");
+	assert.equal(loneOwner.contextWindow, 32_000);
+	const loneEndpoint = match("lone-reseller", "azure");
+	assert.equal(loneEndpoint.rule, "endpoint", "and so is the endpoint's own record");
+	assert.equal(loneEndpoint.maxTokens, 16_000);
+
+	// No model outputs more than its window.
+	const inverted = match("inverted");
+	assert.equal(inverted.contextWindow, 8_000);
+	assert.equal(inverted.maxTokens, undefined, "maxTokens > contextWindow is unknown");
+	assert.match(inverted.dropped, /16000 > contextWindow 8000/);
 	assert.match(matchModelsDev(null, { modelId: "gpt-5.6-terra" }).reason, /unavailable/);
 }
 
@@ -226,6 +266,12 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 		assert.equal(ignored.source, "models.dev");
 	}
 	assert.equal(resolve("gpt-5.6-terra", { other: { contextWindow: 5 } }).contextWindow, 1_050_000, "another model's override does not apply");
+
+	// An overridden window smaller than models.dev's output: that output cannot fit.
+	const narrowed = resolve("gpt-5.6-terra", { "gpt-5.6-terra": { contextWindow: 100_000 } });
+	assert.equal(narrowed.contextWindow, 100_000);
+	assert.equal(narrowed.maxTokens, undefined);
+	assert.equal(narrowed.fields.maxTokens, "unknown");
 }
 
 // --- cache: fresh, reused, stale when offline, absent when never fetched ----
@@ -267,6 +313,22 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	const doc = JSON.parse(readFileSync(join(oldFormat, CACHE_FILE_NAME), "utf8"));
 	writeFileSync(join(oldFormat, CACHE_FILE_NAME), JSON.stringify({ ...doc, version: 0 }));
 	assert.equal((await loadModelsDev({ fetchImpl: offline(), cacheDir: oldFormat, now: t0 })).origin, "unavailable");
+
+	// A cache stamped in the future (clock moved back) is not fresh.
+	const future = freshDir();
+	await loadModelsDev({ fetchImpl: serving(), cacheDir: future, now: t0 });
+	const netAgain = serving();
+	const behind = await loadModelsDev({ fetchImpl: netAgain, cacheDir: future, now: t0 - 60_000 });
+	assert.equal(behind.origin, "network", "a fetchedAt after now is refetched, not trusted");
+	assert.equal(netAgain.calls.length, 1);
+
+	// A cache write that fails leaves no temp file behind.
+	const blocked = freshDir();
+	mkdirSync(join(blocked, CACHE_FILE_NAME, "occupied"), { recursive: true });
+	const unwritable = await loadModelsDev({ fetchImpl: serving(), cacheDir: blocked, now: t0 });
+	assert.equal(unwritable.origin, "network", "the fetched data is still used");
+	assert.ok(unwritable.cacheError, "the failed write is reported");
+	assert.deepEqual(readdirSync(blocked), [CACHE_FILE_NAME], "and the temp file is cleaned up");
 
 	const never = await loadModelsDev({ fetchImpl: offline(), cacheDir: freshDir(), now: t0 });
 	assert.equal(never.origin, "unavailable");
@@ -320,11 +382,14 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	);
 
 	// Every answer obeys the contract: a positive integer or absent.
-	for (const modelId of ["gpt-5.6-terra", "half-agree", "two-owners", "review", "no-limit", "deepseek-v4.1-flash"]) {
+	for (const modelId of ["gpt-5.6-terra", "half-agree", "two-owners", "review", "no-limit", "deepseek-v4.1-flash", "stitched", "one-carries", "lone-reseller", "inverted"]) {
 		const result = await lookupModelLimits({ endpointId: "minnyat", modelId, fetchImpl: offline(), cacheDir });
 		for (const field of ["contextWindow", "maxTokens"]) {
 			const value = result[field];
 			assert.ok(value === undefined || (Number.isInteger(value) && value > 0), `${modelId}.${field} = ${value}`);
+		}
+		if (result.contextWindow !== undefined && result.maxTokens !== undefined) {
+			assert.ok(result.maxTokens <= result.contextWindow, `${modelId}: maxTokens fits its window`);
 		}
 		assert.ok(["override", "models.dev", "unknown"].includes(result.source));
 	}

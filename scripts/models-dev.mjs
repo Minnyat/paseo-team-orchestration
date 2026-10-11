@@ -28,8 +28,16 @@
  *      one, and that model's owner (the id's first segment) lists it — the
  *      owner's record. This is how `gpt-5.6-terra` resolves to openai's
  *      1050000/128000 instead of a reseller's 372000.
- *   3. unanimous: per field, every hit that carries the field gives the same
- *      value.
+ *   3. unanimous: per field, EVERY hit carries the field and all give the
+ *      same value. A field only some hits carry is unknown, so the two limits
+ *      can never be stitched together from different records. This needs at
+ *      least two hits: an id only one provider lists, and that provider is
+ *      neither the endpoint (1) nor the canonical owner (2), is one reseller's
+ *      word and stays unknown.
+ *
+ * Whichever rule matched, a maxTokens larger than the contextWindow it sits
+ * beside cannot be right (no model outputs more than its window), so that
+ * maxTokens becomes unknown; the contextWindow stands.
  *
  * Anything else is unknown. In particular there is no majority vote, no
  * minimum, no case folding, and no stripping of proxy prefixes (`cx/`) or
@@ -40,7 +48,7 @@
  * for a day, and a stale cache is used when the network is down.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { teamConfigDir } from "./lib-common.mjs";
 
@@ -123,7 +131,9 @@ export async function loadModelsDev(options = {}) {
 	} = options;
 	const path = join(cacheDir, CACHE_FILE_NAME);
 	const cached = readCache(path);
-	if (cached && now - cached.fetchedAt < ttlMs) {
+	// A fetchedAt in the future (clock moved back, copied cache) is not fresh.
+	const age = cached ? now - cached.fetchedAt : -1;
+	if (cached && age >= 0 && age < ttlMs) {
 		return { catalog: cached.providers, origin: "cache", fetchedAt: cached.fetchedAt };
 	}
 
@@ -144,14 +154,16 @@ export async function loadModelsDev(options = {}) {
 
 	const result = { catalog, origin: "network", fetchedAt: now };
 	if (!persist) return result;
+	// Temp file + rename: a reader never sees half a catalog.
+	const temp = `${path}.${process.pid}.tmp`;
 	try {
 		mkdirSync(cacheDir, { recursive: true });
-		// Temp file + rename: a reader never sees half a catalog.
-		const temp = `${path}.${process.pid}.tmp`;
 		writeFileSync(temp, JSON.stringify({ version: CACHE_VERSION, source: url, fetchedAt: now, providers: catalog }));
 		renameSync(temp, path);
 	} catch (error) {
-		// The data is good; only next run's offline fallback is lost.
+		// The data is good; only next run's offline fallback is lost. Do not
+		// leave a 700 KB orphan behind for every failed write.
+		rmSync(temp, { force: true });
 		result.cacheError = String(error?.message ?? error);
 	}
 	return result;
@@ -176,18 +188,28 @@ function indexOf(catalog) {
 	return index;
 }
 
+/** No model outputs more than its whole window: such a maxTokens is unknown. */
+function saneLimits(result) {
+	if (isPositiveInteger(result.contextWindow) && isPositiveInteger(result.maxTokens) && result.maxTokens > result.contextWindow) {
+		return { ...result, maxTokens: undefined, dropped: `maxTokens ${result.maxTokens} > contextWindow ${result.contextWindow}` };
+	}
+	return result;
+}
+
 function recordFrom(record, rule, candidates) {
-	return {
+	return saneLimits({
 		rule,
 		record: `${record.provider}/${record.key}`,
 		candidates,
 		contextWindow: isPositiveInteger(record.context) ? record.context : undefined,
 		maxTokens: isPositiveInteger(record.output) ? record.output : undefined,
-	};
+	});
 }
 
+/** The value every hit gives for `field`, or undefined if any hit lacks it or differs. */
 function unanimous(hits, field) {
-	const values = new Set(hits.map((hit) => hit[field]).filter(isPositiveInteger));
+	if (!hits.every((hit) => isPositiveInteger(hit[field]))) return undefined;
+	const values = new Set(hits.map((hit) => hit[field]));
 	return values.size === 1 ? [...values][0] : undefined;
 }
 
@@ -217,12 +239,16 @@ export function matchModelsDev(catalog, { endpointId, modelId }) {
 		if (key !== null) return recordFrom({ provider: owner, key, ...ownerModels[key] }, "canonical", hits.length);
 	}
 
+	if (hits.length === 1) {
+		const [only] = hits;
+		return { candidates: 1, reason: `only ${only.provider} lists "${modelId}" and it is neither this endpoint nor the canonical owner` };
+	}
 	const contextWindow = unanimous(hits, "context");
 	const maxTokens = unanimous(hits, "output");
 	if (contextWindow === undefined && maxTokens === undefined) {
 		return { candidates: hits.length, reason: `${hits.length} models.dev entries for "${modelId}" disagree and none is the canonical owner` };
 	}
-	return { rule: "unanimous", candidates: hits.length, contextWindow, maxTokens };
+	return saneLimits({ rule: "unanimous", candidates: hits.length, contextWindow, maxTokens });
 }
 
 /**
@@ -252,6 +278,13 @@ export function resolveModelLimits(catalog, { endpointId, modelId, overrides }) 
 		} else {
 			result.fields[field] = "unknown";
 		}
+	}
+	// An overridden window smaller than models.dev's output: that output
+	// cannot fit, so it is unknown. (Two overrides that disagree are stopped
+	// earlier, by pi-models-sync's configProblems.)
+	if (result.fields.maxTokens === "models.dev" && isPositiveInteger(result.contextWindow) && result.maxTokens > result.contextWindow) {
+		delete result.maxTokens;
+		result.fields.maxTokens = "unknown";
 	}
 	const origins = Object.values(result.fields);
 	result.source = origins.includes("override") ? "override" : origins.includes("models.dev") ? "models.dev" : "unknown";

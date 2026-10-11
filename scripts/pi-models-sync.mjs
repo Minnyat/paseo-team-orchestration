@@ -36,7 +36,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { isPositiveInteger, loadModelsDev, resolveModelLimits } from "./models-dev.mjs";
+import { isPositiveInteger, loadModelsDev, MODELS_DEV_URL, resolveModelLimits } from "./models-dev.mjs";
 
 // --- config ----------------------------------------------------------------
 
@@ -68,6 +68,9 @@ export const DEFAULT_CONFIG = Object.freeze({
  * one number again. Per-model overrides replace them.
  */
 export const LEGACY_LIMIT_KEYS = Object.freeze(["contextWindow", "maxTokens"]);
+
+/** The only keys a per-model override (`providers.<name>.models.<id>`) may hold. */
+export const OVERRIDE_KEYS = Object.freeze(["contextWindow", "maxTokens"]);
 
 /**
  * Accept either shape and hand one shape onward.
@@ -139,10 +142,20 @@ export function configProblems(entries) {
 					problems.push(`provider "${entry.name}": models.${id} must be an object`);
 					continue;
 				}
-				for (const field of LEGACY_LIMIT_KEYS) {
+				// Only the two limits: anything else (`context`, `reasoning`, a
+				// misspelling) would be read by nobody and look like it worked.
+				for (const key of Object.keys(override)) {
+					if (!OVERRIDE_KEYS.includes(key)) {
+						problems.push(`provider "${entry.name}": models.${id}.${key} is not an override (allowed: ${OVERRIDE_KEYS.join(", ")})`);
+					}
+				}
+				for (const field of OVERRIDE_KEYS) {
 					if (override[field] !== undefined && !isPositiveInteger(override[field])) {
 						problems.push(`provider "${entry.name}": models.${id}.${field} must be a positive integer`);
 					}
+				}
+				if (isPositiveInteger(override.contextWindow) && isPositiveInteger(override.maxTokens) && override.maxTokens > override.contextWindow) {
+					problems.push(`provider "${entry.name}": models.${id}.maxTokens (${override.maxTokens}) exceeds its contextWindow (${override.contextWindow})`);
 				}
 			}
 		}
@@ -441,6 +454,28 @@ export async function syncProvider(options) {
  * A provider that fails does not stop the others and does not lose its
  * existing entry: a dead endpoint leaves yesterday's models in place rather
  * than deleting them, and the failure is reported instead of swallowed.
+ *
+ * The report is what `pteam models sync` prints and the WebUI shows; these
+ * fields are stable (a key whose value is unknown is omitted from the JSON):
+ *
+ *   {
+ *     ok, path, dryRun, backup?,
+ *     limits: {                       // where this run's models.dev data came from
+ *       origin: "cache" | "network" | "stale-cache" | "unavailable",
+ *       fetchedAt?: ISO string,       // when that copy was fetched
+ *       error?: string,               // why the network was not used
+ *       cacheError?: string,          // fetched, but the cache could not be written
+ *     },
+ *     warnings: string[],             // one line each, also written via `warn`
+ *     providers: [{
+ *       ok, provider, baseUrl, listed?, written?, probed?, code?, message?,
+ *       models?: [{
+ *         id, reasoning,
+ *         contextWindow?, maxTokens?,  // positive integers, absent = unknown
+ *         limitSource: "override" | "models.dev" | "unknown",
+ *       }],
+ *     }],
+ *   }
  */
 export async function syncModels(options) {
 	const {
@@ -476,6 +511,12 @@ export async function syncModels(options) {
 
 	// Once per run: the catalog is megabytes, and every provider shares it.
 	const limitsCatalog = await loadModelsDev({ ...modelsDev, ...(dryRun ? { persist: false } : {}) });
+	if (limitsCatalog.origin === "unavailable") {
+		// The run still succeeds: absent limits are correct, just unhelpful.
+		const line = `pi-models: models.dev unreachable and no cached copy (${limitsCatalog.error}); contextWindow/maxTokens are left out except per-model overrides, so pi uses its own defaults until a sync can reach ${MODELS_DEV_URL}`;
+		warnings.push(line);
+		warn(line);
+	}
 
 	const results = [];
 	for (const entry of entries) {

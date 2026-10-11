@@ -169,6 +169,12 @@ const MODELS_DEV_API = {
 	assert.match(withModels({ review: { maxTokens: 0 } }), /models\.review\.maxTokens must be a positive integer/);
 	assert.match(withModels({ review: 128_000 }), /models\.review must be an object/);
 	assert.match(withModels([]), /models must be an object/);
+	// Only the two limits are overrides; anything else names the bad key.
+	const stray = withModels({ review: { contextWindow: 128_000, context: 64_000, reasoning: true } });
+	assert.match(stray, /models\.review\.context is not an override/);
+	assert.match(stray, /models\.review\.reasoning is not an override/);
+	assert.doesNotMatch(stray, /contextWindow is not/);
+	assert.match(withModels({ review: { contextWindow: 8_000, maxTokens: 16_000 } }), /models\.review\.maxTokens \(16000\) exceeds its contextWindow \(8000\)/);
 
 	// Endpoint-level limits from an older file: ignored, and said so in ONE line.
 	assert.equal(legacyLimitWarning([{ name: "a" }]), null, "nothing to say about a clean file");
@@ -436,6 +442,28 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 	});
 	assert.deepEqual(silent, []);
 	assert.deepEqual(cleanRun.warnings, []);
+
+	// models.dev unreachable and never cached: the run still succeeds, overrides
+	// still apply, and the report says why every other limit is missing.
+	{
+		const lines = [];
+		const unreachable = await syncModels({
+			entries: [clean],
+			keys: new Map([["proxy", "sk"]]),
+			modelsPath: join(sandbox, "unreachable-models.json"),
+			fetchImpl: endpointFetch,
+			modelsDev: offlineDev(),
+			dryRun: true,
+			warn: (line) => lines.push(line),
+		});
+		assert.equal(unreachable.ok, true, "missing limits do not fail the sync");
+		assert.equal(unreachable.limits.origin, "unavailable");
+		assert.equal(lines.length, 1);
+		assert.match(lines[0], /models\.dev unreachable and no cached copy \(fetch failed\)/);
+		assert.deepEqual(unreachable.warnings, lines, "the same line is in the report for the UI");
+		const sources = Object.fromEntries(unreachable.providers[0].models.map((m) => [m.id, m.limitSource]));
+		assert.deepEqual(sources, { "cx/gpt-6-astra": "override", "gpt-5.6-terra": "unknown", review: "unknown" });
+	}
 
 	// --dry-run writes nothing at all, the models.dev cache included.
 	const dryCache = join(sandbox, "models-dev-dry");
