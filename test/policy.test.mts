@@ -30,6 +30,8 @@ import {
 	isPaseoBrowserTool,
 	resolvePeerMode,
 	packSkillFromPath,
+	extraTools,
+	extraToolDiagnostics,
 	skillAdmission,
 	skillBlockReason,
 	PACK_SKILL_NAMES,
@@ -1199,6 +1201,21 @@ assert.ok(
 );
 assert.ok(!peerW.deny.includes("peer_ask_lead"), "peer communication remains available in write mode");
 
+const previousExtraTools = process.env.PASEO_TEAM_EXTRA_TOOLS;
+process.env.PASEO_TEAM_EXTRA_TOOLS = " WebFetch, WebSearch, bash, mcp__unrelated__do, constructor, WebFetch ";
+assert.deepEqual(extraTools("peer", "pi"), [], "Pi cannot admit Claude-only research extras");
+assert.deepEqual(extraTools("lead", "pi"), [], "Pi Lead cannot admit Claude-only research extras");
+assert.deepEqual(extraTools("peer", "claude"), ["WebFetch", "WebSearch"], "Claude Peer admits catalogued research extras once");
+assert.deepEqual(extraTools("lead", "claude"), ["WebFetch", "WebSearch"], "Claude Lead admits catalogued research extras once");
+assert.deepEqual(extraTools("supervisor", "claude"), [], "Supervisor never receives extras from host env");
+assert.deepEqual(
+	extraToolDiagnostics().accepted,
+	{ pi: { peer: [], lead: [], supervisor: [] }, claude: { peer: ["WebFetch", "WebSearch"], lead: ["WebFetch", "WebSearch"], supervisor: [] } },
+	"diagnostics report acceptance for the runtime family that can activate each capability",
+);
+if (previousExtraTools === undefined) delete process.env.PASEO_TEAM_EXTRA_TOOLS;
+else process.env.PASEO_TEAM_EXTRA_TOOLS = previousExtraTools;
+
 const prevLeadWrite = process.env.PASEO_TEAM_LEAD_WRITE;
 delete process.env.PASEO_TEAM_LEAD_WRITE;
 const lead = policyFor("lead", "read-only");
@@ -1392,7 +1409,7 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 {
 	const activeTools: string[] = [];
 	const { piStub, handlers } = makePiStub(
-		["read", "write", "edit", "bash", "mcp", "mcp_script"],
+		["read", "write", "edit", "bash", "mcp", "mcp_script", "WebFetch", "mcp__unrelated__do"],
 		activeTools,
 	);
 
@@ -1434,6 +1451,17 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 	);
 	assert.ok(!tools.includes("write"), "missing MODE → read-only");
 
+	// Extra tools are catalogued and runtime-clamped, not arbitrary registered names.
+	const previousExtraTools = process.env.PASEO_TEAM_EXTRA_TOOLS;
+	process.env.PASEO_TEAM_EXTRA_TOOLS = " WebFetch, bash, mcp__unrelated__do, constructor, WebFetch ";
+	tools = await fire(v3WriteBrief);
+	assert.ok(!tools.includes("WebFetch"), "Claude-only research tools never activate in Pi even when registered");
+	assert.ok(tools.includes("bash"), "the native Peer bash grant remains active and is not an extra-tool bypass");
+	assert.ok(!tools.includes("mcp__unrelated__do"), "arbitrary MCP tool never becomes active in Pi");
+	assert.ok(!tools.includes("constructor"), "prototype property inputs cannot bypass Pi active-tool policy");
+	if (previousExtraTools === undefined) delete process.env.PASEO_TEAM_EXTRA_TOOLS;
+	else process.env.PASEO_TEAM_EXTRA_TOOLS = previousExtraTools;
+
 	// turn 6: legacy V1/V2 write briefs NEVER grant write (injection surface).
 	tools = await fire("PASEO_TEAM_TASK_V1\nMODE: write\nOBJECTIVE: z3");
 	assert.ok(!tools.includes("write"), "legacy V1 brief → read-only");
@@ -1442,6 +1470,53 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 
 	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
 	else process.env.PASEO_PI_ROLE = prevRole;
+}
+
+// --- Extension lifecycle: malformed extras cannot skip Pi active-tool policy ---
+
+for (const [role, extraName, forbidden] of [
+	["supervisor", "constructor", "bash"],
+	["lead", "__proto__", "write"],
+	["lead", "hasOwnProperty", "edit"],
+] as const) {
+	const activeTools: string[] = [];
+	const { piStub, handlers } = makePiStub(["read", "bash", "write", "edit", "constructor", "__proto__", "hasOwnProperty", "toString"], activeTools);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	const prevExtras = process.env.PASEO_TEAM_EXTRA_TOOLS;
+	const prevLeadWrite = process.env.PASEO_TEAM_LEAD_WRITE;
+	process.env.PASEO_PI_ROLE = role;
+	process.env.PASEO_TEAM_EXTRA_TOOLS = extraName;
+	delete process.env.PASEO_TEAM_LEAD_WRITE;
+	(await loadFreshExtension(`lifecycle-prototype-${role}-${extraName}`))(piStub);
+	for (const handler of handlers.before_agent_start ?? []) await handler({ prompt: "ordinary turn", systemPrompt: "base" });
+	assert.ok(!activeTools.includes(forbidden), `${role} with ${extraName} still applies its active-tool policy: ${forbidden} stays unavailable`);
+	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+	else process.env.PASEO_PI_ROLE = prevRole;
+	if (prevExtras === undefined) delete process.env.PASEO_TEAM_EXTRA_TOOLS;
+	else process.env.PASEO_TEAM_EXTRA_TOOLS = prevExtras;
+	if (prevLeadWrite === undefined) delete process.env.PASEO_TEAM_LEAD_WRITE;
+	else process.env.PASEO_TEAM_LEAD_WRITE = prevLeadWrite;
+}
+
+// Prototype-shaped extras do not erase the established explicit Lead write opt-in.
+{
+	const activeTools: string[] = [];
+	const { piStub, handlers } = makePiStub(["read", "bash", "write", "edit", "toString"], activeTools);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	const prevExtras = process.env.PASEO_TEAM_EXTRA_TOOLS;
+	const prevLeadWrite = process.env.PASEO_TEAM_LEAD_WRITE;
+	process.env.PASEO_PI_ROLE = "lead";
+	process.env.PASEO_TEAM_EXTRA_TOOLS = "toString";
+	process.env.PASEO_TEAM_LEAD_WRITE = "1";
+	(await loadFreshExtension("lifecycle-prototype-lead-write-opt-in"))(piStub);
+	for (const handler of handlers.before_agent_start ?? []) await handler({ prompt: "ordinary turn", systemPrompt: "base" });
+	assert.ok(activeTools.includes("write") && activeTools.includes("edit"), "Lead write/edit stay available only through PASEO_TEAM_LEAD_WRITE=1");
+	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+	else process.env.PASEO_PI_ROLE = prevRole;
+	if (prevExtras === undefined) delete process.env.PASEO_TEAM_EXTRA_TOOLS;
+	else process.env.PASEO_TEAM_EXTRA_TOOLS = prevExtras;
+	if (prevLeadWrite === undefined) delete process.env.PASEO_TEAM_LEAD_WRITE;
+	else process.env.PASEO_TEAM_LEAD_WRITE = prevLeadWrite;
 }
 
 // --- Extension lifecycle: peer tool_call backstop uses current-turn brief -----

@@ -4654,11 +4654,62 @@ export function loadRolePrompt(r) {
         return undefined;
     }
 }
-export function extraTools() {
-    return (process.env.PASEO_TEAM_EXTRA_TOOLS ?? "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
+/**
+ * The sole extra-tool capability catalog. Entries must name both the role and
+ * runtime family that can actually activate them; a registered Pi tool with a
+ * Claude-shaped name is never enough to grant it.
+ */
+export const EXTRA_TOOL_CATALOG = Object.freeze({
+    WebFetch: Object.freeze({ roles: ["peer", "lead"], families: ["claude"] }),
+    WebSearch: Object.freeze({ roles: ["peer", "lead"], families: ["claude"] }),
+});
+function configuredExtraToolNames(env = process.env) {
+    return [...new Set((env.PASEO_TEAM_EXTRA_TOOLS ?? "")
+            .split(",")
+            .map((tool) => tool.trim())
+            .filter(Boolean))];
+}
+function extraToolCapability(tool) {
+    return Object.hasOwn(EXTRA_TOOL_CATALOG, tool) ? EXTRA_TOOL_CATALOG[tool] : null;
+}
+/** Catalogued configured extras compatible with one role and runtime. */
+export function extraTools(role, family, env = process.env) {
+    return configuredExtraToolNames(env).filter((tool) => {
+        const capability = extraToolCapability(tool);
+        return capability?.roles.includes(role) && capability.families.includes(family);
+    });
+}
+/** Operator-facing inventory of extras the runtime/role clamp will discard. */
+export function extraToolDiagnostics(env = process.env) {
+    const roles = ["peer", "lead", "supervisor"];
+    const names = configuredExtraToolNames(env);
+    const accepted = Object.fromEntries(RUNTIME_FAMILIES.map((family) => [
+        family,
+        Object.fromEntries(roles.map((role) => [role, extraTools(role, family, env)])),
+    ]));
+    const dropped = [];
+    for (const tool of names) {
+        const capability = extraToolCapability(tool);
+        for (const family of RUNTIME_FAMILIES) {
+            for (const role of roles) {
+                if (capability?.roles.includes(role) && capability.families.includes(family))
+                    continue;
+                dropped.push({
+                    tool,
+                    role,
+                    family,
+                    reason: role === "supervisor"
+                        ? "Supervisor cannot receive extra tools"
+                        : !capability
+                            ? "not a catalogued extra capability"
+                            : !capability.families.includes(family)
+                                ? `not available in the ${family} runtime`
+                                : "not available to this role",
+                });
+            }
+        }
+    }
+    return { accepted, dropped };
 }
 export function teamToolBlockReason(role, toolName, brief) {
     if (toolName === PEER_COMMUNICATION_TOOL) {

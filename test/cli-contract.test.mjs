@@ -65,6 +65,31 @@ try {
 		assert.match(badSub.stderr, /unknown subcommand/);
 	}
 
+	// --- env diagnostics identify host extras the policy will drop ----------
+	{
+		const env = run(["env", "list"], { PASEO_TEAM_EXTRA_TOOLS: " WebFetch, constructor, constructor, " });
+		assert.equal(env.status, 0, "prototype names must not crash CLI diagnostics");
+		assert.deepEqual(env.json.extraTools.accepted, {
+			pi: { peer: [], lead: [], supervisor: [] },
+			claude: { peer: ["WebFetch"], lead: ["WebFetch"], supervisor: [] },
+		});
+		assert.deepEqual(
+			env.json.extraTools.dropped.map(({ tool, role, family, reason }) => ({ tool, role, family, reason })),
+			[
+				{ tool: "WebFetch", role: "peer", family: "pi", reason: "not available in the pi runtime" },
+				{ tool: "WebFetch", role: "lead", family: "pi", reason: "not available in the pi runtime" },
+				{ tool: "WebFetch", role: "supervisor", family: "pi", reason: "Supervisor cannot receive extra tools" },
+				{ tool: "WebFetch", role: "supervisor", family: "claude", reason: "Supervisor cannot receive extra tools" },
+				{ tool: "constructor", role: "peer", family: "pi", reason: "not a catalogued extra capability" },
+				{ tool: "constructor", role: "lead", family: "pi", reason: "not a catalogued extra capability" },
+				{ tool: "constructor", role: "supervisor", family: "pi", reason: "Supervisor cannot receive extra tools" },
+				{ tool: "constructor", role: "peer", family: "claude", reason: "not a catalogued extra capability" },
+				{ tool: "constructor", role: "lead", family: "claude", reason: "not a catalogued extra capability" },
+				{ tool: "constructor", role: "supervisor", family: "claude", reason: "Supervisor cannot receive extra tools" },
+			],
+		);
+	}
+
 	// --- agents: role inference travels with the row -----------------------
 	{
 		const agents = run(["agents"]);

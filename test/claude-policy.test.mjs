@@ -557,10 +557,21 @@ assert.equal(
 }
 {
 	const previous = process.env.PASEO_TEAM_EXTRA_TOOLS;
-	process.env.PASEO_TEAM_EXTRA_TOOLS = "WebFetch,mcp__unrelated__do";
-	assert.equal(decide("peer", "WebFetch", {}, writeBrief), null);
-	assert.equal(decide("peer", "mcp__unrelated__do", {}, writeBrief), null);
+	process.env.PASEO_TEAM_EXTRA_TOOLS = " WebFetch, WebSearch, mcp__unrelated__do, , ";
+	assert.equal(decide("peer", "WebFetch", {}, writeBrief), null, "catalogued research remains available to a Peer");
+	assert.equal(decide("lead", "WebSearch", {}, writeBrief), null, "catalogued research remains available to a Lead");
+	assert.match(
+		decide("supervisor", "WebFetch", {}, writeBrief) ?? "",
+		/blocked by the supervisor role policy/,
+		"Supervisor never gains web research through the host env",
+	);
+	assert.match(
+		decide("peer", "mcp__unrelated__do", {}, writeBrief) ?? "",
+		/outside the peer role surface/,
+		"arbitrary MCP names no longer bypass the role surface",
+	);
 	assert.ok(!claudeDisallowedTools("peer").includes("WebFetch"));
+	assert.ok(claudeDisallowedTools("supervisor").includes("WebFetch"));
 	if (previous === undefined) delete process.env.PASEO_TEAM_EXTRA_TOOLS;
 	else process.env.PASEO_TEAM_EXTRA_TOOLS = previous;
 }

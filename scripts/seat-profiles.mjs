@@ -50,15 +50,17 @@ export const SEAT_PROVIDER_RE = new RegExp(
 /**
  * Every capability a seat may be granted.
  *
- * `tools` are added to PASEO_TEAM_EXTRA_TOOLS, which both runtimes read
- * (`extraTools()` in policy-core.ts). `env` is for grants already expressed as
- * an environment knob rather than a tool name (`lead-write`). Both halves reach
+ * `tools` are catalog identifiers written to PASEO_TEAM_EXTRA_TOOLS, not
+ * arbitrary grants: policy-core.ts independently clamps each identifier by
+ * role AND runtime family. `env` is for grants already expressed as an
+ * environment knob rather than a tool name (`lead-write`). Both halves reach
  * the static layer the same way: `materializeSeat` recomputes disallowedTools
  * under the finished env instead of guessing which knob implies which tool.
  *
- * `roles` is the guard that keeps a grant meaningful: browser authority for a
- * Supervisor is not "extra reach", it is a contradiction of the role, so the
- * catalog refuses it rather than the UI hiding it.
+ * `roles` and `families` keep a grant meaningful: web-research is Claude-only,
+ * and browser authority for a Supervisor is not "extra reach", it is a
+ * contradiction of the role, so the catalog refuses it rather than the UI
+ * hiding it.
  */
 export const SEAT_CAPABILITIES = Object.freeze([
 	Object.freeze({

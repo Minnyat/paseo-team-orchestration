@@ -229,10 +229,13 @@ pteam seats apply               # merge into ~/.paseo/config.json, then: paseo d
 ```
 
 The generated provider is `claude-peer-researcher`, carrying
-`PASEO_PI_ROLE=peer` and `PASEO_TEAM_EXTRA_TOOLS=WebFetch,WebSearch`, with those
-two tools removed from its `disallowedTools`. The rule core is untouched: it
-decides authority from `PASEO_PI_ROLE`, never from a provider name, so a seat
-can only ever be one of the three roles it already knows.
+`PASEO_PI_ROLE=peer` and the catalog identifiers
+`PASEO_TEAM_EXTRA_TOOLS=WebFetch,WebSearch`, with those two Claude-only tools
+removed from its `disallowedTools`. The rule core independently clamps every
+identifier by role and runtime family; setting the same names on Pi (or making
+up a name) grants nothing. Authority still comes from `PASEO_PI_ROLE`, never a
+provider name, so a seat can only ever be one of the three roles it already
+knows.
 
 | Capability | Base roles | Grants |
 |---|---|---|
@@ -1498,8 +1501,9 @@ what is still missing (agent-to-agent message edges, multi-host).
 | `/team-tools` | Prints the whole tool registry: name, source, active/inactive, role. Writes `~/.pi/team-tools.txt`. |
 
 Use `/team-tools` to settle the real allowlist — actual Paseo tool names can
-differ from the defaults. Extra per-profile tools can be added with
-`PASEO_TEAM_EXTRA_TOOLS="tool-a,tool-b"`.
+differ from the defaults. `PASEO_TEAM_EXTRA_TOOLS` accepts only identifiers in
+the reviewed extra-tool catalog (currently `WebFetch,WebSearch`, Claude Peer or
+Lead only); arbitrary names are reported as dropped and never activate tools.
 
 ## Proof-of-concept (single machine, Windows first)
 
