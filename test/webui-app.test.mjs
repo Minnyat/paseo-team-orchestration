@@ -990,6 +990,7 @@ try {
 	// a route executor, its lists following the provider chosen
 	card("moi").querySelector(".cfg-list-add").click();
 	await tick();
+	assert.equal(kindSelect(jobItems("moi")[1]).value, "class", "a new executor starts from the executor seed");
 	change(kindSelect(jobItems("moi")[1]), "route");
 	await tick();
 	assertKindFields(jobItems("moi")[1], "new route executor");
