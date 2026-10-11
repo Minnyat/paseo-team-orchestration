@@ -60,8 +60,10 @@ import {
 	capabilitiesByBase,
 } from "../../scripts/seat-profiles.mjs";
 import { teamConfigDir } from "../../scripts/lib-common.mjs";
-// The sync's own pre-flight checks, so a save refuses what the next sync would.
-import { configProblems, normalizeConfig } from "../../scripts/pi-models-sync.mjs";
+// The sync's own reading of the file and its own override rule, so a save
+// refuses exactly the overrides the next sync would stop on.
+import { normalizeConfig } from "../../scripts/pi-models-sync.mjs";
+import { overrideProblems } from "../../scripts/models-dev.mjs";
 // Jobs vocabulary lives with its validator, for the same reason.
 import {
 	BUILTIN_CLI_TOOLS,
@@ -948,26 +950,34 @@ export function withPiModelCatalog(schema, catalog = {}) {
 }
 
 /**
- * Save-time check for the pi-models section: the same problems that make
- * `pteam models sync` stop the whole run (configProblems — a bad baseUrl, a
- * "/" in an endpoint name, a per-model override that is not a positive
- * integer or whose maxTokens exceeds its contextWindow), refused when the file
- * is written instead of one sync later.
+ * Save-time check for the pi-models section — the per-model overrides ONLY
+ * (`providers.<name>.models.<model-id>`): each must be an object of positive
+ * integers under the keys the sync reads, with maxTokens ≤ contextWindow. A
+ * bad override makes `pteam models sync` stop the whole run, and the form is
+ * where it gets typed, so it is refused at save naming endpoint and model.
  *
- * Deliberately NOT refused: a file with no endpoint yet (the form's own seed;
- * the sync reports CONFIG_MISSING for that on its own), and the endpoint-level
- * contextWindow/maxTokens an older version wrote — the sync only warns about
- * those, so a save must not turn an old file into an unsaveable one.
+ * Everything else the sync checks (a missing or plain-http baseUrl, a "/" in
+ * an endpoint name, no endpoint at all) still saves and fails at sync, as it
+ * always did: an endpoint card half filled in is a draft, and refusing it would
+ * change a save flow this check was not added to change. The endpoint-level
+ * contextWindow/maxTokens an older version wrote stay a sync warning too.
  *
- * @throws {Error} "CONFIG_INVALID: pi-models: <problem>; <problem>…", each
- *   problem naming its endpoint (and model, for an override).
+ * Same messages as the sync (overrideProblems), prefixed with the endpoint.
+ *
+ * @throws {Error} "CONFIG_INVALID: pi-models: <problem>; <problem>…"
  */
 export function validatePiModelsConfig(doc) {
-	if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
-		throw new Error("CONFIG_INVALID: pi-models config must be a JSON object");
+	const problems = [];
+	for (const entry of normalizeConfig(doc).entries) {
+		if (entry.models === undefined) continue;
+		if (!entry.models || typeof entry.models !== "object" || Array.isArray(entry.models)) {
+			problems.push(`provider "${entry.name}": models must be an object of per-model overrides`);
+			continue;
+		}
+		for (const [id, override] of Object.entries(entry.models)) {
+			for (const problem of overrideProblems(id, override)) problems.push(`provider "${entry.name}": ${problem}`);
+		}
 	}
-	const { entries } = normalizeConfig(doc);
-	const problems = entries.length === 0 ? [] : configProblems(entries);
 	if (problems.length > 0) throw new Error(`CONFIG_INVALID: pi-models: ${problems.join("; ")}`);
 	return doc;
 }

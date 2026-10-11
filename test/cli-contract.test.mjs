@@ -973,7 +973,22 @@ try {
 		const inverted = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 1000, maxTokens: 2000 } }) });
 		assert.equal(inverted.status, 1);
 		assert.match(inverted.stderr, /models\.gpt-5\.5\.maxTokens \(2000\) exceeds its contextWindow/);
+		const unknownKey = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { context: 1000 } }) });
+		assert.equal(unknownKey.status, 1);
+		assert.match(unknownKey.stderr, /models\.gpt-5\.5\.context is not an override/);
 		assert.ok(!existsSync(piModelsFile), "a refused pi-models document is not written");
+		// Only the overrides are checked at save. A card still being filled in —
+		// no baseUrl yet, a plain-http one, a "/" in its name — saved before and
+		// still does; the sync is where that fails, as it always was.
+		for (const draft of [
+			{ version: 1, providers: { Minnyat: {} } },
+			{ version: 1, providers: { Minnyat: { models: { "gpt-5.5": { maxTokens: 128000 } } } } },
+			{ version: 1, providers: { Minnyat: { baseUrl: "http://example.test/v1" } } },
+			{ version: 1, providers: { "a/b": { baseUrl: "https://example.test/v1" } } },
+		]) {
+			const saved = run(["config", "write", "pi-models"], { ...env, __stdin: JSON.stringify(draft) });
+			assert.equal(saved.status, 0, `${JSON.stringify(draft)}: ${saved.stderr}`);
+		}
 		const fine = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } }) });
 		assert.equal(fine.status, 0, fine.stderr);
 		const legacy = JSON.stringify({ version: 1, providers: { Minnyat: { baseUrl: "https://example.test/v1", contextWindow: 200000, maxTokens: 32000 } } });

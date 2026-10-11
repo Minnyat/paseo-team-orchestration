@@ -151,13 +151,22 @@ import { validatePiModelsConfig } from "../cli/lib/config-schema.mjs";
 		(error) => error.status === 400 && /gpt-5\.5\.maxTokens \(2000\) exceeds/.test(error.message),
 	);
 	await assert.rejects(post(endpoint({ models: { "gpt-5.5": { context: 1 } } })), (error) => /is not an override/.test(error.message));
+	// A draft card with no baseUrl is not excused from a bad override.
+	await assert.rejects(post({ version: 1, providers: { Minnyat: { models: { "gpt-5.5": { contextWindow: 1.5 } } } } }), (error) => error.status === 400);
+	await assert.rejects(post(endpoint({ models: [] })), (error) => /models must be an object of per-model overrides/.test(error.message));
 
 	// Accepted: good overrides, an old file with endpoint-level limits (the sync
-	// only warns about those), and the empty seed.
+	// only warns about those), the empty seed, and a card still being filled in —
+	// only the overrides are checked at save; a missing or http baseUrl and a "/"
+	// in the name keep failing at sync, where they always did.
 	for (const doc of [
 		endpoint({ models: { "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } } }),
 		endpoint({ contextWindow: 200000, maxTokens: 32000 }),
 		{ version: 1, providers: {} },
+		{ version: 1, providers: { Minnyat: {} } },
+		{ version: 1, providers: { Minnyat: { models: { "gpt-5.5": { maxTokens: 128000 } } } } },
+		{ version: 1, providers: { Minnyat: { baseUrl: "http://example.test/v1" } } },
+		{ version: 1, providers: { "a/b": { baseUrl: "https://example.test/v1" } } },
 	]) {
 		const written = await post(doc);
 		assert.deepEqual(written.args, ["config", "write", "pi-models"]);

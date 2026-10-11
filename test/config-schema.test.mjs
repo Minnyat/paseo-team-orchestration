@@ -368,6 +368,11 @@ console.log("[paseo-team] config-schema tests passed");
 	assert.ok(Array.isArray(executors.item?.fields));
 	assert.deepEqual(executors.item.seed, { kind: "class" });
 
+	// A new job card starts WITH one executor — the executors list's own element
+	// seed — so it never opens empty and is only refused at save.
+	assert.ok(Array.isArray(jobs.item.seed.executors) && jobs.item.seed.executors.length >= executors.minItems);
+	assert.deepEqual(jobs.item.seed.executors, [executors.item.seed], "the job seed's executor is the list's element seed");
+	assert.notEqual(jobs.item.seed.executors[0], executors.item.seed, "a copy, not a shared object a renderer could mutate");
 	// A freshly added job, as the form seeds it, is one pick away from valid.
 	const seeded = { version: 1, jobs: { j: structuredClone(jobs.item.seed) } };
 	seeded.jobs.j.executors[0].modelClass = "FAST_READ";
