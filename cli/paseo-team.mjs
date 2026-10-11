@@ -33,7 +33,13 @@ import { existsSync, readFileSync, readdirSync, appendFileSync, unlinkSync, writ
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as cw from "./lib/config-walker.mjs";
-import { schemaForSection, withModelInventory, withPiModelCatalog, ROUTING_SECTIONS } from "./lib/config-schema.mjs";
+import {
+	schemaForSection,
+	validatePiModelsConfig,
+	withModelInventory,
+	withPiModelCatalog,
+	MODEL_INVENTORY_SECTIONS,
+} from "./lib/config-schema.mjs";
 import {
 	applySeatsToPaseoConfig,
 	listSeats,
@@ -53,6 +59,7 @@ import {
 	RUNTIME_FAMILIES,
 	PROVIDER_OK_STATUSES,
 	buildProviderInventory,
+	loadLocalRouteTable,
 	normalizeModelEntry,
 	providerFamily,
 } from "../scripts/model-routing.mjs";
@@ -64,6 +71,7 @@ import { agentCluster, extraToolDiagnostics, normalizeCluster } from "../extensi
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
 import * as routing from "./lib/routing.mjs";
+import { JOBS_SECTION, JobsConfigError, defaultJobsPath, describeJobs, validateJobsConfig } from "../scripts/jobs.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -444,6 +452,17 @@ const CONFIG_SECTIONS = {
 	"pi-settings": () => cw.piSettingsPath(),
 	seats: () => seatsPath(cw.teamConfigDir()),
 	"pi-models": () => join(cw.teamConfigDir(), "pi-models.local.json"),
+	[JOBS_SECTION]: () => defaultJobsPath(),
+};
+
+/**
+ * Sections whose document is checked before `config write` touches the file.
+ * The WebUI runs the same function (webui/server.mjs CONFIG_VALIDATORS), so a
+ * file refused in the browser is refused from a terminal too.
+ */
+const CONFIG_WRITE_VALIDATORS = {
+	[JOBS_SECTION]: validateJobsConfig,
+	"pi-models": validatePiModelsConfig,
 };
 
 function resolveSection(section) {
@@ -510,7 +529,7 @@ async function cmdConfigRead(section, rest = []) {
 	// skips the daemon round trip for scripted reads and for a machine whose
 	// daemon is known to be down (the read otherwise costs one `provider ls`).
 	let inventory = null;
-	if (schema && ROUTING_SECTIONS.includes(section) && !flag(rest, "--no-discovery")) {
+	if (schema && MODEL_INVENTORY_SECTIONS.includes(section) && !flag(rest, "--no-discovery")) {
 		inventory = await discoverModels();
 		schema = withModelInventory(schema, inventory.byProvider);
 	}
@@ -543,6 +562,20 @@ function cmdConfigWrite(section, rest = []) {
 		fail(
 			`CONFIG_CHANGED: ${path} was modified after it was read, so this write would overwrite those changes. Reload it, redo the edit, and save again.`,
 		);
+	}
+	const validate = CONFIG_WRITE_VALIDATORS[section];
+	if (validate) {
+		let doc;
+		try {
+			doc = JSON.parse(content);
+		} catch (e) {
+			fail(`CONFIG_INVALID: ${section} config is not valid JSON: ${e.message} — nothing was written to ${path}`);
+		}
+		try {
+			validate(doc);
+		} catch (e) {
+			fail(`${String(e?.message ?? e)} — nothing was written to ${path}`);
+		}
 	}
 	try {
 		cw.atomicWriteJson(path, content);
@@ -1467,6 +1500,70 @@ function dispatchRouting(argv) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// jobs list/show — read-only presets for a Lead
+// ---------------------------------------------------------------------------
+
+/**
+ * The jobs file, validated, with each class executor resolved against the route
+ * table the create_agent gate reads (files only, no daemon). A missing file is
+ * "no jobs yet", not an error; an invalid one is exit 1 with the validator's
+ * sentence, so a Lead never reads a preset the form would have refused.
+ */
+function loadJobsView() {
+	const path = defaultJobsPath();
+	// One shape whether or not the file exists: every field is always present,
+	// null where it does not apply, so a script never branches on a missing key.
+	const table = loadLocalRouteTable();
+	const routeSource = table.ok
+		? { ok: true, source: table.source, path: table.path, hostId: table.hostId, code: null, message: null }
+		: { ok: false, source: null, path: null, hostId: null, code: table.code, message: table.message };
+	if (!existsSync(path)) {
+		return {
+			exists: false,
+			path,
+			hint: "copy config/jobs.example.json there, or add jobs in the WebUI under Cấu hình → Công việc",
+			routeSource,
+			cliTools: {},
+			jobs: [],
+		};
+	}
+	let doc;
+	try {
+		doc = JSON.parse(cw.readText(path));
+		validateJobsConfig(doc);
+	} catch (error) {
+		const message = error instanceof JobsConfigError ? error.message.replace(/^CONFIG_INVALID: /, "") : `cannot be read as JSON: ${error?.message ?? error}`;
+		json({ ok: false, code: "CONFIG_INVALID", path, message });
+		fail(`jobs: CONFIG_INVALID: ${path}: ${message}`);
+	}
+	return { exists: true, path, hint: null, routeSource, cliTools: doc.cliTools ?? {}, jobs: describeJobs(doc, table) };
+}
+
+function dispatchJobs(argv) {
+	const [sub, ...rest] = argv;
+	switch (sub) {
+		case "list": {
+			rejectUnknownFlags(rest, []);
+			return json({ ok: true, ...loadJobsView() });
+		}
+		case "show": {
+			const [id, ...options] = rest;
+			if (!id || id.startsWith("-")) usageFail("jobs show: missing <id>");
+			rejectUnknownFlags(options, []);
+			const { jobs, ...view } = loadJobsView();
+			const job = jobs.find((entry) => entry.id === id);
+			if (!job) {
+				json({ ok: false, code: "JOB_NOT_FOUND", path: view.path, id, known: jobs.map((entry) => entry.id) });
+				return fail(`jobs: JOB_NOT_FOUND: no job "${id}" in ${view.path} (known: ${jobs.map((entry) => entry.id).join(", ") || "none"})`);
+			}
+			return json({ ok: true, path: view.path, routeSource: view.routeSource, job });
+		}
+		default:
+			usageFail(`jobs: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected list|show)`);
+	}
+}
+
 function dispatchSeats(argv) {
 	const [sub, ...rest] = argv;
 	if (sub === "list") return cmdSeatsList(rest);
@@ -1501,6 +1598,8 @@ usage:
                                            (SUPERVISOR_GOVERNANCE | LEAD_RECOVERY only)
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
+  pteam jobs list                          (job presets, each class executor with its current route; read-only)
+  pteam jobs show <id>                     (one job preset, same shape)
   pteam install
   pteam uninstall [--purge]                (remove what install wrote; --purge also deletes the config dir that 'pteam env' resolves)
   pteam update [--check]                    (compare with the latest GitHub release tag)
@@ -1593,6 +1692,7 @@ async function main() {
 		case "models": return cmdModels(argv);
 		case "seats": return dispatchSeats(argv);
 		case "routing": return dispatchRouting(argv);
+		case "jobs": return dispatchJobs(argv);
 		case "cost": return cmdCost(argv);
 		case "activity": return cmdActivity(argv);
 		case "graph": return cmdGraph(argv);
