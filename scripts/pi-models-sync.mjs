@@ -26,11 +26,17 @@
  * Several endpoints may be configured at once; they are written into one
  * models.json in a single pass, so a run leaves one backup and one file, and a
  * provider whose endpoint is down keeps the entry it already had.
+ *
+ * contextWindow/maxTokens are per MODEL: a per-model override in the endpoint's
+ * `models` map, else models.dev (see models-dev.mjs for the matching rules),
+ * else left out — absent means unknown. There is deliberately no endpoint-wide
+ * number: one used to be copied into every model, so every model read 200k.
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { catalogNotice, isPositiveInteger, loadModelsDev, OVERRIDE_KEYS, overrideProblems, resolveModelLimits } from "./models-dev.mjs";
 import { PRIVATE_FILE_MODE } from "./lib-common.mjs";
 
 // --- config ----------------------------------------------------------------
@@ -55,9 +61,17 @@ export const DEFAULT_CONFIG = Object.freeze({
 	keyFile: "",
 	probe: true,
 	concurrency: 5,
-	contextWindow: 200_000,
-	maxTokens: 32_000,
 });
+
+/**
+ * Endpoint-level keys an older version applied to every model. Still read
+ * from old files, never applied: honouring them would pin every model to the
+ * one number again. Per-model overrides replace them.
+ */
+export const LEGACY_LIMIT_KEYS = Object.freeze(["contextWindow", "maxTokens"]);
+
+/** The only keys a per-model override (`providers.<name>.models.<id>`) may hold. */
+export { OVERRIDE_KEYS };
 
 /**
  * Accept either shape and hand one shape onward.
@@ -118,8 +132,33 @@ export function configProblems(entries) {
 		// A slash would split the pi model reference in the wrong place:
 		// Paseo splits "<pi-provider>/<model-id>" at the FIRST slash only.
 		if (entry.name.includes("/")) problems.push(`provider "${entry.name}": name must not contain "/"`);
+		// A typo in an override must not quietly become "unknown".
+		if (entry.models !== undefined) {
+			if (!entry.models || typeof entry.models !== "object" || Array.isArray(entry.models)) {
+				problems.push(`provider "${entry.name}": models must be an object of per-model overrides`);
+				continue;
+			}
+			for (const [id, override] of Object.entries(entry.models)) {
+				for (const problem of overrideProblems(id, override)) problems.push(`provider "${entry.name}": ${problem}`);
+			}
+		}
 	}
 	return problems;
+}
+
+/**
+ * One line naming every endpoint-level limit key that is being ignored, or
+ * null. One line for the whole run, so an old file does not bury the report.
+ */
+export function legacyLimitWarning(entries) {
+	const ignored = [];
+	for (const entry of entries) {
+		for (const key of LEGACY_LIMIT_KEYS) {
+			if (entry[key] !== undefined) ignored.push(`${entry.name}.${key}=${JSON.stringify(entry[key])}`);
+		}
+	}
+	if (ignored.length === 0) return null;
+	return `pi-models: ignoring endpoint-level ${ignored.join(", ")} (no longer applied to every model); limits now come from models.dev, override one model under providers.<name>.models.<model-id>`;
 }
 
 function expandHome(value) {
@@ -254,12 +293,16 @@ async function pool(items, limit, fn) {
 
 // --- catalog ---------------------------------------------------------------
 
-export function buildModelEntry(id, reasoning, entry = {}) {
+/**
+ * `limits` carries contextWindow/maxTokens only when they are known: a field
+ * that is not a positive integer is left out, and pi reads absent as unknown.
+ */
+export function buildModelEntry(id, reasoning, limits = {}) {
 	return {
 		id,
 		name: id,
-		contextWindow: entry.contextWindow ?? DEFAULT_CONFIG.contextWindow,
-		maxTokens: entry.maxTokens ?? DEFAULT_CONFIG.maxTokens,
+		...(isPositiveInteger(limits.contextWindow) ? { contextWindow: limits.contextWindow } : {}),
+		...(isPositiveInteger(limits.maxTokens) ? { maxTokens: limits.maxTokens } : {}),
 		reasoning,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -297,6 +340,8 @@ export async function syncProvider(options) {
 		probe = entry.probe !== false,
 		keepAll = false,
 		previousReasoning = new Map(),
+		// id -> {contextWindow?, maxTokens?, source}. Default: nothing known.
+		limitsFor = () => ({ source: "unknown" }),
 		// Node's fetch waits up to 300s for headers and again between body
 		// chunks. Every probe below is already bounded; the listing was not, so
 		// one unresponsive endpoint could hold the whole run — and the WebUI
@@ -340,6 +385,11 @@ export async function syncProvider(options) {
 	if (ids.length === 0) {
 		return { ok: false, provider: entry.name, baseUrl, code: "ENDPOINT_LIST_EMPTY", message: `${baseUrl}/models returned no model` };
 	}
+	// An override for an id the endpoint does not list is almost always a
+	// typo (gpt-5.6-tera for gpt-5.6-terra); it must not quietly do nothing.
+	const listedIds = new Set(ids);
+	const unlistedOverrides =
+		entry.models && typeof entry.models === "object" ? Object.keys(entry.models).filter((id) => !listedIds.has(id)).sort() : [];
 
 	let probed = [];
 	let live = ids;
@@ -359,6 +409,7 @@ export async function syncProvider(options) {
 				message: "no model answered; this provider is left exactly as it was",
 				listed: ids.length,
 				probed,
+				unlistedOverrides,
 			};
 		}
 		if (keepAll) live = ids;
@@ -368,9 +419,12 @@ export async function syncProvider(options) {
 	// earlier run proved; anything never seen before is written as
 	// non-reasoning, which costs thinking levels but never invents a capability.
 	const proven = new Map(probed.filter((r) => r.live).map((r) => [r.id, r.reasoning === true]));
-	const models = live.map((id) =>
-		buildModelEntry(id, proven.has(id) ? proven.get(id) : previousReasoning.get(id) === true, entry),
-	);
+	const limitSources = new Map();
+	const models = live.map((id) => {
+		const limits = limitsFor(id);
+		limitSources.set(id, limits.source);
+		return buildModelEntry(id, proven.has(id) ? proven.get(id) : previousReasoning.get(id) === true, limits);
+	});
 	return {
 		ok: true,
 		provider: entry.name,
@@ -379,6 +433,8 @@ export async function syncProvider(options) {
 		written: models.length,
 		probed,
 		models,
+		limitSources,
+		unlistedOverrides,
 	};
 }
 
@@ -388,9 +444,49 @@ export async function syncProvider(options) {
  * A provider that fails does not stop the others and does not lose its
  * existing entry: a dead endpoint leaves yesterday's models in place rather
  * than deleting them, and the failure is reported instead of swallowed.
+ *
+ * The report is what `pteam models sync` prints and the WebUI shows; these
+ * fields are stable (a key whose value is unknown is omitted from the JSON):
+ *
+ *   {
+ *     ok, path, dryRun, backup?,
+ *     limits: {                       // where this run's models.dev data came from
+ *       origin: "cache" | "network" | "stale-cache" | "unavailable",
+ *       fetchedAt?: ISO string,       // when that copy was fetched
+ *       error?: string,               // why the network was not used
+ *       cacheError?: string,          // fetched, but the cache could not be written
+ *     },
+ *     warnings: string[],             // one line each, also written via `warn`:
+ *                                     // ignored endpoint-level keys, models.dev
+ *                                     // unreachable / stale cache, an owner value
+ *                                     // every other provider contradicts, an
+ *                                     // override that pushed a models.dev value to
+ *                                     // unknown, an override for an unlisted id
+ *     providers: [{
+ *       ok, provider, baseUrl, listed?, written?, probed?, code?, message?,
+ *       models?: [{
+ *         id, reasoning,
+ *         contextWindow?, maxTokens?,  // positive integers, absent = unknown
+ *         limitSource: "override" | "models.dev" | "unknown",
+ *       }],
+ *     }],
+ *   }
  */
 export async function syncModels(options) {
-	const { entries, keys, modelsPath, fetchImpl = fetch, probe, keepAll = false, dryRun = false, listTimeoutMs } = options;
+	const {
+		entries,
+		keys,
+		modelsPath,
+		fetchImpl = fetch,
+		probe,
+		keepAll = false,
+		dryRun = false,
+		listTimeoutMs,
+		// Options for loadModelsDev ({fetchImpl, cacheDir, ttlMs, now}); kept
+		// apart from the endpoint's fetchImpl, which talks to a different host.
+		modelsDev = {},
+		warn = (line) => process.stderr.write(`${line}\n`),
+	} = options;
 
 	let existing = {};
 	if (existsSync(modelsPath)) {
@@ -399,6 +495,23 @@ export async function syncModels(options) {
 		} catch (error) {
 			return { ok: false, code: "CATALOG_UNREADABLE", message: `${modelsPath}: ${String(error?.message ?? error)}` };
 		}
+	}
+
+	const warnings = [];
+	const legacy = legacyLimitWarning(entries);
+	if (legacy) {
+		warnings.push(legacy);
+		warn(legacy);
+	}
+
+	// Once per run: the catalog is megabytes, and every provider shares it.
+	const limitsCatalog = await loadModelsDev({ ...modelsDev, ...(dryRun ? { persist: false } : {}) });
+	// Unreachable with no copy, or an old copy in use: the run still succeeds
+	// (absent limits are correct, just unhelpful), and the user is told.
+	const notice = catalogNotice(limitsCatalog, modelsDev.now ?? Date.now());
+	if (notice) {
+		warnings.push(`pi-models: ${notice}`);
+		warn(`pi-models: ${notice}`);
 	}
 
 	const results = [];
@@ -416,9 +529,27 @@ export async function syncModels(options) {
 				probe: probe === undefined ? entry.probe !== false : probe,
 				keepAll,
 				previousReasoning,
+				limitsFor: (modelId) => {
+					const limits = resolveModelLimits(limitsCatalog.catalog, { endpointId: entry.name, modelId, overrides: entry.models });
+					// An override that did not fit models.dev: one line per model.
+					for (const note of limits.warnings) {
+						const line = `pi-models: ${entry.name}/${note}`;
+						warnings.push(line);
+						warn(line);
+					}
+					return limits;
+				},
 				...(listTimeoutMs === undefined ? {} : { listTimeoutMs }),
 			}),
 		);
+	}
+
+	for (const result of results) {
+		for (const id of result.unlistedOverrides ?? []) {
+			const line = `pi-models: ${result.provider}: override models.${id} matches no model the endpoint lists; it is not applied (check the id)`;
+			warnings.push(line);
+			warn(line);
+		}
 	}
 
 	const succeeded = results.filter((r) => r.ok);
@@ -426,9 +557,26 @@ export async function syncModels(options) {
 		ok: succeeded.length === results.length,
 		path: modelsPath,
 		dryRun,
-		providers: results.map(({ models, ...rest }) => ({
+		limits: {
+			origin: limitsCatalog.origin,
+			...(limitsCatalog.fetchedAt === undefined ? {} : { fetchedAt: new Date(limitsCatalog.fetchedAt).toISOString() }),
+			...(limitsCatalog.error ? { error: limitsCatalog.error } : {}),
+			...(limitsCatalog.cacheError ? { cacheError: limitsCatalog.cacheError } : {}),
+		},
+		warnings,
+		providers: results.map(({ models, limitSources, unlistedOverrides, ...rest }) => ({
 			...rest,
-			...(models ? { models: models.map((m) => ({ id: m.id, reasoning: m.reasoning })) } : {}),
+			...(models
+				? {
+						models: models.map((m) => ({
+							id: m.id,
+							reasoning: m.reasoning,
+							contextWindow: m.contextWindow,
+							maxTokens: m.maxTokens,
+							limitSource: limitSources.get(m.id),
+						})),
+					}
+				: {}),
 		})),
 	};
 	if (dryRun || succeeded.length === 0) return report;
