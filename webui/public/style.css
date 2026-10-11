@@ -522,10 +522,29 @@ textarea.cfg-lines {
 .cfg-actions-out.good .cfg-actions-head { color: var(--accent); }
 .cfg-actions-out.bad .cfg-actions-head { color: var(--danger); }
 .cfg-actions-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
-.cfg-actions-list li { font-size: 13.5px; }
-.cfg-actions-list li::before { content: "✓"; color: var(--accent); margin-right: 8px; }
-.cfg-actions-list li.no::before { content: "×"; color: var(--danger); }
+.cfg-actions-list > li { font-size: 13.5px; }
+.cfg-actions-list > li::before { content: "✓"; color: var(--accent); margin-right: 8px; }
+.cfg-actions-list > li.no::before { content: "×"; color: var(--danger); }
 .cfg-actions-list b { font-family: var(--mono); font-weight: 500; }
+/* Sync warnings: a model whose limit is wrong or unknown is something to act on. */
+.cfg-actions-warn {
+	margin: 0 0 10px;
+	padding: 8px 12px;
+	border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--line));
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--warn) 12%, transparent);
+	color: var(--warn);
+	font-size: 13.5px;
+}
+.cfg-actions-warn ul { margin: 4px 0 0; padding-left: 18px; color: var(--text); }
+.cfg-actions-origin { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.cfg-actions-origin.warn { color: var(--warn); }
+.cfg-actions-origin.bad { color: var(--danger); }
+.cfg-model-limits { margin: 4px 0 6px 20px; padding: 0; list-style: none; font-size: 12.5px; }
+.cfg-model-limits li { display: flex; gap: 10px; flex-wrap: wrap; }
+.cfg-model-limits code { font-family: var(--mono); min-width: 24ch; }
+.cfg-model-limits .cfg-model-limits-legend { color: var(--muted); font-style: italic; }
+.cfg-model-limit.unknown span { color: var(--warn); }
 
 .cfg-more { border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); margin-top: 2px; }
 .cfg-more > summary {
@@ -564,6 +583,12 @@ textarea.cfg-lines {
 }
 .cfg-icon:hover { color: var(--danger); }
 .cfg-add { align-self: flex-start; }
+.cfg-list { display: flex; flex-direction: column; gap: 10px; }
+.cfg-field-wide .cfg-list { margin-top: 8px; }
+.cfg-list-tools { margin-left: auto; display: flex; }
+.cfg-icon:disabled { opacity: 0.35; cursor: default; }
+.cfg-icon:disabled:hover { color: var(--muted); }
+.cfg-list-up:hover, .cfg-list-down:hover { color: var(--accent); }
 
 @media (max-width: 700px) {
 	.cfg-field { grid-template-columns: 1fr; align-items: start; }

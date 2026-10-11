@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import {
 	agentKindLabel,
 	degradedSentence,
+	formatTokens,
 	humanizeError,
+	limitCell,
+	limitsOriginSentence,
 	missingSetup,
+	modelLimitsLabel,
 	overallHealth,
 	permitDetail,
 	permitSentence,
@@ -12,6 +16,8 @@ import {
 	roleLabel,
 	runtimeLabel,
 	statusLabel,
+	PI_DEFAULT_LIMITS,
+	syncWarningText,
 	toolMeaning,
 } from "../webui/public/humanize.js";
 
@@ -195,6 +201,42 @@ assert.equal(statusLabel("initializing"), "Đang khởi động");
 	assert.equal(changed.title, "File cấu hình đã bị sửa ở nơi khác");
 	assert.match(changed.advice, /Tải lại/, "and it says what to do next");
 	assert.match(changed.advice, /Pi/, "naming the usual culprit");
+}
+
+// --- model limits in the sync report ------------------------------------------
+{
+	assert.equal(formatTokens(1050000), "1.050.000");
+	assert.equal(formatTokens(999), "999");
+	assert.equal(formatTokens(128000), "128.000");
+	assert.deepEqual({ ...PI_DEFAULT_LIMITS }, { contextWindow: 128000, maxTokens: 16384 }, "pi 0.83.0 provider-composer.js:69-70");
+	assert.equal(limitCell(200000, "contextWindow"), "200.000");
+	assert.equal(limitCell(undefined, "maxTokens"), "chưa biết (Pi dùng 16.384)", "unknown says what pi will use instead");
+	assert.equal(limitCell(0, "contextWindow"), "chưa biết (Pi dùng 128.000)", "a non-positive number is not a limit");
+
+	assert.equal(modelLimitsLabel({ contextWindow: 1050000, maxTokens: 128000, limitSource: "models.dev" }), "1.050.000 · 128.000 · models.dev");
+	assert.equal(modelLimitsLabel({ contextWindow: 400000, limitSource: "override" }), "400.000 · chưa biết (Pi dùng 16.384) · ghi đè");
+	assert.equal(modelLimitsLabel({ limitSource: "unknown" }), "chưa biết (Pi dùng 128.000/16.384)");
+
+	const now = Date.parse("2026-10-11T12:00:00Z");
+	assert.equal(limitsOriginSentence(undefined), null, "an older CLI without the field shows nothing, not a guess");
+	const fresh = limitsOriginSentence({ origin: "network", fetchedAt: "2026-10-11T12:00:00Z" }, now);
+	assert.equal(fresh.level, "ok");
+	assert.match(fresh.text, /vừa tải mới/);
+	const cached = limitsOriginSentence({ origin: "cache", fetchedAt: "2026-10-11T07:00:00Z" }, now);
+	assert.equal(cached.level, "ok");
+	assert.match(cached.text, /lưu sẵn trên máy, tải 5 giờ trước/);
+	const stale = limitsOriginSentence({ origin: "stale-cache", fetchedAt: "2026-10-08T12:00:00Z", error: "ETIMEDOUT" }, now);
+	assert.equal(stale.level, "warn");
+	assert.match(stale.text, /\(ETIMEDOUT\).*CŨ, tải 3 ngày trước/);
+	const none = limitsOriginSentence({ origin: "unavailable", error: "offline" }, now);
+	assert.equal(none.level, "bad");
+	assert.match(none.text, /\(offline\).*mặc định của Pi \(128\.000\/16\.384\)/);
+	const unwritable = limitsOriginSentence({ origin: "network", fetchedAt: "2026-10-11T12:00:00Z", cacheError: "EACCES" }, now);
+	assert.equal(unwritable.level, "warn", "a cache that could not be written is worth knowing");
+	assert.match(unwritable.text, /EACCES/);
+
+	assert.equal(syncWarningText("pi-models: models.dev unreachable"), "models.dev unreachable");
+	assert.equal(syncWarningText("other: kept"), "other: kept");
 }
 
 console.log("humanize tests passed");

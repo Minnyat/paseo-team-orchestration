@@ -358,3 +358,92 @@ export function degradedSentence(degraded = [], pendingParents = 0) {
 	if (pendingParents > 0) parts.push(`đang dựng sơ đồ, còn ${pendingParents} agent chưa xếp xong`);
 	return parts.length === 0 ? "" : `Lưu ý: ${parts.join("; ")}.`;
 }
+
+// --- model limits (the "Kho model Pi" sync report) -------------------------
+
+/**
+ * What pi itself uses for a model whose contextWindow / maxTokens models.json
+ * leaves out: pi 0.83.0, dist/core/provider-composer.js:69-70
+ * (`definition.contextWindow ?? 128000`, `definition.maxTokens ?? 16384`).
+ * The sync never writes a number of its own for an unknown limit, so this is
+ * what "unknown" means in practice. It is pi's constant, not ours: re-check it
+ * when the pinned pi version moves.
+ */
+export const PI_DEFAULT_LIMITS = Object.freeze({ contextWindow: 128000, maxTokens: 16384 });
+
+/** 1050000 -> "1.050.000", the Vietnamese grouping, without relying on the browser's ICU data. */
+export function formatTokens(value) {
+	return String(Math.trunc(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
+/** One limit cell: the number, or what pi will use instead of the number nobody knows. */
+export function limitCell(value, field) {
+	if (Number.isInteger(value) && value > 0) return formatTokens(value);
+	return `chưa biết (Pi dùng ${formatTokens(PI_DEFAULT_LIMITS[field])})`;
+}
+
+const LIMIT_SOURCE_LABEL = Object.freeze({
+	override: "ghi đè",
+	"models.dev": "models.dev",
+	unknown: "chưa biết",
+});
+
+export function limitSourceLabel(source) {
+	return LIMIT_SOURCE_LABEL[source] ?? (source ? String(source) : "chưa biết");
+}
+
+/**
+ * One line for a model: "1.050.000 · 128.000 · models.dev", or
+ * "chưa biết (Pi dùng 128.000/16.384)" when nothing is known. A model can be
+ * half known: a models.dev maxTokens larger than its window is dropped, and
+ * then only that half says what pi falls back to.
+ */
+export function modelLimitsLabel(model) {
+	const known = (value) => Number.isInteger(value) && value > 0;
+	if (!known(model?.contextWindow) && !known(model?.maxTokens)) {
+		const pi = `${formatTokens(PI_DEFAULT_LIMITS.contextWindow)}/${formatTokens(PI_DEFAULT_LIMITS.maxTokens)}`;
+		return `chưa biết (Pi dùng ${pi})`;
+	}
+	return [limitCell(model.contextWindow, "contextWindow"), limitCell(model.maxTokens, "maxTokens"), limitSourceLabel(model.limitSource)].join(
+		" · ",
+	);
+}
+
+/**
+ * Where this run's limits came from and how old they are, with a level the
+ * page colours by: "ok" (fresh or a normal cached copy), "warn" (models.dev
+ * unreachable, an old copy in use), "bad" (no data at all — every model
+ * without an override falls back to pi's defaults). Null for a report from a
+ * CLI that predates the field.
+ */
+export function limitsOriginSentence(limits, now = Date.now()) {
+	if (!limits || typeof limits !== "object" || typeof limits.origin !== "string") return null;
+	const age = limits.fetchedAt ? `tải ${relativeTime(limits.fetchedAt, now)}` : "không rõ lúc tải";
+	const reason = limits.error ? ` (${limits.error})` : "";
+	let level = "ok";
+	let text;
+	if (limits.origin === "network") {
+		text = `Context window lấy từ models.dev, vừa tải mới (${age}).`;
+	} else if (limits.origin === "cache") {
+		text = `Context window lấy từ bản models.dev lưu sẵn trên máy, ${age}.`;
+	} else if (limits.origin === "stale-cache") {
+		level = "warn";
+		text = `Không tải được models.dev${reason}; đang dùng bản lưu CŨ, ${age}.`;
+	} else if (limits.origin === "unavailable") {
+		level = "bad";
+		const pi = `${formatTokens(PI_DEFAULT_LIMITS.contextWindow)}/${formatTokens(PI_DEFAULT_LIMITS.maxTokens)}`;
+		text = `Không tải được models.dev${reason} và chưa có bản lưu nào: model không có ghi đè sẽ dùng mặc định của Pi (${pi}).`;
+	} else {
+		text = `Nguồn context window: ${limits.origin} (${age}).`;
+	}
+	if (limits.cacheError) {
+		if (level === "ok") level = "warn";
+		text += ` Không ghi được bản lưu tạm (${limits.cacheError}), lần sau sẽ tải lại.`;
+	}
+	return { level, text };
+}
+
+/** A sync warning line without the "pi-models: " tag every one of them starts with. */
+export function syncWarningText(line) {
+	return String(line ?? "").replace(/^pi-models:\s*/, "");
+}
