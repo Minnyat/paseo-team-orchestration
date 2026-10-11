@@ -118,6 +118,8 @@ export async function loadModelsDev(options = {}) {
 		timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
 		now = Date.now(),
 		url = MODELS_DEV_URL,
+		// false: use what was fetched, write nothing (a dry run writes nothing).
+		persist = true,
 	} = options;
 	const path = join(cacheDir, CACHE_FILE_NAME);
 	const cached = readCache(path);
@@ -141,6 +143,7 @@ export async function loadModelsDev(options = {}) {
 	}
 
 	const result = { catalog, origin: "network", fetchedAt: now };
+	if (!persist) return result;
 	try {
 		mkdirSync(cacheDir, { recursive: true });
 		// Temp file + rename: a reader never sees half a catalog.

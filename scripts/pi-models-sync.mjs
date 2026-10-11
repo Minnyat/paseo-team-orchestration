@@ -475,7 +475,7 @@ export async function syncModels(options) {
 	}
 
 	// Once per run: the catalog is megabytes, and every provider shares it.
-	const limitsCatalog = await loadModelsDev(modelsDev);
+	const limitsCatalog = await loadModelsDev({ ...modelsDev, ...(dryRun ? { persist: false } : {}) });
 
 	const results = [];
 	for (const entry of entries) {

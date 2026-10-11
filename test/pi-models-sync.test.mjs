@@ -436,6 +436,22 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 	});
 	assert.deepEqual(silent, []);
 	assert.deepEqual(cleanRun.warnings, []);
+
+	// --dry-run writes nothing at all, the models.dev cache included.
+	const dryCache = join(sandbox, "models-dev-dry");
+	const dryRun = await syncModels({
+		entries: [clean],
+		keys: new Map([["proxy", "sk"]]),
+		modelsPath: join(sandbox, "dry-models.json"),
+		fetchImpl: endpointFetch,
+		modelsDev: { ...modelsDev, cacheDir: dryCache },
+		dryRun: true,
+		warn: quiet,
+	});
+	assert.equal(dryRun.limits.origin, "network");
+	assert.equal(dryRun.providers[0].models.find((m) => m.id === "gpt-5.6-terra").contextWindow, 1_050_000, "the dry run still reports the limits");
+	assert.equal(existsOrNull(join(dryCache, "models-dev.json")), null, "but caches nothing");
+	assert.equal(existsOrNull(join(sandbox, "dry-models.json")), null);
 }
 
 function existsOrNull(path) {
