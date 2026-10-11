@@ -41,6 +41,7 @@ import {
 	projectLabel,
 	relativeTime,
 	RISK_LABEL,
+	roleLabel,
 	runtimeLabel,
 	statusLabel,
 	toolMeaning,
@@ -1294,7 +1295,10 @@ function enumControl(field, path, prefix) {
 		for (const value of values) select.appendChild(el("option", { value, text: value }));
 		const current = getPath(configState.doc, path);
 		select.value = current === undefined ? "" : String(current);
-		if (current !== undefined && ![...select.options].some((option) => option.value === select.value)) {
+		// Compare against the stored value, not `select.value`: assigning a value
+		// no option carries makes the browser fall back to "", which matches the
+		// default option and would hide the stray value behind "— mặc định —".
+		if (current !== undefined && ![...select.options].some((option) => option.value === String(current))) {
 			// A value outside the list (hand-written, from a newer version, or left
 			// over after switching family) stays visible instead of silently
 			// snapping back to the default — losing it would rewrite the config.

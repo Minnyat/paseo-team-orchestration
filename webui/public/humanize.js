@@ -244,6 +244,17 @@ export function humanizeError(payload) {
 		.filter((part) => typeof part === "string" && part.trim() !== "")
 		.join(" · ")
 		.slice(0, 600);
+	// The server refused a routing/cluster write before it reached the file. The
+	// validator's sentence IS the advice (which route, which field, what form),
+	// and matched against the table below its words — "connection", "must be one
+	// of" — would be explained as a Paseo outage or an app bug.
+	if (payload?.code === "CONFIG_INVALID") {
+		return {
+			title: "Chưa lưu: cấu hình không hợp lệ",
+			advice: `File vẫn giữ nguyên. Sửa chỗ này rồi Lưu lại — ${payload.message ?? "xem chi tiết kỹ thuật"}`,
+			technical,
+		};
+	}
 	const hit = ERROR_ADVICE.find((entry) => entry.match.test(technical));
 	if (hit) return { title: hit.title, advice: hit.advice, technical };
 	return {
