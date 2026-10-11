@@ -13,6 +13,19 @@
  *   lines:  { path, type: "lines" }            one string per textarea line
  *   kv:     { path, type: "kv" }               object of string -> string
  *   map:    { path, type: "map", keyLabel?, addLabel?, fixedKeys?, item? }
+ *   list:   { path, type: "list", label, addLabel?, minItems?,
+ *             item: { seed: {...}, fields: [...] } }
+ *           an ARRAY of objects, one card per element, in order (the order
+ *           matters: a job's `run: "sequential"` follows it). `item.fields`
+ *           paths are relative to the element, like a map item's, and their
+ *           `showIf` / `optionsBy` name sibling fields of the same element. A
+ *           list may sit inside a map item (jobs.<id>.executors). The renderer
+ *           adds elements from `item.seed`, removes and reorders them, keeps at
+ *           least `minItems`, and drops the value of a field hidden by its
+ *           `showIf` when saving.
+ *
+ * A map key is always one opaque string, dots included ("gpt-5.5",
+ * "poolside/laguna-s-2.1"): the renderer never splits it back into a path.
  *
  * `seed` is the skeleton a missing file starts from; `presets` are one-click
  * patches the UI offers as buttons. An empty scalar control means "key
@@ -26,6 +39,7 @@
 // never re-type; test/config-schema.test.mjs locks the two together.
 import { join } from "node:path";
 import {
+	ALL_MODEL_CLASSES,
 	MODEL_CLASSES,
 	OPTIONAL_MODEL_CLASSES,
 	ROLE_PROVIDERS,
@@ -46,6 +60,14 @@ import {
 	capabilitiesByBase,
 } from "../../scripts/seat-profiles.mjs";
 import { teamConfigDir } from "../../scripts/lib-common.mjs";
+// Jobs vocabulary lives with its validator, for the same reason.
+import {
+	BUILTIN_CLI_TOOLS,
+	DEFAULT_RUN_MODE,
+	EXECUTOR_KINDS,
+	JOB_DISPOSITIONS,
+	JOB_RUN_MODES,
+} from "../../scripts/jobs.mjs";
 
 /**
  * Seeded from the resolved config directory, not from a `~/...` literal. The
@@ -139,6 +161,49 @@ function routeFields() {
 			hint: "Danh sách đổi theo family: minimal chỉ có ở pi, ultracode chỉ có ở claude. Mức mô hình không hỗ trợ sẽ bị ép xuống âm thầm — chạy preflight để chắc.",
 			optionsBy: { path: "paseoProvider", map: thinkingByProvider() },
 		},
+	];
+}
+
+/**
+ * One executor card of a job. Every field shows for exactly one `kind`; the
+ * route ones are the routing form's own route card, so a route executor offers
+ * the same providers, live model list and family-specific thinking levels.
+ */
+function executorFields() {
+	const forKind = (kind, field) => ({ ...field, showIf: { path: "kind", equals: kind } });
+	return [
+		{
+			path: "kind",
+			type: "enum",
+			enum: [...EXECUTOR_KINDS],
+			label: "Loại",
+			hint: "class: dùng route hiện tại của một lớp việc. route: chỉ định thẳng provider + mô hình. cli: một công cụ dòng lệnh.",
+		},
+		forKind("class", {
+			path: "modelClass",
+			type: "enum",
+			enum: [...ALL_MODEL_CLASSES],
+			label: "Lớp việc",
+			hint: "Mô hình thực tế là route của lớp này trong Định tuyến mô hình, đọc lúc dùng.",
+		}),
+		...routeFields().map((field) =>
+			forKind(
+				"route",
+				field.path === "thinking" ? { ...field, hint: `Không bắt buộc. ${field.hint}` } : field,
+			),
+		),
+		forKind("cli", {
+			path: "tool",
+			type: "string",
+			label: "Công cụ",
+			hint: `Có sẵn: ${Object.keys(BUILTIN_CLI_TOOLS).join(", ")}; hoặc tên một công cụ khai báo ở mục "Công cụ CLI".`,
+		}),
+		forKind("cli", {
+			path: "args",
+			type: "lines",
+			label: "Tham số thêm",
+			hint: "Mỗi dòng một tham số, nối sau tham số của công cụ.",
+		}),
 	];
 }
 
@@ -544,24 +609,34 @@ export const CONFIG_SCHEMAS = {
 								},
 								{ path: "api", type: "enum", enum: ["openai-completions"], default: "openai-completions", label: "Giao thức" , advanced: true },
 								{ path: "concurrency", type: "number", default: 5, min: 1, max: 16, label: "Số model gọi thử cùng lúc" , advanced: true },
-								// No default on purpose: an absent limit means "unknown", and the
-								// sync looks it up per model instead of stamping one number on
-								// every model behind the endpoint.
+								// Per model, never per endpoint: one number stamped on every model
+								// behind an endpoint is what the sync stopped doing. No default on
+								// purpose either — an absent limit means "look it up on models.dev".
+								// Keys are model ids and stay whole even with dots ("gpt-5.5").
 								{
-									path: "contextWindow",
-									type: "number",
-									min: 1024,
-									label: "Context window",
-									hint: "Để trống = tự tra từ models.dev.",
-									advanced: true,
-								},
-								{
-									path: "maxTokens",
-									type: "number",
-									min: 256,
-									label: "Max output tokens",
-									hint: "Để trống = tự tra từ models.dev.",
-									advanced: true,
+									path: "models",
+									type: "map",
+									keyLabel: "Model id",
+									addLabel: "+ Ghi đè giới hạn cho một model",
+									hint: "Để trống = tự tra từ models.dev; thêm model ở đây để ghi đè context window / max output của riêng model đó. Khoá là model id đúng như endpoint trả về (ví dụ gpt-5.5, poolside/laguna-s-2.1). Ô nào để trống thì ô đó vẫn tự tra.",
+									item: {
+										fields: [
+											{
+												path: "contextWindow",
+												type: "number",
+												min: 1,
+												label: "Context window",
+												hint: "Để trống = tự tra từ models.dev.",
+											},
+											{
+												path: "maxTokens",
+												type: "number",
+												min: 1,
+												label: "Max output tokens",
+												hint: "Để trống = tự tra từ models.dev. Không được lớn hơn context window.",
+											},
+										],
+									},
 								},
 							],
 						},
@@ -643,6 +718,83 @@ export const CONFIG_SCHEMAS = {
 									optionalKeys: [...OPTIONAL_MODEL_CLASSES],
 									hint: OPTIONAL_ROUTES_HINT,
 									item: { fields: routeFields() },
+								},
+							],
+						},
+					},
+				],
+			},
+		],
+	},
+
+	jobs: {
+		label: "Công việc",
+		intro:
+			"Mỗi công việc là một bộ gợi ý cho Lead: làm việc này thì dùng những mô hình hoặc công cụ nào. Mọi executor trong một công việc đều được dùng — \"lần lượt\" là theo thứ tự, không phải \"hỏng cái này thì thử cái kia\". Công việc không tự dựng agent; Lead đọc bằng: pteam jobs list.",
+		seed: { version: 1, jobs: {} },
+		groups: [
+			{
+				id: "jobs",
+				label: "Danh sách công việc",
+				hint: "Mã công việc chỉ gồm chữ, số, \"_\" và \"-\" (không dấu chấm).",
+				fields: [
+					{
+						path: "jobs",
+						type: "map",
+						keyLabel: "Mã công việc",
+						addLabel: "+ Thêm công việc",
+						item: {
+							seed: { run: DEFAULT_RUN_MODE, executors: [{ kind: "class" }] },
+							fields: [
+								{ path: "label", type: "string", label: "Tên hiển thị" },
+								{ path: "description", type: "string", label: "Mô tả" },
+								{
+									path: "disposition",
+									type: "enum",
+									enum: [...JOB_DISPOSITIONS],
+									label: "Loại việc trong brief (DISPOSITION)",
+									hint: "Không bắt buộc. Gợi ý DISPOSITION cho brief giao việc này.",
+								},
+								{
+									path: "run",
+									type: "enum",
+									enum: [...JOB_RUN_MODES],
+									default: DEFAULT_RUN_MODE,
+									label: "Cách chạy",
+									hint: "parallel: các executor chạy cùng lúc. sequential: lần lượt theo thứ tự trong danh sách.",
+								},
+								{
+									path: "executors",
+									type: "list",
+									label: "Executor",
+									addLabel: "+ Thêm executor",
+									minItems: 1,
+									hint: "Ít nhất một. Mỗi executor là một lớp việc, một route cụ thể, hoặc một công cụ CLI.",
+									item: { seed: { kind: "class" }, fields: executorFields() },
+								},
+							],
+						},
+					},
+				],
+			},
+			{
+				id: "cliTools",
+				label: "Công cụ CLI",
+				hint: `Thêm công cụ ngoài hai cái có sẵn (${Object.keys(BUILTIN_CLI_TOOLS).join(", ")}). Tên chỉ gồm chữ, số, "_" và "-".`,
+				fields: [
+					{
+						path: "cliTools",
+						type: "map",
+						keyLabel: "Tên công cụ",
+						addLabel: "+ Thêm công cụ",
+						item: {
+							fields: [
+								{ path: "command", type: "string", label: "Lệnh chạy" },
+								{
+									path: "args",
+									type: "lines",
+									label: "Tham số lệnh",
+									hint: "Mỗi dòng một tham số, theo đúng thứ tự.",
 								},
 							],
 						},
@@ -793,8 +945,14 @@ export function withPiModelCatalog(schema, catalog = {}) {
 	};
 }
 
-/** Sections whose forms carry a live model inventory. */
+/** Sections whose forms are route tables (a route card per MODEL_CLASS). */
 export const ROUTING_SECTIONS = ["routing", "cluster"];
+
+/**
+ * Sections whose forms carry a live model inventory: the route tables, plus
+ * jobs, whose route executors pick from the same per-provider model lists.
+ */
+export const MODEL_INVENTORY_SECTIONS = [...ROUTING_SECTIONS, "jobs"];
 
 /** Sections sharing one file share one schema: `providers` and `paseo`. */
 export function schemaForSection(section) {

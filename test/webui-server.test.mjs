@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { connect } from "node:net";
 import {
+	CONFIG_SECTIONS,
+	CONFIG_VALIDATORS,
 	ROUTES,
 	bearerToken,
 	runCli,
@@ -10,6 +12,7 @@ import {
 	isAllowedHost,
 	startServer,
 } from "../webui/server.mjs";
+import { validateJobsConfig } from "../scripts/jobs.mjs";
 
 // --- the route table is the whole attack surface ---------------------------
 // There is no dynamic argv assembly: a path that is not a key here cannot
@@ -96,6 +99,37 @@ import {
 	});
 	assert.deepEqual(written.args, ["config", "write", "pi-settings"]);
 	assert.equal(written.stdin, raw);
+}
+
+// --- jobs: a malformed preset is refused before the CLI is ever spawned -----
+{
+	assert.ok(CONFIG_SECTIONS.includes("jobs"), "jobs is a config section the server accepts");
+	assert.equal(CONFIG_VALIDATORS.jobs, validateJobsConfig, "the same validator `pteam config write jobs` runs");
+	let spawned = false;
+	const exec = (args, stdin) => {
+		spawned = true;
+		return Promise.resolve({ exitCode: 0, stdout: "{}", stderr: "", stdin });
+	};
+	const post = (doc) =>
+		handleApi({ method: "POST", pathname: "/api/config", query: { section: "jobs" }, rawBody: typeof doc === "string" ? doc : JSON.stringify(doc), exec });
+
+	const bad = { version: 1, jobs: { review: { executors: [{ kind: "class", modelClass: "REVIEW_HIGH" }, { kind: "route", paseoProvider: "pi-peer", model: "gpt-5.5" }] } } };
+	await assert.rejects(post(bad), (error) => {
+		assert.equal(error.status, 400);
+		assert.equal(error.code, "CONFIG_INVALID");
+		assert.match(error.message, /^CONFIG_INVALID: job "review" executor \[1\]/);
+		return true;
+	});
+	await assert.rejects(post({ version: 1, jobs: { "v1.2": { executors: [{ kind: "cli", tool: "pi" }] } } }), (error) => error.status === 400 && /job "v1\.2"/.test(error.message));
+	await assert.rejects(post("{nope"), (error) => error.status === 400 && error.code === "CONFIG_INVALID");
+	assert.equal(spawned, false, "a refused document never reaches the CLI");
+
+	const good = '{"version":1,"jobs":{"review":{"executors":[{"kind":"cli","tool":"claude"}]}}}';
+	const written = await post(good);
+	assert.deepEqual(written.args, ["config", "write", "jobs"]);
+	assert.equal(written.stdin, good, "a valid document is forwarded byte-for-byte");
+	const read = await handleApi({ method: "GET", pathname: "/api/config", query: { section: "jobs" }, exec });
+	assert.deepEqual(read.args, ["config", "read", "jobs"]);
 }
 
 // --- config write: the fingerprint of the file the form was built from ----

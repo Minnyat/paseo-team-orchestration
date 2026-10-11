@@ -13,12 +13,14 @@
 import assert from "node:assert/strict";
 import {
 	CONFIG_SCHEMAS,
+	MODEL_INVENTORY_SECTIONS,
 	ROUTING_SECTIONS,
 	schemaForSection,
 	withModelInventory,
 	withPiModelCatalog,
 } from "../cli/lib/config-schema.mjs";
 import {
+	ALL_MODEL_CLASSES,
 	MODEL_CLASSES,
 	OPTIONAL_MODEL_CLASSES,
 	ROLE_PROVIDERS,
@@ -28,10 +30,19 @@ import {
 	THINKING_LEVELS_BY_FAMILY,
 	providerFamily,
 } from "../scripts/model-routing.mjs";
+import { OVERRIDE_KEYS } from "../scripts/models-dev.mjs";
 import {
 	SEAT_CAPABILITY_IDS,
 	capabilitiesForBase,
 } from "../scripts/seat-profiles.mjs";
+import {
+	BUILTIN_CLI_TOOLS,
+	EXECUTOR_KEYS,
+	EXECUTOR_KINDS,
+	JOB_DISPOSITIONS,
+	JOB_RUN_MODES,
+	validateJobsConfig,
+} from "../scripts/jobs.mjs";
 
 /** The route card of a section, wherever it is nested. */
 function routeItemFields(schema) {
@@ -293,20 +304,114 @@ console.log("[paseo-team] config-schema tests passed");
 	);
 }
 
-// --- pi-models: context limits are optional, never a stamped default ---------
-// An absent contextWindow/maxTokens means "unknown — look it up per model".
-// A seed or a `default:` here would put one number on every model behind the
-// endpoint (the old 200000/32000), which is exactly what the sync must not do.
+// --- pi-models: context limits are per model, never per endpoint ------------
+// The sync ignores endpoint-level contextWindow/maxTokens (with a warning), so
+// a box for them on the endpoint card would take a value and do nothing with
+// it. Limits are overridden per model id under `models`, with no default and
+// no seed: an absent limit means "look it up on models.dev".
 {
 	const providers = CONFIG_SCHEMAS["pi-models"].groups
 		.flatMap((group) => group.fields)
 		.find((field) => field.path === "providers");
 	for (const path of ["contextWindow", "maxTokens"]) {
 		assert.ok(!(path in providers.item.seed), `a new endpoint card must not seed ${path}`);
-		const field = providers.item.fields.find((f) => f.path === path);
-		assert.ok(field, `the ${path} field still exists`);
-		assert.equal(field.type, "number");
-		assert.equal(field.default, undefined, `${path} has no default: blank means unknown`);
-		assert.match(field.hint, /models\.dev/, `${path} says where a blank value comes from`);
+		assert.equal(
+			providers.item.fields.find((f) => f.path === path),
+			undefined,
+			`the endpoint card no longer offers ${path}: the sync ignores it there`,
+		);
 	}
+	assert.ok(!("models" in providers.item.seed), "a new endpoint card starts with no overrides");
+	const models = providers.item.fields.find((f) => f.path === "models");
+	assert.ok(models, "the endpoint card offers per-model overrides");
+	assert.equal(models.type, "map", "keyed by model id");
+	assert.equal(models.fixedKeys, undefined, "any model id may be a key");
+	assert.match(models.hint, /models\.dev/, "says where a model without an override gets its limits");
+	assert.match(models.hint, /gpt-5\.5/, "and shows that a dotted model id is a valid key");
+	// Exactly the keys the sync accepts: anything else would be refused at sync time.
+	assert.deepEqual(models.item.fields.map((f) => f.path), [...OVERRIDE_KEYS]);
+	for (const field of models.item.fields) {
+		assert.equal(field.type, "number");
+		assert.equal(field.default, undefined, `${field.path} has no default: blank means unknown`);
+		assert.match(field.hint, /models\.dev/, `${field.path} says where a blank value comes from`);
+	}
+}
+
+// --- jobs: the form is the validator's vocabulary, field for field -----------
+{
+	const schema = schemaForSection("jobs");
+	assert.ok(schema, "the jobs section has a form schema");
+	assert.equal(schema.label, "Công việc");
+	validateJobsConfig(structuredClone(schema.seed));
+
+	const fields = schema.groups.flatMap((group) => group.fields);
+	const jobs = fields.find((field) => field.path === "jobs");
+	assert.equal(jobs?.type, "map", "jobs are keyed by job id");
+	const cliTools = fields.find((field) => field.path === "cliTools");
+	assert.equal(cliTools?.type, "map", "extra CLI tools are keyed by name");
+	assert.deepEqual(cliTools.item.fields.map((f) => f.path), ["command", "args"]);
+
+	const jobField = (path) => {
+		const field = jobs.item.fields.find((f) => f.path === path);
+		assert.ok(field, `the job card has a "${path}" field`);
+		return field;
+	};
+	assert.deepEqual(jobField("disposition").enum, [...JOB_DISPOSITIONS]);
+	assert.deepEqual(jobField("run").enum, [...JOB_RUN_MODES]);
+	assert.equal(jobField("run").default, "parallel");
+
+	// `list`: an ordered array of element cards (S7).
+	const executors = jobField("executors");
+	assert.equal(executors.type, "list");
+	assert.equal(executors.minItems, 1, "a job needs at least one executor");
+	assert.equal(typeof executors.label, "string");
+	assert.ok(Array.isArray(executors.item?.fields));
+	assert.deepEqual(executors.item.seed, { kind: "class" });
+
+	// A freshly added job, as the form seeds it, is one pick away from valid.
+	const seeded = { version: 1, jobs: { j: structuredClone(jobs.item.seed) } };
+	seeded.jobs.j.executors[0].modelClass = "FAST_READ";
+	validateJobsConfig(seeded);
+
+	const byPath = Object.fromEntries(executors.item.fields.map((f) => [f.path, f]));
+	assert.deepEqual(byPath.kind.enum, [...EXECUTOR_KINDS]);
+	assert.equal(byPath.kind.showIf, undefined, "the kind picker is always visible");
+	// Every key a kind takes has a field shown for exactly that kind, and no
+	// field exists for a key no kind takes.
+	for (const kind of EXECUTOR_KINDS) {
+		const shown = executors.item.fields.filter((f) => f.showIf?.equals === kind).map((f) => f.path);
+		assert.deepEqual(
+			shown.sort(),
+			EXECUTOR_KEYS[kind].filter((key) => key !== "kind").sort(),
+			`kind "${kind}" shows exactly the fields it takes`,
+		);
+	}
+	for (const field of executors.item.fields) {
+		if (field.showIf) assert.equal(field.showIf.path, "kind", `${field.path} toggles on its sibling kind`);
+	}
+	assert.equal(new Set(executors.item.fields.map((f) => f.path)).size, executors.item.fields.length, "one field per key");
+	assert.deepEqual(byPath.modelClass.enum, [...ALL_MODEL_CLASSES]);
+	// A route executor is the routing form's own route card.
+	assert.equal(byPath.paseoProvider.type, "role-provider");
+	assert.deepEqual(byPath.paseoProvider.enum, [...ROLE_PROVIDERS]);
+	assert.equal(byPath.model.optionsBy?.source, "models");
+	assert.equal(byPath.thinking.optionsBy?.path, "paseoProvider");
+	for (const provider of ROLE_PROVIDERS) {
+		assert.deepEqual(byPath.thinking.optionsBy.map[provider], [...THINKING_LEVELS_BY_FAMILY[providerFamily(provider)]]);
+	}
+	for (const tool of Object.keys(BUILTIN_CLI_TOOLS)) assert.match(byPath.tool.hint, new RegExp(tool));
+	assert.equal(byPath.args.type, "lines");
+
+	// The live model list reaches the route executors two levels down.
+	assert.ok(MODEL_INVENTORY_SECTIONS.includes("jobs"), "config read jobs folds in the model inventory");
+	for (const section of ROUTING_SECTIONS) assert.ok(MODEL_INVENTORY_SECTIONS.includes(section));
+	const inventory = { "pi-peer": ["Minnyat/gpt-5.5"] };
+	const filled = withModelInventory(schema, inventory);
+	const filledModel = filled.groups
+		.flatMap((g) => g.fields)
+		.find((f) => f.path === "jobs")
+		.item.fields.find((f) => f.path === "executors")
+		.item.fields.find((f) => f.path === "model");
+	assert.deepEqual(filledModel.optionsBy.map, inventory);
+	assert.deepEqual(byPath.model.optionsBy.map, {}, "the shared schema is not mutated");
 }

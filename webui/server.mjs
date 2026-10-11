@@ -12,7 +12,7 @@
  *   - cache a CLI response verbatim for a few seconds (see CACHEABLE),
  *   - collapse concurrent identical requests into one spawn (single-flight), and
  *   - refuse a request that is malformed before it becomes argv — including a
- *     routing/cluster document the resolver's own validator rejects (see
+ *     routing/cluster/jobs document its own validator rejects (see
  *     CONFIG_VALIDATORS). That checks the posted body only; no file is read.
  * The first two exist because one paseo round trip costs ~3s; without them,
  * three open browser tabs would triple the load on the daemon for identical
@@ -36,6 +36,7 @@ import { readFile, stat } from "node:fs/promises";
 import { join, dirname, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateClusterConfig, validateRoutingConfig } from "../scripts/model-routing.mjs";
+import { JOBS_SECTION, validateJobsConfig } from "../scripts/jobs.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -47,7 +48,7 @@ export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 // --- request -> argv -------------------------------------------------------
 
-export const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings", "seats", "pi-models"];
+export const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings", "seats", "pi-models", JOBS_SECTION];
 const ROLES = ["supervisor", "lead", "peer"];
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const TOKEN_LIKE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -83,10 +84,15 @@ function match(value, pattern, label) {
  * runtime switched to pi with a claude model left behind), so the write is
  * refused here, with the validator's own sentence, before the file is touched.
  * Same functions `pteam routing check` and the resolver use — one rule, not two.
+ *
+ * Jobs are not read by the gate, but a malformed preset is still refused here
+ * with the job and executor named — the same validator `pteam config write
+ * jobs` runs, so the browser and the terminal refuse the same files.
  */
 export const CONFIG_VALIDATORS = {
 	routing: validateRoutingConfig,
 	cluster: validateClusterConfig,
+	[JOBS_SECTION]: validateJobsConfig,
 };
 
 function validateConfigBody(section, raw) {
