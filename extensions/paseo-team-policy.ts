@@ -547,7 +547,7 @@ function applyPolicy(pi: ExtensionAPI, r: TeamRole): Policy {
 			? [...registered].filter(isBrowserMcpTarget)
 			: [];
 	const allowed = [
-		...new Set([...policy.allow, ...browserTools, ...extraTools(r)]),
+		...new Set([...policy.allow, ...browserTools, ...extraTools(r, "pi")]),
 	].filter((name) => registered.has(name));
 	pi.setActiveTools(allowed);
 	return policy;

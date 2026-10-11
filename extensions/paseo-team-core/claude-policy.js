@@ -210,7 +210,7 @@ const CLAUDE_KNOWN_TOOLS = [
     "WebSearch",
 ];
 export function claudeDisallowedTools(role) {
-    const allowed = new Set([...claudeBaseTools(role), ...extraTools(role)]);
+    const allowed = new Set([...claudeBaseTools(role), ...extraTools(role, "claude")]);
     return [...new Set(CLAUDE_KNOWN_TOOLS.filter((tool) => !allowed.has(tool)))];
 }
 function bashCommand(toolInput) {
@@ -227,7 +227,7 @@ function bashCommand(toolInput) {
 export function claudeToolBlockReason(input) {
     const { role, toolName, brief } = input;
     const classified = classifyClaudeTool(toolName);
-    const allowedExtra = new Set(extraTools(role));
+    const allowedExtra = new Set(extraTools(role, "claude"));
     const authority = peerAuthority(brief);
     const peerMode = resolvePeerMode(brief);
     // Checked before the generic allowlist so the seat gets the route to take,

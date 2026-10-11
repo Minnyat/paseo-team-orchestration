@@ -4655,41 +4655,58 @@ export function loadRolePrompt(r) {
     }
 }
 /**
- * Catalogued host-level additions. PASEO_TEAM_EXTRA_TOOLS is intentionally not
- * a general tool-name escape hatch: only entries in this table can survive it.
- * The seat catalogue materializes `web-research` as these two names.
+ * The sole extra-tool capability catalog. Entries must name both the role and
+ * runtime family that can actually activate them; a registered Pi tool with a
+ * Claude-shaped name is never enough to grant it.
  */
-export const EXTRA_TOOL_CATALOG = {
-    WebFetch: ["peer", "lead"],
-    WebSearch: ["peer", "lead"],
-};
+export const EXTRA_TOOL_CATALOG = Object.freeze({
+    WebFetch: Object.freeze({ roles: ["peer", "lead"], families: ["claude"] }),
+    WebSearch: Object.freeze({ roles: ["peer", "lead"], families: ["claude"] }),
+});
 function configuredExtraToolNames(env = process.env) {
-    return (env.PASEO_TEAM_EXTRA_TOOLS ?? "")
-        .split(",")
-        .map((tool) => tool.trim())
-        .filter(Boolean);
+    return [...new Set((env.PASEO_TEAM_EXTRA_TOOLS ?? "")
+            .split(",")
+            .map((tool) => tool.trim())
+            .filter(Boolean))];
 }
-/** Catalogued configured extras compatible with one role. */
-export function extraTools(role, env = process.env) {
-    return configuredExtraToolNames(env).filter((tool) => EXTRA_TOOL_CATALOG[tool]?.includes(role) ?? false);
+function extraToolCapability(tool) {
+    return Object.hasOwn(EXTRA_TOOL_CATALOG, tool) ? EXTRA_TOOL_CATALOG[tool] : null;
 }
-/** Operator-facing inventory of extras the role clamp will discard. */
+/** Catalogued configured extras compatible with one role and runtime. */
+export function extraTools(role, family, env = process.env) {
+    return configuredExtraToolNames(env).filter((tool) => {
+        const capability = extraToolCapability(tool);
+        return capability?.roles.includes(role) && capability.families.includes(family);
+    });
+}
+/** Operator-facing inventory of extras the runtime/role clamp will discard. */
 export function extraToolDiagnostics(env = process.env) {
     const roles = ["peer", "lead", "supervisor"];
     const names = configuredExtraToolNames(env);
-    const accepted = Object.fromEntries(roles.map((role) => [role, extraTools(role, env)]));
+    const accepted = Object.fromEntries(RUNTIME_FAMILIES.map((family) => [
+        family,
+        Object.fromEntries(roles.map((role) => [role, extraTools(role, family, env)])),
+    ]));
     const dropped = [];
     for (const tool of names) {
-        for (const role of roles) {
-            if (EXTRA_TOOL_CATALOG[tool]?.includes(role))
-                continue;
-            dropped.push({
-                tool,
-                role,
-                reason: role === "supervisor"
-                    ? "Supervisor cannot receive extra tools"
-                    : "not a catalogued extra capability",
-            });
+        const capability = extraToolCapability(tool);
+        for (const family of RUNTIME_FAMILIES) {
+            for (const role of roles) {
+                if (capability?.roles.includes(role) && capability.families.includes(family))
+                    continue;
+                dropped.push({
+                    tool,
+                    role,
+                    family,
+                    reason: role === "supervisor"
+                        ? "Supervisor cannot receive extra tools"
+                        : !capability
+                            ? "not a catalogued extra capability"
+                            : !capability.families.includes(family)
+                                ? `not available in the ${family} runtime`
+                                : "not available to this role",
+                });
+            }
         }
     }
     return { accepted, dropped };
