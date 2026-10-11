@@ -1051,8 +1051,9 @@ try {
 	assert.match(originLine.textContent, /bản lưu CŨ, tải 3 giờ trước/);
 	const limitRow = (id) => okOut.querySelector(`.cfg-model-limit[data-model="${id}"]`)?.textContent;
 	assert.equal(limitRow("gpt-5.6-terra"), "gpt-5.6-terra1.050.000 · 128.000 · models.dev");
-	assert.equal(limitRow("gpt-5.5"), "gpt-5.5chưa biết (Pi dùng 128.000) · 64.000 · ghi đè", "half known: only the unknown half falls back");
-	assert.equal(limitRow("review"), "reviewchưa biết (Pi dùng 128.000/16.384)");
+	assert.equal(limitRow("gpt-5.5"), "gpt-5.5chưa biết (Pi tự dùng mặc định của nó) · 64.000 · ghi đè", "half known: only the unknown half says so");
+	assert.equal(limitRow("review"), "reviewchưa biết (Pi tự dùng mặc định của nó) · chưa biết (Pi tự dùng mặc định của nó) · chưa biết");
+	assert.doesNotMatch(okOut.textContent, /128\.000\/16\.384|16\.384/, "no pi default is quoted as a number");
 
 	// A partial failure exits non-zero; the report still arrives and is shown.
 	const badOut = await runSync({
@@ -1070,8 +1071,8 @@ try {
 	assert.equal(badOut.classList.contains("bad"), true);
 	assert.equal(badOut.querySelector(".cfg-actions-warn"), null, "no warnings, no warning box");
 	assert.ok(badOut.querySelector(".cfg-actions-origin").classList.contains("bad"));
-	assert.match(badOut.querySelector(".cfg-actions-origin").textContent, /ENOTFOUND models\.dev.*mặc định của Pi \(128\.000\/16\.384\)/);
-	assert.equal(badOut.querySelector('.cfg-model-limit[data-model="review"]').textContent, "reviewchưa biết (Pi dùng 128.000/16.384)");
+	assert.match(badOut.querySelector(".cfg-actions-origin").textContent, /ENOTFOUND models\.dev.*mặc định của Pi\.$/);
+	assert.equal(badOut.querySelector('.cfg-model-limit[data-model="review"]').textContent, "reviewchưa biết (Pi tự dùng mặc định của nó) · chưa biết (Pi tự dùng mặc định của nó) · chưa biết");
 	assert.match(badOut.querySelector(".cfg-actions-list li.no").textContent, /^dead — /, "the failed endpoint is still named");
 } finally {
 	Object.assign(globalThis, { fetch: realFetch, setTimeout: realSetTimeout, setInterval: realSetInterval });

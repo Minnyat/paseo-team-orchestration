@@ -16,7 +16,7 @@ import {
 	roleLabel,
 	runtimeLabel,
 	statusLabel,
-	PI_DEFAULT_LIMITS,
+	UNKNOWN_LIMIT,
 	syncWarningText,
 	toolMeaning,
 } from "../webui/public/humanize.js";
@@ -208,14 +208,15 @@ assert.equal(statusLabel("initializing"), "Đang khởi động");
 	assert.equal(formatTokens(1050000), "1.050.000");
 	assert.equal(formatTokens(999), "999");
 	assert.equal(formatTokens(128000), "128.000");
-	assert.deepEqual({ ...PI_DEFAULT_LIMITS }, { contextWindow: 128000, maxTokens: 16384 }, "pi 0.83.0 provider-composer.js:69-70");
-	assert.equal(limitCell(200000, "contextWindow"), "200.000");
-	assert.equal(limitCell(undefined, "maxTokens"), "chưa biết (Pi dùng 16.384)", "unknown says what pi will use instead");
-	assert.equal(limitCell(0, "contextWindow"), "chưa biết (Pi dùng 128.000)", "a non-positive number is not a limit");
+	assert.equal(UNKNOWN_LIMIT, "chưa biết (Pi tự dùng mặc định của nó)");
+	assert.doesNotMatch(UNKNOWN_LIMIT, /\d/, "unknown names no number: the page does not hard-code pi's defaults");
+	assert.equal(limitCell(200000), "200.000");
+	assert.equal(limitCell(undefined), UNKNOWN_LIMIT, "unknown says pi decides");
+	assert.equal(limitCell(0), UNKNOWN_LIMIT, "a non-positive number is not a limit");
 
 	assert.equal(modelLimitsLabel({ contextWindow: 1050000, maxTokens: 128000, limitSource: "models.dev" }), "1.050.000 · 128.000 · models.dev");
-	assert.equal(modelLimitsLabel({ contextWindow: 400000, limitSource: "override" }), "400.000 · chưa biết (Pi dùng 16.384) · ghi đè");
-	assert.equal(modelLimitsLabel({ limitSource: "unknown" }), "chưa biết (Pi dùng 128.000/16.384)");
+	assert.equal(modelLimitsLabel({ contextWindow: 400000, limitSource: "override" }), "400.000 · chưa biết (Pi tự dùng mặc định của nó) · ghi đè");
+	assert.equal(modelLimitsLabel({ limitSource: "unknown" }), "chưa biết (Pi tự dùng mặc định của nó) · chưa biết (Pi tự dùng mặc định của nó) · chưa biết", "each field says so in its own slot");
 
 	const now = Date.parse("2026-10-11T12:00:00Z");
 	assert.equal(limitsOriginSentence(undefined), null, "an older CLI without the field shows nothing, not a guess");
@@ -230,7 +231,8 @@ assert.equal(statusLabel("initializing"), "Đang khởi động");
 	assert.match(stale.text, /\(ETIMEDOUT\).*CŨ, tải 3 ngày trước/);
 	const none = limitsOriginSentence({ origin: "unavailable", error: "offline" }, now);
 	assert.equal(none.level, "bad");
-	assert.match(none.text, /\(offline\).*mặc định của Pi \(128\.000\/16\.384\)/);
+	assert.match(none.text, /\(offline\).*mặc định của Pi\.$/);
+	assert.doesNotMatch(none.text, /\d{3}/, "and still no number of pi's");
 	const unwritable = limitsOriginSentence({ origin: "network", fetchedAt: "2026-10-11T12:00:00Z", cacheError: "EACCES" }, now);
 	assert.equal(unwritable.level, "warn", "a cache that could not be written is worth knowing");
 	assert.match(unwritable.text, /EACCES/);

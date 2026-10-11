@@ -362,24 +362,21 @@ export function degradedSentence(degraded = [], pendingParents = 0) {
 // --- model limits (the "Kho model Pi" sync report) -------------------------
 
 /**
- * What pi itself uses for a model whose contextWindow / maxTokens models.json
- * leaves out: pi 0.83.0, dist/core/provider-composer.js:69-70
- * (`definition.contextWindow ?? 128000`, `definition.maxTokens ?? 16384`).
- * The sync never writes a number of its own for an unknown limit, so this is
- * what "unknown" means in practice. It is pi's constant, not ours: re-check it
- * when the pinned pi version moves.
+ * What an unknown limit means. The sync leaves it out of models.json and pi
+ * applies its own default. No number is named here: the page shows only what
+ * the CLI sent, and a figure copied from pi's source would be one more
+ * hard-coded context window, wrong as soon as pi changes it.
  */
-export const PI_DEFAULT_LIMITS = Object.freeze({ contextWindow: 128000, maxTokens: 16384 });
+export const UNKNOWN_LIMIT = "chưa biết (Pi tự dùng mặc định của nó)";
 
 /** 1050000 -> "1.050.000", the Vietnamese grouping, without relying on the browser's ICU data. */
 export function formatTokens(value) {
 	return String(Math.trunc(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 }
 
-/** One limit cell: the number, or what pi will use instead of the number nobody knows. */
-export function limitCell(value, field) {
-	if (Number.isInteger(value) && value > 0) return formatTokens(value);
-	return `chưa biết (Pi dùng ${formatTokens(PI_DEFAULT_LIMITS[field])})`;
+/** One limit cell: the number, or a plain "unknown" that says pi decides. */
+export function limitCell(value) {
+	return Number.isInteger(value) && value > 0 ? formatTokens(value) : UNKNOWN_LIMIT;
 }
 
 const LIMIT_SOURCE_LABEL = Object.freeze({
@@ -393,20 +390,13 @@ export function limitSourceLabel(source) {
 }
 
 /**
- * One line for a model: "1.050.000 · 128.000 · models.dev", or
- * "chưa biết (Pi dùng 128.000/16.384)" when nothing is known. A model can be
- * half known: a models.dev maxTokens larger than its window is dropped, and
- * then only that half says what pi falls back to.
+ * One line for a model, context window · max output · source:
+ * "1.050.000 · 128.000 · models.dev". Each field stands on its own — a
+ * models.dev maxTokens larger than its window is dropped, leaving a model
+ * half known — so an unknown field says so in its own slot.
  */
 export function modelLimitsLabel(model) {
-	const known = (value) => Number.isInteger(value) && value > 0;
-	if (!known(model?.contextWindow) && !known(model?.maxTokens)) {
-		const pi = `${formatTokens(PI_DEFAULT_LIMITS.contextWindow)}/${formatTokens(PI_DEFAULT_LIMITS.maxTokens)}`;
-		return `chưa biết (Pi dùng ${pi})`;
-	}
-	return [limitCell(model.contextWindow, "contextWindow"), limitCell(model.maxTokens, "maxTokens"), limitSourceLabel(model.limitSource)].join(
-		" · ",
-	);
+	return [limitCell(model?.contextWindow), limitCell(model?.maxTokens), limitSourceLabel(model?.limitSource)].join(" · ");
 }
 
 /**
@@ -431,8 +421,7 @@ export function limitsOriginSentence(limits, now = Date.now()) {
 		text = `Không tải được models.dev${reason}; đang dùng bản lưu CŨ, ${age}.`;
 	} else if (limits.origin === "unavailable") {
 		level = "bad";
-		const pi = `${formatTokens(PI_DEFAULT_LIMITS.contextWindow)}/${formatTokens(PI_DEFAULT_LIMITS.maxTokens)}`;
-		text = `Không tải được models.dev${reason} và chưa có bản lưu nào: model không có ghi đè sẽ dùng mặc định của Pi (${pi}).`;
+		text = `Không tải được models.dev${reason} và chưa có bản lưu nào: model không có ghi đè sẽ dùng mặc định của Pi.`;
 	} else {
 		text = `Nguồn context window: ${limits.origin} (${age}).`;
 	}
