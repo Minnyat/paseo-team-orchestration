@@ -12,7 +12,7 @@
  *   - cache a CLI response verbatim for a few seconds (see CACHEABLE),
  *   - collapse concurrent identical requests into one spawn (single-flight), and
  *   - refuse a request that is malformed before it becomes argv — including a
- *     routing/cluster/jobs document its own validator rejects (see
+ *     routing/cluster/jobs/pi-models document its own validator rejects (see
  *     CONFIG_VALIDATORS). That checks the posted body only; no file is read.
  * The first two exist because one paseo round trip costs ~3s; without them,
  * three open browser tabs would triple the load on the daemon for identical
@@ -37,6 +37,7 @@ import { join, dirname, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateClusterConfig, validateRoutingConfig } from "../scripts/model-routing.mjs";
 import { JOBS_SECTION, validateJobsConfig } from "../scripts/jobs.mjs";
+import { validatePiModelsConfig } from "../cli/lib/config-schema.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -87,12 +88,15 @@ function match(value, pattern, label) {
  *
  * Jobs are not read by the gate, but a malformed preset is still refused here
  * with the job and executor named — the same validator `pteam config write
- * jobs` runs, so the browser and the terminal refuse the same files.
+ * jobs` runs, so the browser and the terminal refuse the same files. Likewise
+ * pi-models: a per-model override the sync would stop on (1.5, or a maxTokens
+ * above its contextWindow) is refused at save, naming endpoint and model.
  */
 export const CONFIG_VALIDATORS = {
 	routing: validateRoutingConfig,
 	cluster: validateClusterConfig,
 	[JOBS_SECTION]: validateJobsConfig,
+	"pi-models": validatePiModelsConfig,
 };
 
 function validateConfigBody(section, raw) {

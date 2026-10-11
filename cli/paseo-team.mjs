@@ -33,7 +33,13 @@ import { existsSync, readFileSync, readdirSync, appendFileSync, unlinkSync, writ
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as cw from "./lib/config-walker.mjs";
-import { schemaForSection, withModelInventory, withPiModelCatalog, MODEL_INVENTORY_SECTIONS } from "./lib/config-schema.mjs";
+import {
+	schemaForSection,
+	validatePiModelsConfig,
+	withModelInventory,
+	withPiModelCatalog,
+	MODEL_INVENTORY_SECTIONS,
+} from "./lib/config-schema.mjs";
 import {
 	applySeatsToPaseoConfig,
 	listSeats,
@@ -456,6 +462,7 @@ const CONFIG_SECTIONS = {
  */
 const CONFIG_WRITE_VALIDATORS = {
 	[JOBS_SECTION]: validateJobsConfig,
+	"pi-models": validatePiModelsConfig,
 };
 
 function resolveSection(section) {
@@ -1505,8 +1512,21 @@ function dispatchRouting(argv) {
  */
 function loadJobsView() {
 	const path = defaultJobsPath();
+	// One shape whether or not the file exists: every field is always present,
+	// null where it does not apply, so a script never branches on a missing key.
+	const table = loadLocalRouteTable();
+	const routeSource = table.ok
+		? { ok: true, source: table.source, path: table.path, hostId: table.hostId, code: null, message: null }
+		: { ok: false, source: null, path: null, hostId: null, code: table.code, message: table.message };
 	if (!existsSync(path)) {
-		return { exists: false, path, jobs: [], cliTools: {}, hint: "copy config/jobs.example.json there, or add jobs in the WebUI under Cấu hình → Công việc" };
+		return {
+			exists: false,
+			path,
+			hint: "copy config/jobs.example.json there, or add jobs in the WebUI under Cấu hình → Công việc",
+			routeSource,
+			cliTools: {},
+			jobs: [],
+		};
 	}
 	let doc;
 	try {
@@ -1517,11 +1537,7 @@ function loadJobsView() {
 		json({ ok: false, code: "CONFIG_INVALID", path, message });
 		fail(`jobs: CONFIG_INVALID: ${path}: ${message}`);
 	}
-	const table = loadLocalRouteTable();
-	const routeSource = table.ok
-		? { ok: true, source: table.source, path: table.path, hostId: table.hostId }
-		: { ok: false, code: table.code, message: table.message };
-	return { exists: true, path, routeSource, cliTools: doc.cliTools ?? {}, jobs: describeJobs(doc, table) };
+	return { exists: true, path, hint: null, routeSource, cliTools: doc.cliTools ?? {}, jobs: describeJobs(doc, table) };
 }
 
 function dispatchJobs(argv) {

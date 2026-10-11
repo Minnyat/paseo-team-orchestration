@@ -851,6 +851,10 @@ try {
 		assert.deepEqual(none.json.jobs, []);
 		assert.equal(none.json.path, jobsFile, "the jobs file honours PST_TEAM_CONFIG_DIR");
 		assert.match(none.json.hint, /jobs\.example\.json/);
+		const SHAPE = ["cliTools", "exists", "hint", "jobs", "ok", "path", "routeSource"];
+		assert.deepEqual(Object.keys(none.json).sort(), SHAPE, "the same keys with or without a file");
+		assert.equal(none.json.routeSource.ok, false);
+		assert.equal(none.json.routeSource.hostId, null);
 
 		const empty = run(["config", "read", "jobs", "--no-discovery"], env);
 		assert.equal(empty.status, 0, empty.stderr);
@@ -874,6 +878,14 @@ try {
 		});
 		assert.equal(dotted.status, 1);
 		assert.match(dotted.stderr, /job "a\.b"/);
+		// "__proto__" survives JSON.parse as a key but not a later `out[key] =`
+		// copy, so the job would vanish on the next save: refused at the door.
+		const proto = run(["config", "write", "jobs"], {
+			...env,
+			__stdin: '{"version":1,"jobs":{"__proto__":{"executors":[{"kind":"cli","tool":"pi"}]},"b":{"executors":[{"kind":"cli","tool":"pi"}]}}}',
+		});
+		assert.equal(proto.status, 1, proto.stderr);
+		assert.match(proto.stderr, /job "__proto__": id "__proto__" is reserved/);
 		const notJson = run(["config", "write", "jobs"], { ...env, __stdin: "{nope" });
 		assert.equal(notJson.status, 1);
 		assert.match(notJson.stderr, /CONFIG_INVALID/);
@@ -916,6 +928,9 @@ try {
 		const listed = run(["jobs", "list"], env);
 		assert.equal(listed.status, 0, listed.stderr);
 		assert.equal(listed.json.routeSource.hostId, "jobs-box");
+		assert.deepEqual(Object.keys(listed.json).sort(), SHAPE);
+		assert.equal(listed.json.hint, null, "no hint once the file exists");
+		assert.equal(listed.json.routeSource.code, null);
 		assert.deepEqual(listed.json.jobs.map((job) => job.id), ["build", "review"]);
 		assert.equal(listed.json.jobs[0].run, "parallel", "the default run mode is spelled out");
 		assert.equal(listed.json.jobs[0].executors[0].route, null);
@@ -947,6 +962,23 @@ try {
 		assert.equal(broken.status, 1);
 		assert.equal(broken.json.code, "CONFIG_INVALID");
 		assert.match(broken.json.message, /job "review": executors must be a non-empty array/);
+
+		// pi-models: an override the sync would stop on is refused at save,
+		// an old file with endpoint-level limits is not.
+		const piModelsFile = join(teamDir, "pi-models.local.json");
+		const overrides = (models) => JSON.stringify({ version: 1, providers: { Minnyat: { baseUrl: "https://example.test/v1", models } } });
+		const fraction = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 1.5 } }) });
+		assert.equal(fraction.status, 1);
+		assert.match(fraction.stderr, /CONFIG_INVALID: pi-models: provider "Minnyat": models\.gpt-5\.5\.contextWindow must be a positive integer/);
+		const inverted = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 1000, maxTokens: 2000 } }) });
+		assert.equal(inverted.status, 1);
+		assert.match(inverted.stderr, /models\.gpt-5\.5\.maxTokens \(2000\) exceeds its contextWindow/);
+		assert.ok(!existsSync(piModelsFile), "a refused pi-models document is not written");
+		const fine = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } }) });
+		assert.equal(fine.status, 0, fine.stderr);
+		const legacy = JSON.stringify({ version: 1, providers: { Minnyat: { baseUrl: "https://example.test/v1", contextWindow: 200000, maxTokens: 32000 } } });
+		assert.equal(run(["config", "write", "pi-models"], { ...env, __stdin: legacy }).status, 0, "legacy endpoint-level limits are a sync warning, not a save error");
+		assert.equal(run(["config", "write", "pi-models"], { ...env, __stdin: '{"version":1,"providers":{}}' }).status, 0, "an empty catalog file (the form seed) saves");
 
 		const help = run(["--help"]);
 		assert.match(help.stdout, /pteam jobs list/);

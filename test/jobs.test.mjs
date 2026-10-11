@@ -10,6 +10,7 @@ import {
 	BUILTIN_CLI_TOOLS,
 	EXECUTOR_KEYS,
 	EXECUTOR_KINDS,
+	JOB_DISPOSITIONS,
 	JOBS_SECTION,
 	JobsConfigError,
 	describeJobs,
@@ -145,6 +146,43 @@ for (const [kind, sample] of [
 			new RegExp(`kind "${kind}" does not take ${key}`),
 		);
 	}
+}
+
+// --- object internals are never names ----------------------------------------
+// JSON.parse keeps "__proto__" as an own key, so the validator sees it — but the
+// form's save copies maps with `out[key] = value`, which SETS A PROTOTYPE for
+// that key: the job disappeared from the file on the next unchanged save. Built
+// from JSON text on purpose: an object literal `{ __proto__: ... }` would not
+// even create the key.
+for (const name of ["__proto__", "prototype", "constructor"]) {
+	const job = '{"executors":[{"kind":"cli","tool":"pi"}]}';
+	const alone = JSON.parse(`{"version":1,"jobs":{${JSON.stringify(name)}:${job}}}`);
+	assert.ok(Object.hasOwn(alone.jobs, name), `the fixture really carries an own "${name}" key`);
+	refuses(alone, new RegExp(`job "${name}": id "${name}" is reserved`));
+	refuses(JSON.parse(`{"version":1,"jobs":{${JSON.stringify(name)}:${job},"b":${job}}}`), new RegExp(`job "${name}"`));
+	refuses(
+		JSON.parse(`{"version":1,"cliTools":{${JSON.stringify(name)}:{"command":"x"}},"jobs":{}}`),
+		new RegExp(`cliTools "${name}": "${name}" is reserved`),
+	);
+	// Nor can an executor reach one through the tool lookup.
+	refuses(
+		{ version: 1, jobs: { j: { executors: [{ kind: "cli", tool: name }] } } },
+		new RegExp(`tool "${name}" is neither built in nor declared`),
+	);
+}
+// Names that merely contain the word stay valid.
+validateJobsConfig({ version: 1, cliTools: { my_constructor: { command: "x" } }, jobs: { "proto-type": { executors: [{ kind: "cli", tool: "my_constructor" }] } } });
+
+// --- dispositions are the brief template's, not a second copy ----------------
+{
+	const template = readFileSync(join(HERE, "..", "templates", "TASK_BRIEF_V3.md"), "utf8");
+	const line = /^DISPOSITION: (.+)$/m.exec(template);
+	assert.ok(line, "templates/TASK_BRIEF_V3.md still declares the DISPOSITION line");
+	assert.deepEqual(
+		[...JOB_DISPOSITIONS],
+		line[1].split("|").map((entry) => entry.trim()),
+		"JOB_DISPOSITIONS must list exactly the brief template's dispositions, in order",
+	);
 }
 
 // --- cliTools ------------------------------------------------------------------

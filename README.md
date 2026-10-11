@@ -1421,6 +1421,8 @@ pteam activity <ref> --tail 5 --max-chars 2000
 pteam permits list
 pteam seats list                        # custom seats + the providers they generate
 pteam seats apply                       # write those providers into ~/.paseo/config.json
+pteam jobs list                         # job presets, each class executor with its current route
+pteam jobs show <id>                    # one job preset
 pteam models sync                       # rebuild pi's catalogs from their endpoints, then refresh
 pteam models refresh                    # daemon re-reads the catalog, without a restart
 pteam web --port 4321 --open            # prints http://127.0.0.1:PORT/#token=...
@@ -1489,6 +1491,30 @@ therefore batches a whole snapshot per call, caches the spawn tree in
 only `inspect` does), and spends at most `--max-inspect` lookups per run. A cold
 cache fills over a few polls; a warm one answers in ~3.8s. Anything that could
 not be collected is reported in `degraded[]` rather than quietly missing.
+
+### Job presets — `jobs.local.json`
+
+A job names what a kind of work is run WITH: one or more executors, each a
+model class (whatever route that class has on this host right now), an
+explicit route (`paseoProvider` + `model`, `thinking` optional — the same
+shapes as the route file), or a CLI tool (`pi` and `claude` are built in;
+`cliTools` declares others). The file is
+`~/.paseo-team-orchestration/jobs.local.json`; start from
+[`config/jobs.example.json`](config/jobs.example.json), or edit it in the WebUI
+under **Cấu hình → Công việc**. `pteam jobs list` and `pteam jobs show <id>` print
+it for a Lead, with each class executor resolved against the route file the
+create_agent gate reads.
+
+A job is a **preset a Lead reads, nothing more**. It seats no agent, and
+create_agent is not checked against it — every seating is still held to the
+route of its declared class. Every executor of a job is used; `run:
+"sequential"` means in the listed order, never "try the next one if this one
+failed": there is no automatic fallback, here or anywhere in the pack.
+
+Both writers — `pteam config write jobs` and the WebUI — run the same validator
+(`scripts/jobs.mjs`) and refuse a malformed file before it is written, naming
+the job and the executor index. Job ids and tool names are letters, digits, `_`
+and `-`; `__proto__`, `prototype` and `constructor` are refused.
 
 See `docs/webui-architecture.md` for the full contract, the graph schema, and
 what is still missing (agent-to-agent message edges, multi-host).

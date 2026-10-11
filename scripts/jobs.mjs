@@ -63,6 +63,24 @@ export const BUILTIN_CLI_TOOLS = Object.freeze({
 /** Job ids and cliTools names: one path-safe token, no dots. */
 export const JOB_NAME = /^[A-Za-z0-9_-]+$/;
 
+/**
+ * Names JOB_NAME lets through that are object internals, not keys. A job
+ * called "__proto__" survives JSON.parse as an own key, but any code that
+ * copies the map with `out[key] = value` sets a prototype instead — the form's
+ * save does exactly that, so the job vanished from the file without a word.
+ * Refused at the door, whatever reads the file next.
+ */
+export const RESERVED_NAMES = Object.freeze(["__proto__", "prototype", "constructor"]);
+
+/** Why `name` cannot be a job id / cliTools name, or null. */
+function nameProblem(name) {
+	if (RESERVED_NAMES.includes(name)) {
+		return `"${name}" is reserved (${RESERVED_NAMES.join(", ")} are JavaScript object internals) — pick another name`;
+	}
+	if (!JOB_NAME.test(name)) return `name must match ${JOB_NAME} (letters, digits, "_" and "-"; no dots)`;
+	return null;
+}
+
 const TOP_LEVEL_KEYS = ["$comment", "version", "cliTools", "jobs"];
 const JOB_KEYS = ["label", "description", "disposition", "run", "executors"];
 const CLI_TOOL_KEYS = ["command", "args"];
@@ -100,9 +118,8 @@ function validateCliTools(cliTools) {
 	if (!isObject(cliTools)) throw fail("cliTools must be an object of name -> { command, args? }");
 	for (const [name, tool] of Object.entries(cliTools)) {
 		const details = { cliTool: name };
-		if (!JOB_NAME.test(name)) {
-			throw fail(`cliTools "${name}": name must match ${JOB_NAME} (letters, digits, "_" and "-"; no dots)`, details);
-		}
+		const badName = nameProblem(name);
+		if (badName) throw fail(`cliTools "${name}": ${badName}`, details);
 		if (Object.hasOwn(BUILTIN_CLI_TOOLS, name)) {
 			throw fail(`cliTools "${name}": "${name}" is a built-in tool and cannot be redefined (built-ins: ${Object.keys(BUILTIN_CLI_TOOLS).join(", ")})`, details);
 		}
@@ -166,9 +183,8 @@ function validateExecutor(executor, jobId, index, toolNames) {
 
 function validateJob(jobId, job, toolNames) {
 	const fail = (message, details = {}) => new JobsConfigError(`job "${jobId}": ${message}`, { jobId, ...details });
-	if (!JOB_NAME.test(jobId)) {
-		throw new JobsConfigError(`job "${jobId}": id must match ${JOB_NAME} (letters, digits, "_" and "-"; no dots)`, { jobId });
-	}
+	const badName = nameProblem(jobId);
+	if (badName) throw new JobsConfigError(`job "${jobId}": id ${badName.replace(/^name /, "")}`, { jobId });
 	if (!isObject(job)) throw fail("must be an object");
 	const extra = unknownKeys(job, JOB_KEYS);
 	if (extra.length > 0) throw fail(`unknown key(s) ${extra.join(", ")} (allowed: ${JOB_KEYS.join(", ")})`);

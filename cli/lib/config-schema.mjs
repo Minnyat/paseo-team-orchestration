@@ -60,6 +60,8 @@ import {
 	capabilitiesByBase,
 } from "../../scripts/seat-profiles.mjs";
 import { teamConfigDir } from "../../scripts/lib-common.mjs";
+// The sync's own pre-flight checks, so a save refuses what the next sync would.
+import { configProblems, normalizeConfig } from "../../scripts/pi-models-sync.mjs";
 // Jobs vocabulary lives with its validator, for the same reason.
 import {
 	BUILTIN_CLI_TOOLS,
@@ -943,6 +945,31 @@ export function withPiModelCatalog(schema, catalog = {}) {
 		...schema,
 		groups: (schema.groups ?? []).map((group) => ({ ...group, fields: (group.fields ?? []).map(fill) })),
 	};
+}
+
+/**
+ * Save-time check for the pi-models section: the same problems that make
+ * `pteam models sync` stop the whole run (configProblems — a bad baseUrl, a
+ * "/" in an endpoint name, a per-model override that is not a positive
+ * integer or whose maxTokens exceeds its contextWindow), refused when the file
+ * is written instead of one sync later.
+ *
+ * Deliberately NOT refused: a file with no endpoint yet (the form's own seed;
+ * the sync reports CONFIG_MISSING for that on its own), and the endpoint-level
+ * contextWindow/maxTokens an older version wrote — the sync only warns about
+ * those, so a save must not turn an old file into an unsaveable one.
+ *
+ * @throws {Error} "CONFIG_INVALID: pi-models: <problem>; <problem>…", each
+ *   problem naming its endpoint (and model, for an override).
+ */
+export function validatePiModelsConfig(doc) {
+	if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+		throw new Error("CONFIG_INVALID: pi-models config must be a JSON object");
+	}
+	const { entries } = normalizeConfig(doc);
+	const problems = entries.length === 0 ? [] : configProblems(entries);
+	if (problems.length > 0) throw new Error(`CONFIG_INVALID: pi-models: ${problems.join("; ")}`);
+	return doc;
 }
 
 /** Sections whose forms are route tables (a route card per MODEL_CLASS). */

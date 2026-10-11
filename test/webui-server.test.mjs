@@ -13,6 +13,7 @@ import {
 	startServer,
 } from "../webui/server.mjs";
 import { validateJobsConfig } from "../scripts/jobs.mjs";
+import { validatePiModelsConfig } from "../cli/lib/config-schema.mjs";
 
 // --- the route table is the whole attack surface ---------------------------
 // There is no dynamic argv assembly: a path that is not a key here cannot
@@ -130,6 +131,37 @@ import { validateJobsConfig } from "../scripts/jobs.mjs";
 	assert.equal(written.stdin, good, "a valid document is forwarded byte-for-byte");
 	const read = await handleApi({ method: "GET", pathname: "/api/config", query: { section: "jobs" }, exec });
 	assert.deepEqual(read.args, ["config", "read", "jobs"]);
+}
+
+// --- pi-models: refuse at save what the next sync would stop on ------------
+{
+	assert.equal(CONFIG_VALIDATORS["pi-models"], validatePiModelsConfig, "the same check `pteam config write pi-models` runs");
+	const exec = (args, stdin) => Promise.resolve({ exitCode: 0, stdout: "{}", stderr: "", stdin });
+	const post = (doc) => handleApi({ method: "POST", pathname: "/api/config", query: { section: "pi-models" }, rawBody: JSON.stringify(doc), exec });
+	const endpoint = (extra) => ({ version: 1, providers: { Minnyat: { baseUrl: "https://example.test/v1", ...extra } } });
+
+	await assert.rejects(post(endpoint({ models: { "poolside/laguna-s-2.1": { maxTokens: 1.5 } } })), (error) => {
+		assert.equal(error.status, 400);
+		assert.equal(error.code, "CONFIG_INVALID");
+		assert.match(error.message, /provider "Minnyat": models\.poolside\/laguna-s-2\.1\.maxTokens must be a positive integer/);
+		return true;
+	});
+	await assert.rejects(
+		post(endpoint({ models: { "gpt-5.5": { contextWindow: 1000, maxTokens: 2000 } } })),
+		(error) => error.status === 400 && /gpt-5\.5\.maxTokens \(2000\) exceeds/.test(error.message),
+	);
+	await assert.rejects(post(endpoint({ models: { "gpt-5.5": { context: 1 } } })), (error) => /is not an override/.test(error.message));
+
+	// Accepted: good overrides, an old file with endpoint-level limits (the sync
+	// only warns about those), and the empty seed.
+	for (const doc of [
+		endpoint({ models: { "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } } }),
+		endpoint({ contextWindow: 200000, maxTokens: 32000 }),
+		{ version: 1, providers: {} },
+	]) {
+		const written = await post(doc);
+		assert.deepEqual(written.args, ["config", "write", "pi-models"]);
+	}
 }
 
 // --- config write: the fingerprint of the file the form was built from ----
