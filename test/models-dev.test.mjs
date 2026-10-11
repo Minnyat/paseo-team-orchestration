@@ -13,138 +13,118 @@ import {
 	slimCatalog,
 } from "../scripts/models-dev.mjs";
 
-// Shaped like https://models.dev/api.json, cut down to the cases the scout
-// found against a real proxy's model list (/tmp/scout-T1.md §5). Never fetched:
-// every test below runs offline.
+// Shaped like https://models.dev/api.json, cut down to the cases the scout and
+// three review rounds found on the real catalog (snapshot 2026-10-11). Never
+// fetched: every test below runs offline.
+const rec = (context, output, canonical) => ({
+	...(context || output ? { limit: { ...(context ? { context } : {}), ...(output ? { output } : {}) } } : {}),
+	...(canonical ? { canonical_model_id: canonical } : {}),
+});
 const API = {
 	openai: {
 		id: "openai",
 		models: {
-			"gpt-5.6-terra": {
-				id: "gpt-5.6-terra",
-				reasoning: true,
-				limit: { context: 1_050_000, input: 922_000, output: 128_000 },
-				canonical_model_id: "openai/gpt-5.6-terra",
-			},
-			"gpt-6-astra": { id: "gpt-6-astra", limit: { context: 1_050_000, output: 128_000 }, canonical_model_id: "openai/gpt-6-astra" },
+			"gpt-5.6-terra": { id: "gpt-5.6-terra", reasoning: true, limit: { context: 1_050_000, input: 922_000, output: 128_000 }, canonical_model_id: "openai/gpt-5.6-terra" },
+			"gpt-6-astra": rec(1_050_000, 128_000, "openai/gpt-6-astra"),
 		},
 	},
-	xpersona: {
-		id: "xpersona",
-		models: {
-			"gpt-5.6-terra": { id: "gpt-5.6-terra", limit: { context: 372_000, output: 128_000 }, canonical_model_id: "openai/gpt-5.6-terra" },
-		},
-	},
-	abacus: {
-		id: "abacus",
-		models: {
-			"gpt-5.6-terra": { id: "gpt-5.6-terra", limit: { context: 1_000_000, output: 128_000 }, canonical_model_id: "openai/gpt-5.6-terra" },
-		},
-	},
-	llmgateway: {
-		id: "llmgateway",
-		models: {
-			// No canonical id and a bogus output: must not outvote the owner.
-			"gpt-6-astra": { id: "gpt-6-astra", limit: { context: 1_050_000, output: 1_050_000 } },
-		},
-	},
-	poolside: {
-		id: "poolside",
-		models: {
-			// The owner keys it WITH its vendor prefix.
-			"poolside/laguna-s-2.1": {
-				id: "poolside/laguna-s-2.1",
-				limit: { context: 1_048_576, output: 32_768 },
-				canonical_model_id: "poolside/laguna-s-2.1",
-			},
-		},
-	},
+	xpersona: { models: { "gpt-5.6-terra": rec(372_000, 128_000, "openai/gpt-5.6-terra") } },
+	abacus: { models: { "gpt-5.6-terra": rec(1_000_000, 128_000, "openai/gpt-5.6-terra"), "gemini-3-pro-image-preview": rec(65_536, 32_768, "google/gemini-3-pro-image-preview") } },
+	// No canonical id and a bogus output: must not outvote the owner.
+	llmgateway: { models: { "gpt-6-astra": rec(1_050_000, 1_050_000) } },
+
+	// poolside keys its own model WITH the vendor prefix; resellers agree with
+	// each other on output and not with the owner.
+	poolside: { models: { "poolside/laguna-s-2.1": rec(1_048_576, 32_768, "poolside/laguna-s-2.1") } },
 	openrouter: {
-		id: "openrouter",
 		models: {
-			"poolside/laguna-s-2.1": { id: "poolside/laguna-s-2.1", limit: { context: 1_048_576, output: 131_072 } },
+			"poolside/laguna-s-2.1": rec(1_048_576, 131_072),
+			"x-ai/grok-4.20": rec(2_000_000, 1_800_000),
+			"google/gemini-3-pro-image-preview": rec(65_536, 32_768, "google/gemini-3-pro-image-preview"),
+			"nvidia/nemotron-3.5-content-safety": rec(131_072, 117_964, "nvidia/nemotron-3.5-content-safety"),
 		},
 	},
-	vercel: {
-		id: "vercel",
+	vercel: { models: { "poolside/laguna-s-2.1": rec(1_000_000, 131_072, "poolside/laguna-s-2.1") } },
+	kilo: {
 		models: {
-			"poolside/laguna-s-2.1": {
-				id: "poolside/laguna-s-2.1",
-				limit: { context: 1_000_000, output: 131_072 },
-				canonical_model_id: "poolside/laguna-s-2.1",
-			},
+			"poolside/laguna-s-2.1": rec(1_048_576, 131_072),
+			"x-ai/grok-4.20": rec(2_000_000, 1_800_000),
+			"google/gemini-3-pro-image-preview": rec(65_536, 32_768, "google/gemini-3-pro-image-preview"),
+			"nvidia/nemotron-3.5-content-safety": rec(131_072, 117_964, "nvidia/nemotron-3.5-content-safety"),
 		},
 	},
-	// deepseek-v4.1-flash: canonical owner "deepseek" is not in the catalog,
-	// and the resellers disagree.
+
+	// Three generic resellers for the "agreed" rule.
 	engy: {
-		id: "engy",
 		models: {
-			"deepseek-v4.1-flash": { id: "deepseek-v4.1-flash", limit: { context: 327_680, output: 65_536 }, canonical_model_id: "deepseek/deepseek-v4.1-flash" },
-			"same-everywhere": { id: "same-everywhere", limit: { context: 64_000, output: 8_000 } },
-			"half-agree": { id: "half-agree", limit: { context: 200_000, output: 8_000 } },
-			"two-owners": { id: "two-owners", limit: { context: 100_000, output: 4_000 }, canonical_model_id: "a/two-owners" },
-			// Only context here, only output at azure: must not be stitched.
-			stitched: { id: "stitched", limit: { context: 64_000 } },
-			// Both fields here, only context at azure: output is not unanimous.
-			"one-carries": { id: "one-carries", limit: { context: 64_000, output: 8_000 } },
-			// Listed only here, and engy is its canonical owner.
-			"lone-owner": { id: "lone-owner", limit: { context: 32_000, output: 4_000 }, canonical_model_id: "engy/lone-owner" },
+			"deepseek-v4.1-flash": rec(327_680, 65_536, "deepseek/deepseek-v4.1-flash"),
+			"same-everywhere": rec(64_000, 8_000),
+			"half-agree": rec(200_000, 8_000),
+			"only-two": rec(64_000, 8_000),
+			stitched: rec(64_000, undefined),
+			"one-carries": rec(64_000, 8_000),
+			"lone-owner": rec(32_000, 4_000, "engy/lone-owner"),
 			// The owner's own record claims more output than window.
-			inverted: { id: "inverted", limit: { context: 8_000, output: 16_000 }, canonical_model_id: "engy/inverted" },
+			inverted: rec(8_000, 16_000, "engy/inverted"),
+			contested: rec(100_000, 4_000, "engy/contested"),
 		},
 	},
 	azure: {
-		id: "azure",
 		models: {
-			"deepseek-v4.1-flash": { id: "deepseek-v4.1-flash", limit: { context: 1_000_000, output: 128_000 }, canonical_model_id: "deepseek/deepseek-v4.1-flash" },
-			"same-everywhere": { id: "same-everywhere", limit: { context: 64_000, output: 8_000 } },
-			"half-agree": { id: "half-agree", limit: { context: 200_000, output: 16_000 } },
-			"two-owners": { id: "two-owners", limit: { context: 200_000, output: 4_000 }, canonical_model_id: "b/two-owners" },
-			"no-limit": { id: "no-limit" },
-			stitched: { id: "stitched", limit: { output: 8_000 } },
-			"one-carries": { id: "one-carries", limit: { context: 64_000 } },
+			"gpt-5.6-terra": rec(1_050_000, 128_000, "openai/gpt-5.6-terra"),
+			"deepseek-v4.1-flash": rec(1_000_000, 128_000, "deepseek/deepseek-v4.1-flash"),
+			"same-everywhere": rec(64_000, 8_000),
+			"half-agree": rec(200_000, 16_000),
+			"only-two": rec(64_000, 8_000),
+			stitched: rec(undefined, 8_000),
+			"one-carries": rec(64_000, undefined),
+			"no-limit": {},
 			// Listed by one reseller only, no canonical id.
-			"lone-reseller": { id: "lone-reseller", limit: { context: 128_000, output: 16_000 } },
-			inverted: { id: "inverted", limit: { context: 8_000, output: 16_000 }, canonical_model_id: "engy/inverted" },
+			"lone-reseller": rec(128_000, 16_000),
+			inverted: rec(8_000, 16_000, "engy/inverted"),
+			contested: rec(200_000, 4_000, "azure/contested"),
 		},
 	},
-	"no-models": { id: "no-models" },
+	cortecs: {
+		models: {
+			"deepseek-v4.1-flash": rec(1_000_000, 384_000, "deepseek/deepseek-v4.1-flash"),
+			"same-everywhere": rec(64_000, 8_000),
+			"half-agree": rec(200_000, 8_000),
+			stitched: rec(64_000, 8_000),
+			"one-carries": rec(64_000, undefined),
+			contested: rec(100_000, 4_000),
+		},
+	},
 
-	// Round-two review: canonical labels that name ANOTHER id. Shaped on the
-	// real records (models.dev 2026-10-11); each owner record is a different
-	// model, so following the label silently read wrong limits.
+	// Labels that name ANOTHER model: the labelled owner exists in the catalog
+	// but not under this id, so it is never read.
 	nano: {
 		models: {
-			"x-ai/grok-4.20": { id: "x-ai/grok-4.20", limit: { context: 2_000_000, output: 131_072 } },
-			"gemini-img": { id: "gemini-img", limit: { context: 65_536, output: 32_768 }, canonical_model_id: "google/gemini-img" },
+			"x-ai/grok-4.20": rec(2_000_000, 131_072),
+			"gemini-3-pro-image-preview": rec(65_536, 32_768, "google/gemini-3-pro-image-preview"),
+			"nvidia/nemotron-3.5-content-safety": rec(131_072, 32_768, "nvidia/nemotron-3.5-content-safety"),
 		},
 	},
-	kilo: { models: { "x-ai/grok-4.20": { id: "x-ai/grok-4.20", limit: { context: 2_000_000, output: 1_800_000 } } } },
-	ofox: {
-		models: {
-			"x-ai/grok-4.20": { id: "x-ai/grok-4.20", limit: { context: 2_000_000, output: 128_000 }, canonical_model_id: "xai/grok-4.20-0309-reasoning" },
-			"gemini-img": { id: "gemini-img", limit: { context: 65_536, output: 32_768 }, canonical_model_id: "google/gemini-img" },
-		},
-	},
-	xai: { models: { "grok-4.20-0309-reasoning": { id: "grok-4.20-0309-reasoning", limit: { context: 1_000_000, output: 30_000 } } } },
-	deepinfra: {
-		models: {
-			"Qwen/Qwen3-Next-80B-A3B-Instruct": {
-				id: "Qwen/Qwen3-Next-80B-A3B-Instruct",
-				limit: { context: 262_144, output: 32_768 },
-				canonical_model_id: "alibaba/qwen3-next-80b-a3b-instruct",
-			},
-		},
-	},
-	huggingface: { models: { "Qwen/Qwen3-Next-80B-A3B-Instruct": { id: "Qwen/Qwen3-Next-80B-A3B-Instruct", limit: { context: 262_144, output: 66_536 } } } },
-	"io-net": { models: { "Qwen/Qwen3-Next-80B-A3B-Instruct": { id: "Qwen/Qwen3-Next-80B-A3B-Instruct", limit: { context: 262_144, output: 4_096 } } } },
-	alibaba: { models: { "qwen3-next-80b-a3b-instruct": { id: "qwen3-next-80b-a3b-instruct", limit: { context: 131_072, output: 32_768 } } } },
-	"umans-ai": { models: { "umans-kimi-k3": { id: "umans-kimi-k3", limit: { context: 1_048_576, output: 131_072 }, canonical_model_id: "moonshotai/kimi-k3" } } },
-	"umans-ai-coding-plan": { models: { "umans-kimi-k3": { id: "umans-kimi-k3", limit: { context: 1_048_576, output: 131_072 }, canonical_model_id: "moonshotai/kimi-k3" } } },
-	moonshotai: { models: { "kimi-k3": { id: "kimi-k3", limit: { context: 2_097_152, output: 1_048_576 } } } },
-	// The owner's own record disagrees with every reseller: the owner wins.
-	google: { models: { "gemini-img": { id: "gemini-img", limit: { context: 131_072, output: 32_768 }, canonical_model_id: "google/gemini-img" } } },
+	ofox: { models: { "x-ai/grok-4.20": rec(2_000_000, 128_000, "xai/grok-4.20-0309-reasoning") } },
+	xai: { models: { "grok-4.20-0309-reasoning": rec(1_000_000, 30_000) } },
+	deepinfra: { models: { "Qwen/Qwen3-Next-80B-A3B-Instruct": rec(262_144, 32_768, "alibaba/qwen3-next-80b-a3b-instruct") } },
+	huggingface: { models: { "Qwen/Qwen3-Next-80B-A3B-Instruct": rec(262_144, 66_536) } },
+	"io-net": { models: { "Qwen/Qwen3-Next-80B-A3B-Instruct": rec(262_144, 4_096) } },
+	alibaba: { models: { "qwen3-next-80b-a3b-instruct": rec(131_072, 32_768) } },
+	"umans-ai": { models: { "umans-kimi-k3": rec(1_048_576, 131_072, "moonshotai/kimi-k3") } },
+	"umans-ai-coding-plan": { models: { "umans-kimi-k3": rec(1_048_576, 131_072, "moonshotai/kimi-k3") } },
+	moonshotai: { models: { "kimi-k3": rec(2_097_152, 1_048_576) } },
+
+	// google/nvidia key their own model differently from the resellers'
+	// prefixed ids, so each owner is in the hit set of one spelling only.
+	google: { models: { "gemini-3-pro-image-preview": rec(131_072, 32_768, "google/gemini-3-pro-image-preview") } },
+	fastrouter: { models: { "google/gemini-3-pro-image-preview": rec(65_536, 32_768, "google/gemini-3-pro-image-preview") } },
+	edenai: { models: { "google/gemini-3-pro-image-preview": rec(65_536, 32_768, "google/gemini-3-pro-image-preview") } },
+	"302ai": { models: { "gemini-3-pro-image-preview": rec(32_768, 64_000) } },
+	nvidia: { models: { "nvidia/nemotron-3.5-content-safety": rec(128_000, 8_192, "nvidia/nemotron-3.5-content-safety") } },
+	vultr: { models: { "nemotron-3.5-content-safety": rec(131_072, 8_192, "nvidia/nemotron-3.5-content-safety") } },
+	requesty: { models: { "nemotron-3.5-content-safety": rec(131_072, 8_192, "nvidia/nemotron-3.5-content-safety") } },
+	"no-models": { id: "no-models" },
 };
 const API_TEXT = JSON.stringify(API);
 
@@ -180,44 +160,115 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	}
 }
 
-// --- matching: exact id, then endpoint / canonical owner / unanimous --------
+// --- matching: exact id, then endpoint / owner in the hit set / agreed -----
 {
+	// 2. owner: openai is in the hit set and its label names it.
 	const terra = match("gpt-5.6-terra");
-	assert.equal(terra.rule, "canonical");
+	assert.equal(terra.rule, "owner");
 	assert.equal(terra.record, "openai/gpt-5.6-terra");
-	assert.equal(terra.candidates, 3);
+	assert.equal(terra.candidates, 4);
 	assert.equal(terra.contextWindow, 1_050_000, "limit.context, not limit.input: pi's own catalogs do the same");
 	assert.equal(terra.maxTokens, 128_000);
+	assert.deepEqual(terra.warnings, [], "azure agrees with the owner, so nothing to say");
 
-	// Hits without a canonical id do not break the agreement of those with one.
+	// Hits without a canonical id do not stop the owner being found.
 	const astra = match("gpt-6-astra");
 	assert.equal(astra.record, "openai/gpt-6-astra");
 	assert.equal(astra.maxTokens, 128_000);
 
+	// The owner disagreeing with EVERY other hit on a field: still the owner's
+	// value, with a warning naming model, field and both numbers.
 	const laguna = match("poolside/laguna-s-2.1");
-	assert.equal(laguna.rule, "canonical");
-	assert.equal(laguna.record, "poolside/poolside/laguna-s-2.1", "an owner that keys the id with its prefix is still found");
+	assert.equal(laguna.rule, "owner");
+	assert.equal(laguna.record, "poolside/poolside/laguna-s-2.1");
+	assert.equal(laguna.contextWindow, 1_048_576);
 	assert.equal(laguna.maxTokens, 32_768);
+	assert.deepEqual(laguna.warnings.map((w) => w.field), ["maxTokens"], "context: some resellers agree with the owner, so no warning");
+	assert.equal(
+		laguna.warnings[0].text,
+		"poolside/laguna-s-2.1: maxTokens 32768 from owner poolside differs from every other models.dev provider (131072); using the owner's",
+	);
 
-	// A pi provider that IS a models.dev provider reads its own record.
+	// 1. endpoint: a pi provider that IS a models.dev provider reads its own record.
 	const viaRouter = match("poolside/laguna-s-2.1", "openrouter");
 	assert.equal(viaRouter.rule, "endpoint");
 	assert.equal(viaRouter.maxTokens, 131_072);
+	assert.deepEqual(viaRouter.warnings, []);
 
+	// 3. agreed: every hit carries the field with one value, three hits or more.
 	const same = match("same-everywhere");
-	assert.equal(same.rule, "unanimous");
+	assert.equal(same.rule, "agreed");
 	assert.equal(same.contextWindow, 64_000);
 	assert.equal(same.maxTokens, 8_000);
-
-	// Unanimity is per field: the agreed one is known, the other is not.
 	const half = match("half-agree");
-	assert.equal(half.contextWindow, 200_000);
-	assert.equal(half.maxTokens, undefined);
+	assert.equal(half.contextWindow, 200_000, "per field: the agreed one is known");
+	assert.equal(half.maxTokens, undefined, "the other is not");
+	const two = match("only-two");
+	assert.equal(two.candidates, 2);
+	assert.equal(two.contextWindow, undefined, "two resellers agreeing vouch for nothing");
+	assert.equal(two.maxTokens, undefined);
+	assert.match(two.reason, /only 2 models\.dev entries list/);
+	const stitched = match("stitched");
+	assert.equal(stitched.contextWindow, undefined, "a field one hit lacks is unknown: never stitched across records");
+	assert.equal(stitched.maxTokens, undefined);
+	const oneCarries = match("one-carries");
+	assert.equal(oneCarries.contextWindow, 64_000);
+	assert.equal(oneCarries.maxTokens, undefined, "a field only one hit carries is unknown");
+	// Two hits each the owner their own label names: no single owner.
+	const contested = match("contested");
+	assert.equal(contested.rule, "agreed");
+	assert.equal(contested.contextWindow, undefined);
+	assert.equal(contested.maxTokens, 4_000);
 
-	const twoOwners = match("two-owners");
-	assert.equal(twoOwners.rule, "unanimous", "two different canonical ids pick no owner");
-	assert.equal(twoOwners.contextWindow, undefined, "and their disagreeing context stays unknown");
-	assert.equal(twoOwners.maxTokens, 4_000);
+	// One provider only: kept when it is the endpoint or the owner, else unknown.
+	const lone = match("lone-reseller");
+	assert.equal(lone.candidates, 1);
+	assert.equal(lone.contextWindow, undefined);
+	assert.equal(lone.maxTokens, undefined);
+	assert.match(lone.reason, /only 1 models\.dev entry lists/);
+	const loneOwner = match("lone-owner");
+	assert.equal(loneOwner.rule, "owner");
+	assert.equal(loneOwner.contextWindow, 32_000);
+	assert.deepEqual(loneOwner.warnings, [], "nobody else to disagree with");
+	assert.equal(match("lone-reseller", "azure").maxTokens, 16_000, "the endpoint's own record");
+
+	// Labels naming ANOTHER model never read that model (rounds two and three).
+	const grok = match("x-ai/grok-4.20");
+	assert.equal(grok.rule, "agreed", "xai is labelled but not in the hit set");
+	assert.equal(grok.contextWindow, 2_000_000, "all four agree on 2M; xai's 1M belongs to another model");
+	assert.equal(grok.maxTokens, undefined, "and the outputs disagree");
+	const qwen = match("Qwen/Qwen3-Next-80B-A3B-Instruct");
+	assert.equal(qwen.contextWindow, 262_144, "not alibaba's 131072 for a differently named id");
+	assert.equal(qwen.maxTokens, undefined);
+	const kimi = match("umans-kimi-k3");
+	assert.equal(kimi.contextWindow, undefined, "two plan records, owner not in the set: not enough to vouch");
+	assert.equal(kimi.maxTokens, undefined, "and certainly not moonshotai's 1048576");
+
+	// gemini-3-pro-image-preview, both spellings. Under "google/..." google is
+	// NOT in the hit set (it keys the bare id): the four resellers agree.
+	const geminiPrefixed = match("google/gemini-3-pro-image-preview");
+	assert.equal(geminiPrefixed.rule, "agreed");
+	assert.equal(geminiPrefixed.contextWindow, 65_536, "not google's 131072 read from outside the hit set");
+	assert.equal(geminiPrefixed.maxTokens, 32_768);
+	// Under the bare id google IS in the hit set: the owner, and since every
+	// other hit says less, a warning.
+	const geminiBare = match("gemini-3-pro-image-preview");
+	assert.equal(geminiBare.rule, "owner");
+	assert.equal(geminiBare.contextWindow, 131_072);
+	assert.equal(geminiBare.maxTokens, 32_768);
+	assert.deepEqual(geminiBare.warnings.map((w) => w.text), [
+		"gemini-3-pro-image-preview: contextWindow 131072 from owner google differs from every other models.dev provider (32768/65536); using the owner's",
+	]);
+
+	// nemotron-3.5-content-safety: nvidia keys it prefixed.
+	const nemotron = match("nvidia/nemotron-3.5-content-safety");
+	assert.equal(nemotron.rule, "owner");
+	assert.equal(nemotron.contextWindow, 128_000);
+	assert.equal(nemotron.maxTokens, 8_192);
+	assert.deepEqual(nemotron.warnings.map((w) => w.field), ["contextWindow", "maxTokens"], "both fields differ from every reseller");
+	const nemotronBare = match("nemotron-3.5-content-safety");
+	assert.equal(nemotronBare.contextWindow, undefined, "two resellers, owner not in this hit set");
+	assert.equal(nemotronBare.maxTokens, undefined);
 
 	// The cases that must stay unknown rather than be guessed.
 	const deepseek = match("deepseek-v4.1-flash");
@@ -232,47 +283,9 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	}
 	assert.equal(match("no-limit").contextWindow, undefined, "a record with no limit gives none");
 
-	// Unanimous means every hit carries the field, with one value.
-	const stitched = match("stitched");
-	assert.equal(stitched.contextWindow, undefined, "context from one record and output from another is never stitched");
-	assert.equal(stitched.maxTokens, undefined);
-	const oneCarries = match("one-carries");
-	assert.equal(oneCarries.contextWindow, 64_000, "every hit carries the same context");
-	assert.equal(oneCarries.maxTokens, undefined, "a field only one hit carries is unknown");
-
-	// One provider only: its record counts only when it is provably the owner.
-	const lone = match("lone-reseller");
-	assert.equal(lone.candidates, 1);
-	assert.equal(lone.contextWindow, undefined, "one reseller's word, not the owner's: unknown");
-	assert.equal(lone.maxTokens, undefined);
-	assert.match(lone.reason, /only azure lists/);
-	const loneOwner = match("lone-owner");
-	assert.equal(loneOwner.rule, "canonical", "the single record IS its canonical owner: kept");
-	assert.equal(loneOwner.contextWindow, 32_000);
-	const loneEndpoint = match("lone-reseller", "azure");
-	assert.equal(loneEndpoint.rule, "endpoint", "and so is the endpoint's own record");
-	assert.equal(loneEndpoint.maxTokens, 16_000);
-
-	// A canonical label naming ANOTHER id is not followed (round-two review).
-	const grok = match("x-ai/grok-4.20");
-	assert.equal(grok.rule, "unanimous", "ofox's label points at a different xai model");
-	assert.equal(grok.contextWindow, 2_000_000, "every record agrees on 2M; xai's 1M belongs to another model");
-	assert.equal(grok.maxTokens, undefined, "and the outputs disagree");
-	const qwen = match("Qwen/Qwen3-Next-80B-A3B-Instruct");
-	assert.equal(qwen.contextWindow, 262_144, "not alibaba's 131072 for a differently named id");
-	assert.equal(qwen.maxTokens, undefined);
-	const kimi = match("umans-kimi-k3");
-	assert.equal(kimi.rule, "unanimous", "a plan alias labelled with its base model is not the base model");
-	assert.equal(kimi.contextWindow, 1_048_576);
-	assert.equal(kimi.maxTokens, 131_072, "not moonshotai's 1048576");
-	// A label that does name this id still makes the owner's record win.
-	const gemini = match("gemini-img");
-	assert.equal(gemini.rule, "canonical");
-	assert.equal(gemini.record, "google/gemini-img");
-	assert.equal(gemini.contextWindow, 131_072, "the owner's own record beats the resellers' 65536");
-
 	// No model outputs more than its window.
 	const inverted = match("inverted");
+	assert.equal(inverted.rule, "owner");
 	assert.equal(inverted.contextWindow, 8_000);
 	assert.equal(inverted.maxTokens, undefined, "maxTokens > contextWindow is unknown");
 	assert.match(inverted.dropped, /16000 > contextWindow 8000/);
@@ -344,11 +357,24 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 	assert.deepEqual(both.warnings, []);
 	assert.deepEqual(both.problems, []);
 	assert.equal(both.match, undefined);
-	// Two overrides that contradict each other are the user's to fix: kept,
-	// and reported (the sync path refuses them before writing).
+	// Two overrides that cannot both be true: the window stands, the maxTokens
+	// override is skipped and reported (sync refuses it before writing), and
+	// the seam never hands out maxTokens > contextWindow.
 	const clash = resolve("gpt-5.6-terra", { "gpt-5.6-terra": { contextWindow: 8_000, maxTokens: 16_000 } });
-	assert.deepEqual([clash.contextWindow, clash.maxTokens], [8_000, 16_000]);
+	assert.equal(clash.contextWindow, 8_000);
+	assert.equal(clash.maxTokens, undefined, "neither the bad override nor models.dev's 128000 fits an 8000 window");
+	assert.deepEqual(clash.fields, { contextWindow: "override", maxTokens: "unknown" });
 	assert.match(clash.problems.join(" "), /maxTokens \(16000\) exceeds its contextWindow \(8000\)/);
+	assert.match(clash.warnings.join(" "), /models\.dev maxTokens 128000 exceeds overridden contextWindow 8000/);
+	const clashNoDev = resolve("review", { review: { contextWindow: 1_000, maxTokens: 5_000 } });
+	assert.deepEqual([clashNoDev.contextWindow, clashNoDev.maxTokens], [1_000, undefined], "the reviewer's {1000, 5000}");
+
+	// Only the overrides object's own keys: "constructor" is not an override.
+	for (const id of ["constructor", "toString", "__proto__"]) {
+		const inherited = resolve(id, {});
+		assert.deepEqual(inherited.problems, [], `${id}: no phantom problem`);
+		assert.equal(inherited.source, "unknown");
+	}
 
 	// A bad override is skipped as before, but no longer silently.
 	const skipped = resolve("gpt-5.6-terra", { "gpt-5.6-terra": { contextWindow: -1, context: 5 } });
@@ -474,10 +500,44 @@ const match = (modelId, endpointId = "minnyat") => matchModelsDev(catalog, { end
 		"offline with no cache: unknown, not a default",
 	);
 
+	// The seam reports where its numbers came from, like the sync report does.
+	const fresh = await lookupModelLimits({ endpointId: "minnyat", modelId: "gpt-5.6-terra", fetchImpl: offline(), cacheDir });
+	assert.equal(fresh.origin, "cache");
+	assert.deepEqual(fresh.warnings, []);
+	const noCopy = await lookupModelLimits({ endpointId: "minnyat", modelId: "gpt-5.6-terra", fetchImpl: offline(), cacheDir: freshDir() });
+	assert.equal(noCopy.origin, "unavailable");
+	assert.match(noCopy.warnings[0], /^models\.dev unreachable and no cached copy \(fetch failed\)/);
+	const staleDir = freshDir();
+	await loadModelsDev({ fetchImpl: serving(), cacheDir: staleDir, now: Date.now() - 3 * DEFAULT_TTL_MS });
+	const stale = await lookupModelLimits({ endpointId: "minnyat", modelId: "gpt-5.6-terra", fetchImpl: offline(), cacheDir: staleDir });
+	assert.equal(stale.origin, "stale-cache");
+	assert.equal(stale.contextWindow, 1_050_000, "the old copy still answers");
+	assert.match(stale.warnings[0], /^models\.dev unreachable \(fetch failed\); using the cached copy from \S+ \(3d old\)$/);
+	const notNeeded = await lookupModelLimits({
+		endpointId: "minnyat",
+		modelId: "review",
+		overrides: { review: { contextWindow: 1_000, maxTokens: 500 } },
+		fetchImpl: offline(),
+		cacheDir: freshDir(),
+	});
+	assert.equal(notNeeded.origin, "not-needed");
+	// An impossible pair is not "fully overridden": it goes to the catalog,
+	// and the seam still never returns maxTokens > contextWindow.
+	const impossible = await lookupModelLimits({
+		endpointId: "minnyat",
+		modelId: "gpt-5.6-terra",
+		overrides: { "gpt-5.6-terra": { contextWindow: 1_000, maxTokens: 5_000 } },
+		fetchImpl: offline(),
+		cacheDir,
+	});
+	assert.deepEqual([impossible.contextWindow, impossible.maxTokens, impossible.origin], [1_000, undefined, "cache"]);
+	assert.equal(impossible.problems.length, 1);
+
 	// Every answer obeys the contract: a positive integer or absent.
 	for (const modelId of [
-		"gpt-5.6-terra", "half-agree", "two-owners", "review", "no-limit", "deepseek-v4.1-flash", "stitched", "one-carries",
-		"lone-reseller", "inverted", "x-ai/grok-4.20", "Qwen/Qwen3-Next-80B-A3B-Instruct", "umans-kimi-k3", "gemini-img",
+		"gpt-5.6-terra", "half-agree", "contested", "review", "no-limit", "deepseek-v4.1-flash", "stitched", "one-carries",
+		"lone-reseller", "inverted", "x-ai/grok-4.20", "Qwen/Qwen3-Next-80B-A3B-Instruct", "umans-kimi-k3",
+		"gemini-3-pro-image-preview", "google/gemini-3-pro-image-preview", "nvidia/nemotron-3.5-content-safety", "poolside/laguna-s-2.1",
 	]) {
 		const result = await lookupModelLimits({ endpointId: "minnyat", modelId, fetchImpl: offline(), cacheDir });
 		for (const field of ["contextWindow", "maxTokens"]) {

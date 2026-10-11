@@ -18,29 +18,24 @@
  *
  * Matching. The id an endpoint lists (`gpt-5.6-terra`, `poolside/laguna-s-2.1`,
  * `cx/gpt-6-astra`, `deepseek-v4.1-flash-free`, `review`) is looked up EXACTLY,
- * case included, against every models.dev provider. The same id is typically
- * listed by 10-40 providers with different limits, so a hit set is narrowed by,
- * in order:
+ * case included, as a model key under every models.dev provider. Those records
+ * are the hit set, and only they are ever read. The same id is typically
+ * listed by 10-40 providers with different limits, so it is narrowed by, in
+ * order:
  *
- *   1. endpoint: the pi provider name is itself a models.dev provider that
- *      lists the id — that provider's own record.
- *   2. canonical: every hit that names a `canonical_model_id` names the same
- *      one, that label names THIS id (its part after the owner equals the id,
- *      or the label is the id itself), and the owner (the label's first
- *      segment) lists it — the owner's record. This is how `gpt-5.6-terra`
- *      resolves to openai's 1050000/128000 instead of a reseller's 372000. A
- *      label naming some other id is ignored: resellers tag variants with
- *      their base model (`x-ai/grok-4.20` -> `xai/grok-4.20-0309-reasoning`),
- *      and following it reads another model's limits. When the owner's own
- *      record disagrees with every reseller (google lists its own
- *      gemini-3-pro-image-preview at 131072, resellers at 65536), the owner
- *      wins: that is what the rule is for.
- *   3. unanimous: per field, EVERY hit carries the field and all give the
- *      same value. A field only some hits carry is unknown, so the two limits
- *      can never be stitched together from different records. This needs at
- *      least two hits: an id only one provider lists, and that provider is
- *      neither the endpoint (1) nor the canonical owner (2), is one reseller's
- *      word and stays unknown.
+ *   1. endpoint: the hit whose provider is the pi provider name itself.
+ *   2. owner: the one hit whose provider is the owner named by the hits'
+ *      `canonical_model_id` labels (`owner/rest`). This is how
+ *      `gpt-5.6-terra` resolves to openai's 1050000/128000 instead of a
+ *      reseller's 372000. A label is only used to say who the owner is; the
+ *      owner's record must itself be in the hit set, so a label pointing at
+ *      some other model (`x-ai/grok-4.20` -> `xai/grok-4.20-0309-reasoning`)
+ *      never reads that model's limits. When the owner's value for a field
+ *      differs from EVERY other hit's, it is still used, with a warning that
+ *      names the model, the field, and both numbers.
+ *   3. agreed: per field, every hit carries it with one value, and there are
+ *      at least three hits. One or two resellers agreeing is not enough to
+ *      vouch for a model nobody else lists.
  *
  * Whichever rule matched, a maxTokens larger than the contextWindow it sits
  * beside cannot be right (no model outputs more than its window), so that
@@ -138,7 +133,6 @@ export function slimCatalog(raw) {
 			if (typeof model.canonical_model_id === "string" && model.canonical_model_id.includes("/")) {
 				entry.canonical = model.canonical_model_id;
 			}
-			if (typeof model.id === "string" && model.id !== key) entry.id = model.id;
 			slim[key] = entry;
 			count += 1;
 		}
@@ -219,17 +213,15 @@ export async function loadModelsDev(options = {}) {
 
 const indexes = new WeakMap();
 
-/** id → every record listing it, across providers. Built once per catalog. */
+/** model key → every record under that key, across providers. Built once per catalog. */
 function indexOf(catalog) {
 	let index = indexes.get(catalog);
 	if (index) return index;
 	index = new Map();
 	for (const [provider, models] of Object.entries(catalog)) {
 		for (const [key, record] of Object.entries(models ?? {})) {
-			for (const id of new Set([key, record?.id ?? key])) {
-				if (!index.has(id)) index.set(id, []);
-				index.get(id).push({ provider, key, ...record });
-			}
+			if (!index.has(key)) index.set(key, []);
+			index.get(key).push({ provider, key, ...record });
 		}
 	}
 	indexes.set(catalog, index);
@@ -254,56 +246,66 @@ function recordFrom(record, rule, candidates) {
 	});
 }
 
+// Rule 3 needs this many hits: one or two resellers agreeing vouch for nothing.
+export const MIN_AGREEING_HITS = 3;
+
 /** The value every hit gives for `field`, or undefined if any hit lacks it or differs. */
-function unanimous(hits, field) {
+function agreed(hits, field) {
+	if (hits.length < MIN_AGREEING_HITS) return undefined;
 	if (!hits.every((hit) => isPositiveInteger(hit[field]))) return undefined;
 	const values = new Set(hits.map((hit) => hit[field]));
 	return values.size === 1 ? [...values][0] : undefined;
 }
 
+const FIELDS = [["contextWindow", "context"], ["maxTokens", "output"]];
+
 /**
  * Apply the matching rules in the header to one id. Pure.
  *
- * @returns {{rule?: string, record?: string, candidates: number,
- *   contextWindow?: number, maxTokens?: number, reason?: string}}
+ * @returns {{rule?: "endpoint"|"owner"|"agreed", record?: string, candidates: number,
+ *   contextWindow?: number, maxTokens?: number, reason?: string, dropped?: string,
+ *   warnings: Array<{field: string, text: string}>}}
  */
 export function matchModelsDev(catalog, { endpointId, modelId }) {
-	if (!catalog) return { candidates: 0, reason: "models.dev catalog unavailable" };
+	if (!catalog) return { candidates: 0, reason: "models.dev catalog unavailable", warnings: [] };
 	const hits = indexOf(catalog).get(modelId) ?? [];
-	if (hits.length === 0) return { candidates: 0, reason: `models.dev lists no model with id "${modelId}"` };
+	if (hits.length === 0) return { candidates: 0, reason: `models.dev lists no model with id "${modelId}"`, warnings: [] };
 
 	const own = hits.find((hit) => hit.provider === endpointId);
-	if (own) return recordFrom(own, "endpoint", hits.length);
+	if (own) return { ...recordFrom(own, "endpoint", hits.length), warnings: [] };
 
-	const canonical = new Set(hits.map((hit) => hit.canonical).filter(Boolean));
-	if (canonical.size === 1) {
-		const id = [...canonical][0];
-		const owner = id.slice(0, id.indexOf("/"));
-		const rest = id.slice(owner.length + 1);
-		// The owner may key it bare (openai: "gpt-5.6-terra") or prefixed
-		// (poolside: "poolside/laguna-s-2.1").
-		const ownerModels = catalog[owner] ?? {};
-		const key = rest in ownerModels ? rest : id in ownerModels ? id : null;
-		// Only a label that names THIS id. Resellers label variants with their
-		// base model (x-ai/grok-4.20 -> xai/grok-4.20-0309-reasoning,
-		// umans-kimi-k3 -> moonshotai/kimi-k3); following such a label reads
-		// another model's limits.
-		const sameId = rest === modelId || id === modelId;
-		if (key !== null && sameId) return recordFrom({ provider: owner, key, ...ownerModels[key] }, "canonical", hits.length);
+	const owners = new Set(hits.map((hit) => hit.canonical?.split("/")[0]).filter(Boolean));
+	const ownerHits = hits.filter((hit) => owners.has(hit.provider));
+	if (ownerHits.length === 1) {
+		const [owner] = ownerHits;
+		const result = recordFrom(owner, "owner", hits.length);
+		const others = hits.filter((hit) => hit !== owner);
+		result.warnings = [];
+		for (const [field, key] of FIELDS) {
+			const value = result[field];
+			const theirs = others.map((hit) => hit[key]).filter(isPositiveInteger);
+			// Every other hit carries the field and none agrees with the owner.
+			if (value !== undefined && theirs.length > 0 && theirs.length === others.length && !theirs.includes(value)) {
+				const distinct = [...new Set(theirs)].sort((a, b) => a - b).join("/");
+				result.warnings.push({
+					field,
+					text: `${modelId}: ${field} ${value} from owner ${owner.provider} differs from every other models.dev provider (${distinct}); using the owner's`,
+				});
+			}
+		}
+		return result;
 	}
 
-	if (hits.length === 1) {
-		const [only] = hits;
-		return { candidates: 1, reason: `only ${only.provider} lists "${modelId}" and it is neither this endpoint nor the canonical owner` };
-	}
-	const contextWindow = unanimous(hits, "context");
-	const maxTokens = unanimous(hits, "output");
+	const contextWindow = agreed(hits, "context");
+	const maxTokens = agreed(hits, "output");
 	if (contextWindow === undefined && maxTokens === undefined) {
-		return { candidates: hits.length, reason: `${hits.length} models.dev entries for "${modelId}" disagree and none is the canonical owner` };
+		const why = hits.length < MIN_AGREEING_HITS
+			? `only ${hits.length} models.dev ${hits.length === 1 ? "entry lists" : "entries list"} "${modelId}", none of them this endpoint or the owner`
+			: `${hits.length} models.dev entries for "${modelId}" disagree and none is the owner`;
+		return { candidates: hits.length, reason: why, warnings: [] };
 	}
-	return saneLimits({ rule: "unanimous", candidates: hits.length, contextWindow, maxTokens });
+	return { ...saneLimits({ rule: "agreed", candidates: hits.length, contextWindow, maxTokens }), warnings: [] };
 }
-
 /**
  * Resolve both limits for one model: override, then models.dev, then unknown.
  *
@@ -317,8 +319,17 @@ export function matchModelsDev(catalog, { endpointId, modelId }) {
  * and `problems` (an override that was invalid and skipped) are always arrays.
  */
 export function resolveModelLimits(catalog, { endpointId, modelId, overrides }) {
-	const own = overrides && typeof overrides === "object" ? overrides[modelId] : undefined;
-	const override = own && typeof own === "object" ? own : {};
+	// Own keys only: "constructor" or "toString" is not an override.
+	const own = overrides && typeof overrides === "object" && Object.hasOwn(overrides, modelId) ? overrides[modelId] : undefined;
+	const override = own && typeof own === "object" && !Array.isArray(own) ? { ...own } : {};
+	// Two overrides that cannot both be true (maxTokens above the window):
+	// the window stands and the maxTokens override is skipped, like any other
+	// invalid value — reported in `problems`, and refused before any write by
+	// pi-models-sync's configProblems. maxTokens <= contextWindow holds at the
+	// seam exactly as in models.json.
+	if (isPositiveInteger(override.contextWindow) && isPositiveInteger(override.maxTokens) && override.maxTokens > override.contextWindow) {
+		delete override.maxTokens;
+	}
 	const need = ["contextWindow", "maxTokens"].filter((field) => !isPositiveInteger(override[field]));
 	const match = need.length === 0 ? null : matchModelsDev(catalog, { endpointId, modelId });
 
@@ -336,24 +347,26 @@ export function resolveModelLimits(catalog, { endpointId, modelId, overrides }) 
 	}
 	// An override and a models.dev value that no longer fit together: the
 	// override stands, the models.dev value becomes unknown, and it is said.
-	// (Two overrides that disagree are reported in `problems`, and stopped
-	// before any write by pi-models-sync's configProblems.)
-	result.warnings = [];
+	const conflicts = [];
 	if (isPositiveInteger(result.contextWindow) && isPositiveInteger(result.maxTokens) && result.maxTokens > result.contextWindow) {
 		if (result.fields.contextWindow === "models.dev" && result.fields.maxTokens === "override") {
-			result.warnings.push(
+			conflicts.push(
 				`${modelId}: overridden maxTokens ${result.maxTokens} exceeds models.dev contextWindow ${result.contextWindow}; contextWindow left unknown`,
 			);
 			delete result.contextWindow;
 			result.fields.contextWindow = "unknown";
 		} else if (result.fields.contextWindow === "override" && result.fields.maxTokens === "models.dev") {
-			result.warnings.push(
+			conflicts.push(
 				`${modelId}: models.dev maxTokens ${result.maxTokens} exceeds overridden contextWindow ${result.contextWindow}; maxTokens left unknown`,
 			);
 			delete result.maxTokens;
 			result.fields.maxTokens = "unknown";
 		}
 	}
+	// The match's own notes (an owner overruling every reseller) count only
+	// for fields that were actually written from it.
+	const notes = (match?.warnings ?? []).filter((note) => result.fields[note.field] === "models.dev").map((note) => note.text);
+	result.warnings = [...notes, ...conflicts];
 	// A bad override is skipped, never silently: the caller can show why.
 	result.problems = overrideProblems(modelId, own);
 	const origins = Object.values(result.fields);
@@ -363,18 +376,43 @@ export function resolveModelLimits(catalog, { endpointId, modelId, overrides }) 
 }
 
 /**
+ * One line about where the catalog came from, when the user should know:
+ * models.dev unreachable with no copy, or an old copy in use. Null otherwise.
+ */
+export function catalogNotice(loaded, now = Date.now()) {
+	if (loaded?.origin === "unavailable") {
+		return `models.dev unreachable and no cached copy (${loaded.error}); contextWindow/maxTokens stay unknown except per-model overrides, and pi uses its own defaults until ${MODELS_DEV_URL} can be reached`;
+	}
+	if (loaded?.origin === "stale-cache") {
+		const hours = Math.floor(Math.max(0, now - loaded.fetchedAt) / 3_600_000);
+		const age = hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+		return `models.dev unreachable (${loaded.error}); using the cached copy from ${new Date(loaded.fetchedAt).toISOString()} (${age} old)`;
+	}
+	return null;
+}
+
+/**
  * The seam other code builds against: `{ contextWindow, maxTokens, source }`,
- * each limit a positive integer or undefined (unknown).
+ * each limit a positive integer or undefined (unknown), and maxTokens never
+ * above contextWindow when both are present. Also: `origin` (where the
+ * catalog came from, as in loadModelsDev, or "not-needed" when both limits
+ * are overridden), `fields`, `match?`, and `warnings[]`/`problems[]` — the
+ * catalog notice (stale or unavailable) is the first warning, as in sync.
  *
  * Loads the catalog per call; a caller resolving many models should call
  * loadModelsDev once and resolveModelLimits per model, as pi-models-sync does.
  */
 export async function lookupModelLimits({ endpointId, modelId, overrides, fetchImpl, cacheDir } = {}) {
-	const own = overrides?.[modelId];
-	// Fully overridden: no reason to touch the network.
-	const covered = isPositiveInteger(own?.contextWindow) && isPositiveInteger(own?.maxTokens);
+	const own = overrides && typeof overrides === "object" && Object.hasOwn(overrides, modelId) ? overrides[modelId] : undefined;
+	// Fully and validly overridden: no reason to touch the network.
+	const covered =
+		isPositiveInteger(own?.contextWindow) && isPositiveInteger(own?.maxTokens) && own.maxTokens <= own.contextWindow;
 	const loaded = covered
-		? { catalog: null }
+		? { catalog: null, origin: "not-needed" }
 		: await loadModelsDev({ ...(fetchImpl ? { fetchImpl } : {}), ...(cacheDir ? { cacheDir } : {}) });
-	return resolveModelLimits(loaded.catalog, { endpointId, modelId, overrides });
+	const result = resolveModelLimits(loaded.catalog, { endpointId, modelId, overrides });
+	result.origin = loaded.origin;
+	const notice = catalogNotice(loaded);
+	if (notice) result.warnings.unshift(notice);
+	return result;
 }

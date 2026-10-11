@@ -36,7 +36,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { isPositiveInteger, loadModelsDev, MODELS_DEV_URL, OVERRIDE_KEYS, overrideProblems, resolveModelLimits } from "./models-dev.mjs";
+import { catalogNotice, isPositiveInteger, loadModelsDev, OVERRIDE_KEYS, overrideProblems, resolveModelLimits } from "./models-dev.mjs";
 
 // --- config ----------------------------------------------------------------
 
@@ -384,6 +384,11 @@ export async function syncProvider(options) {
 	if (ids.length === 0) {
 		return { ok: false, provider: entry.name, baseUrl, code: "ENDPOINT_LIST_EMPTY", message: `${baseUrl}/models returned no model` };
 	}
+	// An override for an id the endpoint does not list is almost always a
+	// typo (gpt-5.6-tera for gpt-5.6-terra); it must not quietly do nothing.
+	const listedIds = new Set(ids);
+	const unlistedOverrides =
+		entry.models && typeof entry.models === "object" ? Object.keys(entry.models).filter((id) => !listedIds.has(id)).sort() : [];
 
 	let probed = [];
 	let live = ids;
@@ -403,6 +408,7 @@ export async function syncProvider(options) {
 				message: "no model answered; this provider is left exactly as it was",
 				listed: ids.length,
 				probed,
+				unlistedOverrides,
 			};
 		}
 		if (keepAll) live = ids;
@@ -427,6 +433,7 @@ export async function syncProvider(options) {
 		probed,
 		models,
 		limitSources,
+		unlistedOverrides,
 	};
 }
 
@@ -450,8 +457,10 @@ export async function syncProvider(options) {
  *     },
  *     warnings: string[],             // one line each, also written via `warn`:
  *                                     // ignored endpoint-level keys, models.dev
- *                                     // unreachable / stale cache, and an override
- *                                     // that pushed a models.dev value to unknown
+ *                                     // unreachable / stale cache, an owner value
+ *                                     // every other provider contradicts, an
+ *                                     // override that pushed a models.dev value to
+ *                                     // unknown, an override for an unlisted id
  *     providers: [{
  *       ok, provider, baseUrl, listed?, written?, probed?, code?, message?,
  *       models?: [{
@@ -496,19 +505,12 @@ export async function syncModels(options) {
 
 	// Once per run: the catalog is megabytes, and every provider shares it.
 	const limitsCatalog = await loadModelsDev({ ...modelsDev, ...(dryRun ? { persist: false } : {}) });
-	if (limitsCatalog.origin === "unavailable") {
-		// The run still succeeds: absent limits are correct, just unhelpful.
-		const line = `pi-models: models.dev unreachable and no cached copy (${limitsCatalog.error}); contextWindow/maxTokens are left out except per-model overrides, so pi uses its own defaults until a sync can reach ${MODELS_DEV_URL}`;
-		warnings.push(line);
-		warn(line);
-	} else if (limitsCatalog.origin === "stale-cache") {
-		// Usable, but the user should know the numbers may be out of date.
-		const ageMs = Math.max(0, (modelsDev.now ?? Date.now()) - limitsCatalog.fetchedAt);
-		const hours = Math.floor(ageMs / 3_600_000);
-		const age = hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
-		const line = `pi-models: models.dev unreachable (${limitsCatalog.error}); using the cached copy from ${new Date(limitsCatalog.fetchedAt).toISOString()} (${age} old)`;
-		warnings.push(line);
-		warn(line);
+	// Unreachable with no copy, or an old copy in use: the run still succeeds
+	// (absent limits are correct, just unhelpful), and the user is told.
+	const notice = catalogNotice(limitsCatalog, modelsDev.now ?? Date.now());
+	if (notice) {
+		warnings.push(`pi-models: ${notice}`);
+		warn(`pi-models: ${notice}`);
 	}
 
 	const results = [];
@@ -541,6 +543,14 @@ export async function syncModels(options) {
 		);
 	}
 
+	for (const result of results) {
+		for (const id of result.unlistedOverrides ?? []) {
+			const line = `pi-models: ${result.provider}: override models.${id} matches no model the endpoint lists; it is not applied (check the id)`;
+			warnings.push(line);
+			warn(line);
+		}
+	}
+
 	const succeeded = results.filter((r) => r.ok);
 	const report = {
 		ok: succeeded.length === results.length,
@@ -553,7 +563,7 @@ export async function syncModels(options) {
 			...(limitsCatalog.cacheError ? { cacheError: limitsCatalog.cacheError } : {}),
 		},
 		warnings,
-		providers: results.map(({ models, limitSources, ...rest }) => ({
+		providers: results.map(({ models, limitSources, unlistedOverrides, ...rest }) => ({
 			...rest,
 			...(models
 				? {

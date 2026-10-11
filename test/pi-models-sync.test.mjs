@@ -389,13 +389,19 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 	assert.equal(devCalls.length, 1, "models.dev is fetched once per run, not once per model");
 	assert.equal(report.limits.origin, "network");
 
-	assert.equal(warned.length, 1, "exactly one warning line for the ignored endpoint-level keys");
-	assert.match(warned[0], /proxy\.contextWindow=200000/);
-	assert.match(warned[0], /proxy\.maxTokens=32000/);
-	assert.deepEqual(report.warnings, warned, "and the same line reaches the JSON report");
+	const legacyLines = warned.filter((line) => /endpoint-level/.test(line));
+	assert.equal(legacyLines.length, 1, "exactly one warning line for the ignored endpoint-level keys");
+	assert.match(legacyLines[0], /proxy\.contextWindow=200000/);
+	assert.match(legacyLines[0], /proxy\.maxTokens=32000/);
+	assert.deepEqual(report.warnings, warned, "every line printed reaches the JSON report too");
+	// The fixture's only other gpt-5.6-terra record (xpersona, 372000) disagrees
+	// with the owner: the owner's number is used, and that is said.
+	assert.deepEqual(warned.filter((line) => !/endpoint-level/.test(line)), [
+		"pi-models: proxy/gpt-5.6-terra: contextWindow 1050000 from owner openai differs from every other models.dev provider (372000); using the owner's",
+	]);
 
 	const byId = Object.fromEntries(JSON.parse(readFileSync(modelsPath, "utf8")).providers.proxy.models.map((m) => [m.id, m]));
-	assert.equal(byId["gpt-5.6-terra"].contextWindow, 1_050_000, "models.dev's canonical owner, not the endpoint's 200000");
+	assert.equal(byId["gpt-5.6-terra"].contextWindow, 1_050_000, "the owner openai on models.dev, not the endpoint's 200000");
 	assert.equal(byId["gpt-5.6-terra"].maxTokens, 128_000);
 	assert.equal(byId["gpt-5.6-terra"].reasoning, false, "reasoning comes from the probe, never from models.dev");
 	assert.equal(byId["gpt-5.6-terra"].thinkingLevelMap, undefined);
@@ -443,8 +449,31 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 		dryRun: true,
 		warn: (line) => silent.push(line),
 	});
-	assert.deepEqual(silent, []);
-	assert.deepEqual(cleanRun.warnings, []);
+	assert.deepEqual(silent.filter((line) => /endpoint-level/.test(line)), []);
+	assert.deepEqual(cleanRun.warnings, silent);
+
+	// An override for an id the endpoint does not list is a typo until proven
+	// otherwise: one line per such id, and the run goes on.
+	{
+		const lines = [];
+		const typo = await syncModels({
+			entries: [{ ...clean, models: { "gpt-5.6-tera": { contextWindow: 400_000 }, "cx/gpt-6-astra": { contextWindow: 400_000 }, ghost: { maxTokens: 1_000 } } }],
+			keys: new Map([["proxy", "sk"]]),
+			modelsPath: join(sandbox, "typo-models.json"),
+			fetchImpl: endpointFetch,
+			modelsDev,
+			dryRun: true,
+			warn: (line) => lines.push(line),
+		});
+		assert.equal(typo.ok, true);
+		const unlisted = lines.filter((line) => /matches no model/.test(line));
+		assert.deepEqual(unlisted, [
+			"pi-models: proxy: override models.ghost matches no model the endpoint lists; it is not applied (check the id)",
+			"pi-models: proxy: override models.gpt-5.6-tera matches no model the endpoint lists; it is not applied (check the id)",
+		]);
+		assert.equal(typo.providers[0].models.find((m) => m.id === "gpt-5.6-terra").contextWindow, 1_050_000, "the typo changes nothing");
+		assert.equal("unlistedOverrides" in typo.providers[0], false, "internal bookkeeping stays out of the report");
+	}
 
 	// models.dev unreachable and never cached: the run still succeeds, overrides
 	// still apply, and the report says why every other limit is missing.
