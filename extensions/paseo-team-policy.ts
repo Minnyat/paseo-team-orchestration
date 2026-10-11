@@ -31,7 +31,8 @@
  *
  * Prompts are resolved from $PASEO_TEAM_PROMPTS_DIR or, by default, from a
  * `prompts/` directory next to this file (the installer copies them there).
- * Extra per-profile tools can be added via $PASEO_TEAM_EXTRA_TOOLS="a,b".
+ * Catalogued, role-compatible extras can be enabled via
+ * $PASEO_TEAM_EXTRA_TOOLS="WebFetch,WebSearch". Unknown entries are dropped.
  * Lead gets write/edit tools only when $PASEO_TEAM_LEAD_WRITE=1 (documented
  * opt-in; orchestration work does not need them).
  */
@@ -546,7 +547,7 @@ function applyPolicy(pi: ExtensionAPI, r: TeamRole): Policy {
 			? [...registered].filter(isBrowserMcpTarget)
 			: [];
 	const allowed = [
-		...new Set([...policy.allow, ...browserTools, ...extraTools()]),
+		...new Set([...policy.allow, ...browserTools, ...extraTools(r, "pi")]),
 	].filter((name) => registered.has(name));
 	pi.setActiveTools(allowed);
 	return policy;

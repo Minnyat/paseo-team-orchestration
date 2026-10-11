@@ -292,3 +292,21 @@ console.log("[paseo-team] config-schema tests passed");
 		base.groups.flatMap((g) => g.fields).filter((f) => !["defaultProvider", "defaultModel"].includes(f.path)),
 	);
 }
+
+// --- pi-models: context limits are optional, never a stamped default ---------
+// An absent contextWindow/maxTokens means "unknown — look it up per model".
+// A seed or a `default:` here would put one number on every model behind the
+// endpoint (the old 200000/32000), which is exactly what the sync must not do.
+{
+	const providers = CONFIG_SCHEMAS["pi-models"].groups
+		.flatMap((group) => group.fields)
+		.find((field) => field.path === "providers");
+	for (const path of ["contextWindow", "maxTokens"]) {
+		assert.ok(!(path in providers.item.seed), `a new endpoint card must not seed ${path}`);
+		const field = providers.item.fields.find((f) => f.path === path);
+		assert.ok(field, `the ${path} field still exists`);
+		assert.equal(field.type, "number");
+		assert.equal(field.default, undefined, `${path} has no default: blank means unknown`);
+		assert.match(field.hint, /models\.dev/, `${path} says where a blank value comes from`);
+	}
+}

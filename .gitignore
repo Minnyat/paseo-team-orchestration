@@ -12,6 +12,44 @@ node_modules/
 *.local.json
 auth.json
 
+# More credential-bearing names the pack reads or writes (provider key files
+# such as pi-provider.env, models.json, kubeconfig-style dotfiles) and the
+# leftovers of its own writes: every config rewrite keeps a plaintext
+# <name>.bak-<epoch> beside the original, and a crash can leave a *.tmp-* sibling.
+# Neither is covered by the *.local.json / auth.json rules above (a backup of
+# an ignored file has a different name). Same purpose as above: a guard against
+# an accidental `git add .` in a directory where one was dropped, not a place
+# to keep them.
+.env
+.env.*
+!.env.example
+*.env
+*.bak
+*.bak-*
+*.tmp-*
+models.json
+secrets.*
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.npmrc
+.netrc
+# Audit trail of permit decisions (carries the OS username) and Claude session state.
+permit-audit.jsonl
+claude-sessions/
+# Shipped examples follow <name>.example.<ext> (config/pi-models.example.json); the
+# *.env and secrets.* rules above would swallow the same convention. These must
+# stay AFTER them: a negation only re-includes what an earlier pattern ignored.
+!*.example.env
+!*.env.example
+!.env.sample
+!.env.template
+!secrets.example.*
+
 # Per-session scratch written by the coding agents that work in this repo:
 # `.zcode/plans/` holds one plan file per session, `.claude/worktrees/` holds
 # throwaway worktrees. Both are machine- and session-local, and neither is

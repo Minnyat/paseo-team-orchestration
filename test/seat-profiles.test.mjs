@@ -23,7 +23,7 @@ import {
 	validateSeats,
 } from "../scripts/seat-profiles.mjs";
 import { ROLE_PROVIDERS, TEAM_ROLES } from "../scripts/model-routing.mjs";
-import { parseRoleProvider, leadCreateSupervisorArgsBlockReason } from "../extensions/paseo-team-core/policy-core.js";
+import { EXTRA_TOOL_CATALOG, parseRoleProvider, leadCreateSupervisorArgsBlockReason } from "../extensions/paseo-team-core/policy-core.js";
 
 // --- the catalog is the allowlist ------------------------------------------
 // Every capability must name real roles and a real family, or the UI would
@@ -39,6 +39,12 @@ for (const capability of SEAT_CAPABILITIES) {
 		capability.tools.length > 0 || Object.keys(capability.env).length > 0,
 		`${capability.id} grants nothing at all`,
 	);
+	for (const tool of capability.tools) {
+		const coreCapability = EXTRA_TOOL_CATALOG[tool];
+		assert.ok(coreCapability, `${capability.id} references catalogued extra ${tool}`);
+		assert.ok(capability.roles.every((role) => coreCapability.roles.includes(role)), `${capability.id} only offers ${tool} to policy-supported roles`);
+		assert.ok(capability.families.every((family) => coreCapability.families.includes(family)), `${capability.id} only offers ${tool} to policy-supported runtime families`);
+	}
 }
 
 // A capability is offered for exactly the base providers whose role AND family

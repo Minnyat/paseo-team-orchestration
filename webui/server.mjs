@@ -8,11 +8,15 @@
  * "just" compute something here, it belongs in the CLI — that is what makes
  * the UI reproducible from a terminal.
  *
- * Two things it *is* allowed to do, because neither invents data:
- *   - cache a CLI response verbatim for a few seconds (see CACHEABLE), and
- *   - collapse concurrent identical requests into one spawn (single-flight).
- * Both exist because one paseo round trip costs ~3s; without them, three open
- * browser tabs would triple the load on the daemon for identical answers.
+ * Three things it *is* allowed to do, because none invents data:
+ *   - cache a CLI response verbatim for a few seconds (see CACHEABLE),
+ *   - collapse concurrent identical requests into one spawn (single-flight), and
+ *   - refuse a request that is malformed before it becomes argv — including a
+ *     routing/cluster document the resolver's own validator rejects (see
+ *     CONFIG_VALIDATORS). That checks the posted body only; no file is read.
+ * The first two exist because one paseo round trip costs ~3s; without them,
+ * three open browser tabs would triple the load on the daemon for identical
+ * answers.
  *
  * Security posture — this UI can approve permission requests and rewrite
  * config, so it is treated as privileged even on localhost:
@@ -31,6 +35,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join, dirname, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateClusterConfig, validateRoutingConfig } from "../scripts/model-routing.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -69,6 +74,35 @@ function match(value, pattern, label) {
 		throw new RouteError(400, "PARAM_INVALID", `${label} is missing or malformed`);
 	}
 	return value;
+}
+
+/**
+ * Sections whose file the route gate reads on every seat. A document that fails
+ * these validators does not just misconfigure one class: the gate refuses EVERY
+ * create_agent until the file is fixed. The form could save exactly that (a
+ * runtime switched to pi with a claude model left behind), so the write is
+ * refused here, with the validator's own sentence, before the file is touched.
+ * Same functions `pteam routing check` and the resolver use — one rule, not two.
+ */
+export const CONFIG_VALIDATORS = {
+	routing: validateRoutingConfig,
+	cluster: validateClusterConfig,
+};
+
+function validateConfigBody(section, raw) {
+	const validate = CONFIG_VALIDATORS[section];
+	if (!validate) return;
+	let doc;
+	try {
+		doc = JSON.parse(raw);
+	} catch (error) {
+		throw new RouteError(400, "CONFIG_INVALID", `${section} config is not valid JSON: ${error.message}`);
+	}
+	try {
+		validate(doc);
+	} catch (error) {
+		throw new RouteError(400, "CONFIG_INVALID", String(error?.message ?? error));
+	}
 }
 
 /**
@@ -155,17 +189,21 @@ export const ROUTES = {
 		tag: "config",
 	},
 	"POST /api/config": {
-		build: (q, body, raw) => ({
-			args: [
-				"config",
-				"write",
-				pick(q.section, CONFIG_SECTIONS, "section"),
-				// Optional: the fingerprint `config read` returned. Present, the CLI
-				// refuses to overwrite a file that changed since it was read.
-				...(q.rev === undefined ? [] : ["--rev", match(q.rev, CONFIG_REV, "rev")]),
-			],
-			stdin: raw,
-		}),
+		build: (q, body, raw) => {
+			const section = pick(q.section, CONFIG_SECTIONS, "section");
+			validateConfigBody(section, raw);
+			return {
+				args: [
+					"config",
+					"write",
+					section,
+					// Optional: the fingerprint `config read` returned. Present, the CLI
+					// refuses to overwrite a file that changed since it was read.
+					...(q.rev === undefined ? [] : ["--rev", match(q.rev, CONFIG_REV, "rev")]),
+				],
+				stdin: raw,
+			};
+		},
 		invalidates: ["config", "env", "status", "preflight", "seats"],
 	},
 	"GET /api/prompts": {
@@ -258,6 +296,11 @@ export function runCli(args, stdin = null, options = {}) {
 				stderr: Buffer.concat(errChunks).toString("utf8"),
 			});
 		});
+		// The child may exit without reading stdin (it rejected its arguments
+		// first). A body bigger than the pipe buffer then fails with EPIPE, and an
+		// 'error' event nobody listens for is an uncaught exception that ends the
+		// whole server. The exit code already says what happened.
+		child.stdin.on("error", () => {});
 		if (stdin !== null) child.stdin.end(stdin, "utf8");
 		else child.stdin.end();
 	});
@@ -470,14 +513,23 @@ export async function startServer(options = {}) {
 	// check must compare against the port actually bound, not the request.
 	let boundPort = port;
 
-	const server = createServer(async (req, res) => {
-		const url = new URL(req.url ?? "/", `http://127.0.0.1:${boundPort}`);
-		const query = Object.fromEntries(url.searchParams.entries());
+	const handleRequest = async (req, res) => {
 		try {
 			if (!isAllowedHost(req, boundPort)) {
 				sendJson(res, 403, { ok: false, code: "HOST_NOT_ALLOWED", message: "this server only answers to localhost" });
 				return;
 			}
+			// A target such as "//" is not a URL against this base and URL() throws
+			// on it. Parsed outside this try it escaped as an unhandled rejection
+			// that took the whole process down, before any Host or token check, so
+			// a single request from any local process or web page could kill the UI.
+			let url;
+			try {
+				url = new URL(req.url ?? "/", `http://127.0.0.1:${boundPort}`);
+			} catch {
+				throw new RouteError(400, "BAD_REQUEST_TARGET", "malformed request target");
+			}
+			const query = Object.fromEntries(url.searchParams.entries());
 			if (url.pathname === "/favicon.ico") {
 				// Browsers ask for it unprompted; a 404 here showed up as a console
 				// error on every page load and looked like something being broken.
@@ -569,6 +621,22 @@ export async function startServer(options = {}) {
 				message: String(error?.message ?? error),
 			});
 		}
+	};
+	const server = createServer((req, res) => {
+		// Last line of defence: the handler answers its own errors, but anything
+		// that still escapes it (a throw while writing the error response, say)
+		// must end this one request, never the process.
+		handleRequest(req, res).catch(() => {
+			if (res.headersSent) {
+				res.destroy();
+				return;
+			}
+			try {
+				sendJson(res, 500, { ok: false, code: "SERVER_ERROR", message: "internal error" });
+			} catch {
+				res.destroy();
+			}
+		});
 	});
 
 	// A busy port must degrade to a notice, not a stack trace. Without an
@@ -617,7 +685,9 @@ export async function startServer(options = {}) {
 	}
 	if (options.open) {
 		const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
-		spawn(opener[0], opener[1], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+		// A missing opener (no xdg-open on a headless host) is an 'error' event; with
+		// no listener it would end the process. The URL is printed above anyway.
+		spawn(opener[0], opener[1], { detached: true, stdio: "ignore", windowsHide: true }).on("error", () => {}).unref();
 	}
 	return { server, port: boundPort, token, url, close: () => new Promise((resolve) => server.close(resolve)) };
 }

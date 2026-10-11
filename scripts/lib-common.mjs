@@ -10,8 +10,8 @@
 // Nothing in here may import another support script: it sits at the bottom of
 // the dependency graph on purpose.
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { delimiter, dirname, join, sep } from "node:path";
+import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -168,9 +168,14 @@ export const PASEO_CONVENTIONAL_ENTRIES = [
  *
  * The path is derived from wherever `paseo` actually lives (`<root>/bin/paseo`
  * -> `<root>/dist/utils/client.js`) rather than hard-coded: npm -g, mise, nvm
- * and Homebrew each put it somewhere different, and a checkout puts it under
- * node_modules. PASEO_TEAM_PASEO_CLIENT overrides everything, which is also
- * how the tests substitute a fake daemon.
+ * and Homebrew each put it somewhere different. PASEO_TEAM_PASEO_CLIENT
+ * overrides everything, which is also how the tests substitute a fake daemon.
+ *
+ * The result is `import()`ed, so it is code that runs with the user's rights.
+ * It is therefore never looked up relative to the current directory: a tool
+ * that is run inside third-party checkouts must not execute a file those
+ * checkouts planted under node_modules/. A layout this resolver does not
+ * recognise is a configuration fault, and the override is the way out.
  *
  * @param {(reason: string, tried: string[]) => never} [onMissing]
  * @returns {string} a file:// URL ready for dynamic import
@@ -181,7 +186,11 @@ export function resolvePaseoClientModule(onMissing) {
 		return override.startsWith("file:") ? override : pathToFileURL(override).href;
 	}
 	const tried = [];
-	const bin = findOnPath(["paseo", "paseo.exe", "paseo.cmd", "paseo.bat"]);
+	const found = findOnPath(["paseo", "paseo.exe", "paseo.cmd", "paseo.bat"]);
+	// A relative PATH entry ("." or "node_modules/.bin") is resolved against the
+	// current directory, so a `paseo` found through one would put the SDK path
+	// back under the cwd. Only an absolute location is trusted for the layout walk.
+	const bin = found && isAbsolute(found) ? found : undefined;
 	if (bin) {
 		// realpath first: ~/.local/bin/paseo is usually a symlink into the
 		// package, and the relative layout only holds at the real location.
@@ -204,7 +213,7 @@ export function resolvePaseoClientModule(onMissing) {
 		if (existsSync(candidate)) return pathToFileURL(candidate).href;
 	}
 	for (const segments of PASEO_CLIENT_CONVENTIONAL_ENTRIES) {
-		const candidate = join(process.cwd(), ...segments);
+		const candidate = join(PACK_ROOT, ...segments);
 		tried.push(candidate);
 		if (existsSync(candidate)) return pathToFileURL(candidate).href;
 	}
@@ -215,7 +224,11 @@ export function resolvePaseoClientModule(onMissing) {
 	throw new Error(`${reason} (tried: ${tried.join(", ") || "nothing"})`);
 }
 
-// Checkout layout, for a repo that has @getpaseo/cli as a dependency.
+// This pack's own checkout, for a developer who installed @getpaseo/cli as a
+// dependency of the pack itself. Resolved from where this file lives, never
+// from process.cwd(): the pack's install dir is as trusted as the pack's code,
+// the directory the user happens to be standing in is not.
+const PACK_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 export const PASEO_CLIENT_CONVENTIONAL_ENTRIES = [
 	["node_modules", "@getpaseo", "cli", "dist", "utils", "client.js"],
 ];
@@ -421,4 +434,61 @@ export function policyCorePath(name, env = process.env, here = dirname(fileURLTo
 /** Import a policy-core module by name, from whichever layout is installed. */
 export function importPolicyCore(name = "policy-core.ts", env = process.env) {
 	return import(pathToFileURL(policyCorePath(name, env)).href);
+}
+
+// --- writing files that may hold credentials --------------------------------
+// Config files this pack rewrites (~/.claude.json, ~/.paseo/config.json,
+// provider env blocks, MCP server tokens) are the user's own and are often
+// 0600. A write that goes through a temp sibling and a rename produces a NEW
+// inode, so it gets the process umask instead: a locked-down 0600 file came
+// back 0644, readable by every other account on the host.
+
+/** Mode for a credential-bearing file this pack creates (owner read/write only). */
+export const PRIVATE_FILE_MODE = 0o600;
+/** Mode for a directory this pack creates to hold such files. */
+export const PRIVATE_DIR_MODE = 0o700;
+// What chmod answers on a filesystem that has no permission bits to set.
+const CHMOD_UNSUPPORTED = new Set(["EPERM", "ENOTSUP", "ENOSYS", "EINVAL"]);
+
+/**
+ * Write `content` to `absPath` through a temp sibling and a rename, so a reader
+ * never sees a half-written file, and keep the destination's permission bits:
+ * an existing file keeps whatever mode its owner gave it, a new one starts
+ * private. The temp file is created exclusively (O_EXCL) with that mode from
+ * the first byte, so there is no window where the content is more readable
+ * than the final file, and a pre-planted file or symlink at the predictable
+ * temp name is refused instead of followed. The temp file is removed on failure.
+ *
+ * The parent directory must already exist.
+ *
+ * @param {string} absPath
+ * @param {string} content
+ */
+export function writeFileAtomic(absPath, content) {
+	let mode = PRIVATE_FILE_MODE;
+	try {
+		mode = statSync(absPath).mode & 0o777;
+	} catch {
+		/* no file yet: it starts private */
+	}
+	const temp = `${absPath}.tmp-${process.pid}-${Date.now()}`;
+	try {
+		writeFileSync(temp, content, { encoding: "utf8", mode, flag: "wx" });
+		// The mode above is filtered through the umask; set the exact bits. Windows
+		// has no POSIX modes (chmod there only toggles read-only), so leave it. A
+		// filesystem that cannot hold modes (vfat/exFAT, some FUSE and SMB mounts)
+		// refuses the chmod; its files carry no permission bits to preserve, and the
+		// write worked there before, so that refusal must not fail the write.
+		if (process.platform !== "win32") {
+			try {
+				chmodSync(temp, mode);
+			} catch (error) {
+				if (!CHMOD_UNSUPPORTED.has(error?.code)) throw error;
+			}
+		}
+		renameSync(temp, absPath);
+	} catch (error) {
+		rmSync(temp, { force: true });
+		throw error;
+	}
 }
