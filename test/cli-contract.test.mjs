@@ -308,7 +308,7 @@ try {
 
 	// --- every section carries the form schema the WebUI renders -------------
 	{
-		for (const section of ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings"]) {
+		for (const section of ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings", "jobs"]) {
 			const read = run(["config", "read", section]);
 			assert.equal(read.status, 0, `${section}: ${read.stderr}`);
 			assert.ok(Array.isArray(read.json.schema?.groups), `${section} read carries a form schema`);
@@ -835,6 +835,170 @@ try {
 		assert.ok(untouched.agents.providers["pi-lead-audit"], "a refused apply leaves the previous providers alone");
 
 		assert.equal(run(["seats", "nonsense"]).status, 2, "an unknown seats subcommand is a usage error");
+	}
+
+	// --- jobs: a validated config section and a read-only view for the Lead ---
+	{
+		// Its own config dir: the routing block above leaves a deliberately
+		// incomplete route file in the shared one.
+		const teamDir = join(sandbox, "team-jobs");
+		const env = { PST_TEAM_CONFIG_DIR: teamDir };
+		const jobsFile = join(teamDir, "jobs.local.json");
+
+		const none = run(["jobs", "list"], env);
+		assert.equal(none.status, 0, none.stderr);
+		assert.equal(none.json.exists, false, "no file yet is 'no jobs', not an error");
+		assert.deepEqual(none.json.jobs, []);
+		assert.equal(none.json.path, jobsFile, "the jobs file honours PST_TEAM_CONFIG_DIR");
+		assert.match(none.json.hint, /jobs\.example\.json/);
+		const SHAPE = ["cliTools", "exists", "hint", "jobs", "ok", "path", "routeSource"];
+		assert.deepEqual(Object.keys(none.json).sort(), SHAPE, "the same keys with or without a file");
+		assert.equal(none.json.routeSource.ok, false);
+		assert.equal(none.json.routeSource.hostId, null);
+
+		const empty = run(["config", "read", "jobs", "--no-discovery"], env);
+		assert.equal(empty.status, 0, empty.stderr);
+		assert.equal(empty.json.path, jobsFile);
+		assert.equal(empty.json.schema.label, "Công việc", "the section ships its form schema");
+		const discovered = run(["config", "read", "jobs"], env);
+		assert.ok(discovered.json.inventory, "a jobs read carries the model inventory its route executors pick from");
+
+		// A refused write names the job and executor, and leaves the disk alone.
+		const bad = {
+			version: 1,
+			jobs: { review: { executors: [{ kind: "class", modelClass: "REVIEW_HIGH" }, { kind: "cli", tool: "gemini" }] } },
+		};
+		const refused = run(["config", "write", "jobs"], { ...env, __stdin: JSON.stringify(bad) });
+		assert.equal(refused.status, 1, refused.stderr);
+		assert.match(refused.stderr, /CONFIG_INVALID: job "review" executor \[1\]: tool "gemini"/);
+		assert.ok(!existsSync(jobsFile), "nothing is written when the document is refused");
+		const dotted = run(["config", "write", "jobs"], {
+			...env,
+			__stdin: JSON.stringify({ version: 1, jobs: { "a.b": { executors: [{ kind: "cli", tool: "pi" }] } } }),
+		});
+		assert.equal(dotted.status, 1);
+		assert.match(dotted.stderr, /job "a\.b"/);
+		// "__proto__" survives JSON.parse as a key but not a later `out[key] =`
+		// copy, so the job would vanish on the next save: refused at the door.
+		const proto = run(["config", "write", "jobs"], {
+			...env,
+			__stdin: '{"version":1,"jobs":{"__proto__":{"executors":[{"kind":"cli","tool":"pi"}]},"b":{"executors":[{"kind":"cli","tool":"pi"}]}}}',
+		});
+		assert.equal(proto.status, 1, proto.stderr);
+		assert.match(proto.stderr, /job "__proto__": id "__proto__" is reserved/);
+		const notJson = run(["config", "write", "jobs"], { ...env, __stdin: "{nope" });
+		assert.equal(notJson.status, 1);
+		assert.match(notJson.stderr, /CONFIG_INVALID/);
+		assert.ok(!existsSync(jobsFile));
+
+		// The route a class executor stands for comes from the route file the gate reads.
+		mkdirSync(teamDir, { recursive: true });
+		const route = (paseoProvider, model, thinking) => ({ paseoProvider, model, thinking });
+		writeFileSync(join(teamDir, "model-routing.local.json"), JSON.stringify({
+			version: 1,
+			hostId: "jobs-box",
+			routes: {
+				MONITOR_ECONOMY: route("pi-supervisor", "Minnyat/small", "low"),
+				FAST_READ: route("pi-peer", "Minnyat/fast", "low"),
+				CODING_MEDIUM: route("pi-peer", "Minnyat/gpt-5.5", "medium"),
+				REASONING_HIGH: route("pi-peer", "Minnyat/deep", "high"),
+				REVIEW_HIGH: route("claude-peer", "claude-opus-5", "high"),
+			},
+		}));
+		const good = {
+			version: 1,
+			cliTools: { codex: { command: "codex", args: ["exec"] } },
+			jobs: {
+				review: {
+					label: "Review",
+					run: "sequential",
+					executors: [
+						{ kind: "class", modelClass: "REVIEW_HIGH" },
+						{ kind: "route", paseoProvider: "pi-peer", model: "Minnyat/gpt-5.5" },
+						{ kind: "cli", tool: "codex", args: ["--full-auto"] },
+					],
+				},
+				build: { executors: [{ kind: "class", modelClass: "LEAD_RECOVERY" }] },
+			},
+		};
+		const wrote = run(["config", "write", "jobs"], { ...env, __stdin: JSON.stringify(good) });
+		assert.equal(wrote.status, 0, wrote.stderr);
+		assert.deepEqual(JSON.parse(readFileSync(jobsFile, "utf8")), good);
+
+		const listed = run(["jobs", "list"], env);
+		assert.equal(listed.status, 0, listed.stderr);
+		assert.equal(listed.json.routeSource.hostId, "jobs-box");
+		assert.deepEqual(Object.keys(listed.json).sort(), SHAPE);
+		assert.equal(listed.json.hint, null, "no hint once the file exists");
+		assert.equal(listed.json.routeSource.code, null);
+		assert.deepEqual(listed.json.jobs.map((job) => job.id), ["build", "review"]);
+		assert.equal(listed.json.jobs[0].run, "parallel", "the default run mode is spelled out");
+		assert.equal(listed.json.jobs[0].executors[0].route, null);
+		assert.match(listed.json.jobs[0].executors[0].routeProblem, /LEAD_RECOVERY is not configured/);
+
+		const shown = run(["jobs", "show", "review"], env);
+		assert.equal(shown.status, 0, shown.stderr);
+		assert.equal(shown.json.job.run, "sequential");
+		assert.deepEqual(shown.json.job.executors[0].route, {
+			paseoProvider: "claude-peer",
+			model: "claude-opus-5",
+			thinking: "high",
+			createAgentProvider: "claude-peer/claude-opus-5",
+		});
+		assert.equal(shown.json.job.executors[1].createAgentProvider, "pi-peer/Minnyat/gpt-5.5");
+		assert.deepEqual(shown.json.job.executors[2].args, ["exec", "--full-auto"]);
+
+		const missing = run(["jobs", "show", "nope"], env);
+		assert.equal(missing.status, 1);
+		assert.equal(missing.json.code, "JOB_NOT_FOUND");
+		assert.deepEqual(missing.json.known, ["build", "review"]);
+		assert.equal(run(["jobs", "show"], env).status, 2, "a missing id is a usage error");
+		assert.equal(run(["jobs", "nonsense"], env).status, 2, "an unknown jobs subcommand is a usage error");
+		assert.notEqual(run(["jobs", "list", "--all"], env).status, 0, "a typo'd flag is never ignored");
+
+		// A file edited by hand into an invalid shape is reported, never printed as a preset.
+		writeFileSync(jobsFile, JSON.stringify({ version: 1, jobs: { review: { executors: [] } } }));
+		const broken = run(["jobs", "list"], env);
+		assert.equal(broken.status, 1);
+		assert.equal(broken.json.code, "CONFIG_INVALID");
+		assert.match(broken.json.message, /job "review": executors must be a non-empty array/);
+
+		// pi-models: an override the sync would stop on is refused at save,
+		// an old file with endpoint-level limits is not.
+		const piModelsFile = join(teamDir, "pi-models.local.json");
+		const overrides = (models) => JSON.stringify({ version: 1, providers: { Minnyat: { baseUrl: "https://example.test/v1", models } } });
+		const fraction = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 1.5 } }) });
+		assert.equal(fraction.status, 1);
+		assert.match(fraction.stderr, /CONFIG_INVALID: pi-models: provider "Minnyat": models\.gpt-5\.5\.contextWindow must be a positive integer/);
+		const inverted = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 1000, maxTokens: 2000 } }) });
+		assert.equal(inverted.status, 1);
+		assert.match(inverted.stderr, /models\.gpt-5\.5\.maxTokens \(2000\) exceeds its contextWindow/);
+		const unknownKey = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { context: 1000 } }) });
+		assert.equal(unknownKey.status, 1);
+		assert.match(unknownKey.stderr, /models\.gpt-5\.5\.context is not an override/);
+		assert.ok(!existsSync(piModelsFile), "a refused pi-models document is not written");
+		// Only the overrides are checked at save. A card still being filled in —
+		// no baseUrl yet, a plain-http one, a "/" in its name — saved before and
+		// still does; the sync is where that fails, as it always was.
+		for (const draft of [
+			{ version: 1, providers: { Minnyat: {} } },
+			{ version: 1, providers: { Minnyat: { models: { "gpt-5.5": { maxTokens: 128000 } } } } },
+			{ version: 1, providers: { Minnyat: { baseUrl: "http://example.test/v1" } } },
+			{ version: 1, providers: { "a/b": { baseUrl: "https://example.test/v1" } } },
+		]) {
+			const saved = run(["config", "write", "pi-models"], { ...env, __stdin: JSON.stringify(draft) });
+			assert.equal(saved.status, 0, `${JSON.stringify(draft)}: ${saved.stderr}`);
+		}
+		const fine = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } }) });
+		assert.equal(fine.status, 0, fine.stderr);
+		const legacy = JSON.stringify({ version: 1, providers: { Minnyat: { baseUrl: "https://example.test/v1", contextWindow: 200000, maxTokens: 32000 } } });
+		assert.equal(run(["config", "write", "pi-models"], { ...env, __stdin: legacy }).status, 0, "legacy endpoint-level limits are a sync warning, not a save error");
+		assert.equal(run(["config", "write", "pi-models"], { ...env, __stdin: '{"version":1,"providers":{}}' }).status, 0, "an empty catalog file (the form seed) saves");
+
+		const help = run(["--help"]);
+		assert.match(help.stdout, /pteam jobs list/);
+		assert.match(help.stdout, /pteam jobs show <id>/);
+		assert.match(help.stdout, /sections: .*\bjobs\b/);
 	}
 
 	// --- config read/write: the file as shown, the file as it is now ---------

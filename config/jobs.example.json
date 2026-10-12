@@ -1,0 +1,29 @@
+{
+  "$comment": "COPY → ~/.paseo-pi-team/jobs.local.json (or edit it in the WebUI under Cấu hình → Công việc). A job is a PRESET a Lead reads with 'pteam jobs list' / 'pteam jobs show <id>'; it seats nothing, and the create_agent gate still checks every seating against the route file. Each job lists one or more executors, and ALL of them are used: kind 'class' = whatever route that MODEL_CLASS has on this host now; kind 'route' = an explicit paseoProvider/model (thinking optional), same shapes as model-routing.local.json; kind 'cli' = a CLI tool, built-in 'pi' and 'claude' or one declared under cliTools. run 'sequential' means in the listed order — never 'try the next one when the previous failed'. Job ids and cliTools names: letters, digits, '_' and '-' only (no dots). Values below are placeholders.",
+  "version": 1,
+  "cliTools": {
+    "codex": { "command": "codex", "args": ["exec"] }
+  },
+  "jobs": {
+    "code-review": {
+      "label": "Review hai phía",
+      "description": "Hai reviewer độc lập trên cùng một SHA ứng viên.",
+      "disposition": "independent-reviewer",
+      "run": "parallel",
+      "executors": [
+        { "kind": "class", "modelClass": "REVIEW_HIGH" },
+        { "kind": "route", "paseoProvider": "pi-peer", "model": "<pi-provider>/<model-id>", "thinking": "high" }
+      ]
+    },
+    "scout-then-build": {
+      "label": "Khảo sát rồi làm",
+      "disposition": "engineer",
+      "run": "sequential",
+      "executors": [
+        { "kind": "class", "modelClass": "FAST_READ" },
+        { "kind": "class", "modelClass": "CODING_MEDIUM" },
+        { "kind": "cli", "tool": "codex", "args": ["--full-auto"] }
+      ]
+    }
+  }
+}

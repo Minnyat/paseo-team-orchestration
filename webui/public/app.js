@@ -17,17 +17,23 @@
  */
 
 import {
+	cleanListItems,
 	clone,
 	deepMerge,
 	deletePath,
 	dependentOptionProblems,
 	dependentOptions,
+	fieldPath,
 	fillKeptEmpty,
 	getPath,
+	isShown,
+	listLengthProblems,
+	moveAt,
 	numberRangeProblems,
 	optionalEntryProblems,
 	parseLines,
 	pruneEmpty,
+	removeAt,
 	setPath,
 } from "./config-form.js";
 import {
@@ -35,7 +41,9 @@ import {
 	agentKindLabel,
 	degradedSentence,
 	humanizeError,
+	limitsOriginSentence,
 	missingSetup,
+	modelLimitsLabel,
 	overallHealth,
 	permitDetail,
 	permitSentence,
@@ -45,6 +53,7 @@ import {
 	roleLabel,
 	runtimeLabel,
 	statusLabel,
+	syncWarningText,
 	toolMeaning,
 } from "./humanize.js";
 
@@ -1193,11 +1202,11 @@ const configState = {
 	// Rebuilt from scratch on every render — a stale closure would write into
 	// a detached node and leak the previous section's form.
 	dependents: [],
+	// Rows with a `showIf`, each with the segments of the object it lives in.
+	// Kept here rather than in a data attribute: a path is an array whose map
+	// keys may contain dots, and a string attribute would have to be split again.
+	conditional: [],
 };
-
-function joinPath(prefix, path) {
-	return prefix ? `${prefix}.${path}` : path;
-}
 
 function defaultValueLabel(field) {
 	if (field.default === undefined) return "";
@@ -1216,7 +1225,7 @@ function whenDependencyChanges(spec, prefix, paint) {
 	let last = null;
 	let primed = false;
 	return () => {
-		const key = String(getPath(configState.doc, joinPath(prefix, spec.path)) ?? "");
+		const key = String(getPath(configState.doc, fieldPath(prefix, spec.path)) ?? "");
 		if (primed && key === last) return;
 		primed = true;
 		last = key;
@@ -1493,11 +1502,12 @@ function linesControl(field, path) {
 function kvControl(field, path) {
 	const wrap = el("div", { class: "cfg-kv" });
 	const rebuild = () => {
-		const next = {};
+		const entries = [];
 		for (const row of wrap.querySelectorAll(".cfg-kv-row")) {
 			const key = row.querySelector(".cfg-kv-key").value.trim();
-			if (key) next[key] = row.querySelector(".cfg-kv-value").value;
+			if (key) entries.push([key, row.querySelector(".cfg-kv-value").value]);
 		}
+		const next = Object.fromEntries(entries);
 		if (Object.keys(next).length === 0) deletePath(configState.doc, path);
 		else setPath(configState.doc, path, next);
 	};
@@ -1542,7 +1552,7 @@ function mapControl(field, path) {
 					text: "×",
 					title: "Bỏ cấu hình lớp này (luồng dùng nó sẽ bị chặn cho tới khi cấu hình lại)",
 					onclick: () => {
-						deletePath(configState.doc, joinPath(path, key));
+						deletePath(configState.doc, [...path, key]);
 						renderConfigForm();
 					},
 				}),
@@ -1562,13 +1572,13 @@ function mapControl(field, path) {
 					keyInput.value = key;
 					return;
 				}
-				if (next in existing()) {
+				if (Object.hasOwn(existing(), next)) {
 					toast(`Đã có mục tên "${next}" rồi.`, true);
 					keyInput.value = key;
 					return;
 				}
-				setPath(configState.doc, joinPath(path, next), existing()[key]);
-				deletePath(configState.doc, joinPath(path, key));
+				setPath(configState.doc, [...path, next], existing()[key]);
+				deletePath(configState.doc, [...path, key]);
 				renderConfigForm();
 			});
 			head.appendChild(keyInput);
@@ -1579,7 +1589,7 @@ function mapControl(field, path) {
 					text: "×",
 					title: "Xóa mục này",
 					onclick: () => {
-						deletePath(configState.doc, joinPath(path, card.dataset.key));
+						deletePath(configState.doc, [...path, key]);
 						renderConfigForm();
 					},
 				}),
@@ -1587,7 +1597,7 @@ function mapControl(field, path) {
 		}
 		card.appendChild(head);
 		const body = el("div", { class: "cfg-card-body" });
-		appendFields(body, field.item?.fields, joinPath(path, key), { compact });
+		appendFields(body, field.item?.fields, [...path, key], { compact });
 		card.appendChild(body);
 		return card;
 	};
@@ -1598,14 +1608,14 @@ function mapControl(field, path) {
 	keys.forEach((key, index) =>
 		wrap.appendChild(cardForKey(key, fixed?.includes(key) === true, index > 0, optional.includes(key))),
 	);
-	for (const key of optional.filter((name) => !(name in existing()))) {
+	for (const key of optional.filter((name) => !Object.hasOwn(existing(), name))) {
 		wrap.appendChild(
 			el("button", {
 				type: "button",
 				class: "cfg-add",
 				text: `+ Cấu hình ${key} (tuỳ chọn)`,
 				onclick: () => {
-					setPath(configState.doc, joinPath(path, key), clone(field.item?.seed ?? {}));
+					setPath(configState.doc, [...path, key], clone(field.item?.seed ?? {}));
 					renderConfigForm();
 				},
 			}),
@@ -1620,8 +1630,8 @@ function mapControl(field, path) {
 				onclick: () => {
 					let key = "moi";
 					let index = 1;
-					while (key in existing()) key = `moi-${(index += 1)}`;
-					setPath(configState.doc, joinPath(path, key), clone(field.item?.seed ?? {}));
+					while (Object.hasOwn(existing(), key)) key = `moi-${(index += 1)}`;
+					setPath(configState.doc, [...path, key], clone(field.item?.seed ?? {}));
 					renderConfigForm();
 					// A key with quotes or spaces would break a naive selector.
 					const fresh = wrap.querySelector(`.cfg-card[data-key="${CSS.escape(key)}"] .cfg-card-key`);
@@ -1634,6 +1644,70 @@ function mapControl(field, path) {
 	return wrap;
 }
 
+/**
+ * An ordered list of objects (`type: "list"`): one card per element, each with
+ * the item's fields, plus add / remove / move up / move down.
+ *
+ * Order is data here — a job's executors run in this order when `run` is
+ * "sequential" — so moving is a first-class action, not a drag nicety.
+ * `minItems` is enforced twice: the remove button is disabled at the floor, and
+ * the save refuses a list below it (a fresh map item may start with none).
+ * Every structural change re-renders the form, since each card's fields are
+ * bound to their element's index.
+ */
+function listControl(field, path) {
+	const wrap = el("div", { class: "cfg-list" });
+	const current = getPath(configState.doc, path);
+	const count = Array.isArray(current) ? current.length : 0;
+	const min = Number.isInteger(field.minItems) ? field.minItems : 0;
+	const structural = (change) => () => {
+		change();
+		renderConfigForm();
+	};
+	const tool = (className, text, title, disabled, change) => {
+		const button = el("button", { type: "button", class: `cfg-icon ${className}`, text, title, onclick: structural(change) });
+		button.disabled = disabled;
+		return button;
+	};
+	for (let index = 0; index < count; index++) {
+		const card = el("div", { class: "cfg-card cfg-list-item" });
+		card.dataset.index = String(index);
+		card.appendChild(
+			el("div", { class: "cfg-card-head" }, [
+				el("span", { class: "cfg-card-title", text: `#${index + 1}` }),
+				el("span", { class: "cfg-list-tools" }, [
+					tool("cfg-list-up", "↑", "Đưa lên trước", index === 0, () => moveAt(configState.doc, path, index, -1)),
+					tool("cfg-list-down", "↓", "Đưa xuống sau", index === count - 1, () => moveAt(configState.doc, path, index, 1)),
+					tool("cfg-list-remove", "×", count <= min ? `Cần ít nhất ${min} mục` : "Xóa mục này", count <= min, () =>
+						removeAt(configState.doc, path, index),
+					),
+				]),
+			]),
+		);
+		const body = el("div", { class: "cfg-card-body" });
+		appendFields(body, field.item?.fields, [...path, index], { compact: index > 0 });
+		card.appendChild(body);
+		wrap.appendChild(card);
+	}
+	if (count < min) {
+		wrap.appendChild(el("p", { class: "cfg-hint cfg-list-short", text: `Cần ít nhất ${min} mục.` }));
+	}
+	wrap.appendChild(
+		el("button", {
+			type: "button",
+			class: "cfg-add cfg-list-add",
+			text: field.addLabel ?? "+ Thêm mục",
+			onclick: structural(() => {
+				const list = getPath(configState.doc, path);
+				const seed = clone(field.item?.seed ?? {});
+				if (Array.isArray(list)) list.push(seed);
+				else setPath(configState.doc, path, [seed]);
+			}),
+		}),
+	);
+	return wrap;
+}
+
 function fieldControl(field, path, prefix) {
 	if (field.type === "bool") return boolControl(field, path);
 	if (field.type === "number") return numberControl(field, path);
@@ -1643,6 +1717,7 @@ function fieldControl(field, path, prefix) {
 	if (field.type === "kv") return kvControl(field, path);
 	if (field.type === "flags") return flagsControl(field, path, prefix);
 	if (field.type === "map") return mapControl(field, path);
+	if (field.type === "list") return listControl(field, path);
 	return stringControl(field, path, prefix);
 }
 
@@ -1662,7 +1737,7 @@ function appendFields(container, fields, prefix, { compact = false } = {}) {
 	if (advanced.length === 0) return;
 	// Open when something in it is already set: a collapsed section hiding a
 	// non-default value is a setting nobody can see is in force.
-	const set = advanced.filter((field) => getPath(configState.doc, joinPath(prefix, field.path)) !== undefined).length;
+	const set = advanced.filter((field) => getPath(configState.doc, fieldPath(prefix, field.path)) !== undefined).length;
 	const more = el("details", { class: "cfg-more" });
 	more.open = set > 0;
 	more.appendChild(
@@ -1673,8 +1748,9 @@ function appendFields(container, fields, prefix, { compact = false } = {}) {
 }
 
 function fieldRow(field, prefix, { compact = false } = {}) {
-	const path = joinPath(prefix, field.path);
-	const row = el("div", { class: `cfg-field${field.type === "map" || field.type === "flags" || field.type === "role-provider" ? " cfg-field-wide" : ""}` });
+	const path = fieldPath(prefix, field.path);
+	const wide = ["map", "list", "flags", "role-provider"].includes(field.type);
+	const row = el("div", { class: `cfg-field${wide ? " cfg-field-wide" : ""}` });
 	// Label, its default and its hint all live in the FIRST column. They used
 	// to be three stacked rows, which made a six-field card taller than the
 	// screen and hid the control the row is actually about.
@@ -1689,11 +1765,10 @@ function fieldRow(field, prefix, { compact = false } = {}) {
 		]),
 	);
 	row.appendChild(fieldControl(field, path, prefix));
-	if (field.type === "map" && field.hint && !compact) row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
-	if (field.showIf) {
-		row.dataset.showIfPath = joinPath(prefix, field.showIf.path);
-		row.dataset.showIfEquals = String(field.showIf.equals);
+	if ((field.type === "map" || field.type === "list") && field.hint && !compact) {
+		row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
 	}
+	if (field.showIf) configState.conditional.push({ row, field, base: prefix });
 	return row;
 }
 
@@ -1707,9 +1782,8 @@ function fieldRow(field, prefix, { compact = false } = {}) {
  * edit, via one delegated listener (below) instead of a call in each control.
  */
 function refreshDependents() {
-	for (const row of $("config-form").querySelectorAll(".cfg-field[data-show-if-path]")) {
-		const current = getPath(configState.doc, row.dataset.showIfPath);
-		row.classList.toggle("hidden", String(current) !== row.dataset.showIfEquals);
+	for (const { row, field, base } of configState.conditional) {
+		row.classList.toggle("hidden", !isShown(field, configState.doc, base));
 	}
 	for (const paint of configState.dependents) paint();
 }
@@ -1718,6 +1792,7 @@ function renderConfigForm() {
 	const schema = configState.schema;
 	const form = clear($("config-form"));
 	configState.dependents = [];
+	configState.conditional = [];
 	clear($("config-presets"));
 	if (!form.dataset.dependentsBound) {
 		// One delegated listener instead of a refresh call inside every control:
@@ -1754,7 +1829,7 @@ function renderConfigForm() {
 		const fieldset = el("fieldset", { class: "cfg-group" });
 		fieldset.appendChild(el("legend", { text: group.label }));
 		if (group.hint) fieldset.appendChild(el("p", { class: "cfg-hint", text: group.hint }));
-		appendFields(fieldset, group.fields, "");
+		appendFields(fieldset, group.fields, []);
 		form.appendChild(fieldset);
 	}
 	refreshDependents();
@@ -1846,15 +1921,33 @@ function paintActionResult(output, action, data) {
 	output.classList.toggle("good", !failed);
 
 	if (Array.isArray(data?.providers)) {
+		const warnings = (Array.isArray(data.warnings) ? data.warnings : []).map(syncWarningText).filter(Boolean);
 		box.appendChild(
 			el("p", {
 				class: "cfg-actions-head",
-				text: failed ? "Có điểm cuối không cập nhật được" : "Đã cập nhật xong",
+				text:
+					(failed ? "Có điểm cuối không cập nhật được" : "Đã cập nhật xong") +
+					(warnings.length > 0 ? ` — ${warnings.length} cảnh báo` : ""),
 			}),
 		);
+		// Warnings first and loud: each one is a model whose limit is wrong or
+		// unknown, or a models.dev that could not be reached — the very things a
+		// person pressing this button needs to act on, which stderr alone hid.
+		if (warnings.length > 0) {
+			box.appendChild(
+				el("div", { class: "cfg-actions-warn", role: "alert" }, [
+					el("strong", { text: "Cảnh báo" }),
+					el("ul", {}, warnings.map((line) => el("li", { text: line }))),
+				]),
+			);
+		}
+		const origin = limitsOriginSentence(data.limits);
+		if (origin) box.appendChild(el("p", { class: `cfg-actions-origin ${origin.level}`, text: origin.text }));
 		const list = el("ul", { class: "cfg-actions-list" });
 		for (const entry of data.providers) {
 			const dead = (entry.probed ?? []).filter((x) => !x.live).length;
+			// One malformed entry must not take the whole report down with it.
+			const models = Array.isArray(entry.models) ? entry.models.filter((m) => m && typeof m === "object") : [];
 			list.appendChild(
 				el("li", { class: entry.ok ? "ok" : "no" }, [
 					el("b", { text: entry.provider }),
@@ -1863,6 +1956,17 @@ function paintActionResult(output, action, data) {
 							? ` — giữ lại ${entry.written} model` + (dead > 0 ? `, bỏ ${dead} model không trả lời` : "")
 							: ` — ${errorLine({ code: entry.code, message: entry.message })}`,
 					}),
+					models.length > 0
+						? el("ul", { class: "cfg-model-limits", title: "context window · max output · nguồn" }, [
+								el("li", { class: "cfg-model-limits-legend", text: "context window · max output · nguồn" }),
+								...models.map((model) =>
+									el("li", { class: `cfg-model-limit ${model.limitSource === "unknown" ? "unknown" : ""}`.trim(), "data-model": model.id }, [
+										el("code", { text: model.id }),
+										el("span", { text: modelLimitsLabel(model) }),
+									]),
+								),
+							])
+						: null,
 				]),
 			);
 		}
@@ -2032,16 +2136,22 @@ $("config-save").addEventListener("click", async () => {
 	if (configState.mode === "raw") {
 		text = $("config-editor").value;
 	} else {
+		// Checked and written from a copy with each list element tidied first: a
+		// field its `showIf` hides is not part of what is saved, so it must not
+		// be what blocks the save either. The working document keeps it, so
+		// switching an executor's kind back and forth loses nothing until Lưu.
+		const doc = cleanListItems(configState.schema, clone(configState.doc) ?? {});
 		const problems = [
-			...numberRangeProblems(configState.schema, configState.doc),
-			...dependentOptionProblems(configState.schema, configState.doc),
-			...optionalEntryProblems(configState.schema, configState.doc),
+			...numberRangeProblems(configState.schema, doc),
+			...dependentOptionProblems(configState.schema, doc),
+			...optionalEntryProblems(configState.schema, doc),
+			...listLengthProblems(configState.schema, doc),
 		];
 		if (problems.length > 0) {
 			toast(problems.join(" · "), true);
 			return;
 		}
-		text = JSON.stringify(fillKeptEmpty(configState.schema, pruneEmpty(configState.doc) ?? {}), null, 2);
+		text = JSON.stringify(fillKeptEmpty(configState.schema, pruneEmpty(doc) ?? {}), null, 2);
 	}
 	try {
 		JSON.parse(text); // fail here, before anything touches the file
