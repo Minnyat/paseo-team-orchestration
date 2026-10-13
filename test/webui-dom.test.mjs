@@ -78,6 +78,10 @@ for (const [, target] of html.matchAll(/data-goto="([^"]+)"/g)) {
 		if (ALIASED.has(section) || !schemaForSection(section)) continue;
 		assert.ok(offered.includes(section), `section "${section}" has a form schema but no <option> to reach it`);
 	}
+
+	// Named outright as well: the loop above only sees a section whose schema
+	// exists, and "Công việc" must stay reachable even if one is mis-registered.
+	assert.ok(offered.includes("jobs"), "the jobs section is offered in the dropdown");
 }
 
 console.log("webui-dom tests passed");
