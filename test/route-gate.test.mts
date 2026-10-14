@@ -25,18 +25,22 @@ import { fileURLToPath } from "node:url";
 
 import {
 	createAgentRouteBlockReason,
+	forkRouteDecision,
 	mcpBlockReason,
 	routeTargetFor,
 	updateAgentRouteBlockReason,
 	type RouteTarget,
 	routeEnforcement,
 	routeEnforcementNotice,
+	routingAvailabilityNotice,
 	type RouteTable,
 	type TeamRole,
 } from "../extensions/paseo-team-core/policy-core.ts";
 import { claudeToolBlockReason } from "../extensions/paseo-team-core/claude-policy.ts";
 // @ts-ignore — plain .mjs module, no declarations
 import { gateRouteTable } from "../scripts/model-routing.mjs";
+// @ts-ignore — plain .mjs module, no declarations
+import { gateTable } from "../scripts/gate-table.mjs";
 // @ts-ignore — plain .mjs module, no declarations
 import { handleEvent } from "../scripts/claude-hook.mjs";
 
@@ -632,6 +636,7 @@ test("update_agent: routeTargetFor reads the class off Paseo's own agent state",
 		agentId: AGENT_PEER,
 		provider: "pi-peer/Mx/mid",
 		modelClass: "CODING_MEDIUM",
+		job: null,
 		watch: null,
 	});
 	// A watch seat's label travels with the target: it is what lets an observer stay
@@ -913,4 +918,330 @@ test("Claude hook end to end: update_agent is gated off the target's own class",
 	const unreadable = await call({ agentId: AGENT_MISSING, settings: { model: "Mx/mid" } });
 	assert.match(String(unreadable?.hookSpecificOutput?.permissionDecisionReason), /ROUTE_TARGET_UNREADABLE/);
 	assert.equal(await call({ agentId: AGENT_MISSING, name: "renamed" }), null, "a rename needs no state at all");
+});
+
+// --- quick switch: a disabled route refuses its class, live, never rerouted ---------
+
+test("a switched-off class is refused on create_agent and update_agent, on both runtimes — and the switch is live", () => {
+	const dir = join(sandbox, `host-${(dirCount += 1)}`);
+	mkdirSync(dir, { recursive: true });
+	const file = join(dir, "model-routing.local.json");
+	const write = (off: boolean) =>
+		writeFileSync(
+			file,
+			JSON.stringify({
+				version: 1,
+				hostId: "minnyat",
+				routes: { ...BASE_ROUTES, CODING_MEDIUM: { ...BASE_ROUTES.CODING_MEDIUM, ...(off ? { enabled: false } : {}) } },
+			}),
+		);
+	// The gate loader is called afresh for every decision, exactly as both adapters
+	// do (Pi: a gate-routes subprocess per create_agent; Claude: a new hook process
+	// per tool call) — so editing the file is the whole "reload".
+	const table = () => gateRouteTable({ env: { PST_TEAM_CONFIG_DIR: dir } }) as RouteTable;
+	const route = BASE_ROUTES.CODING_MEDIUM;
+	const create = (runtime: Runtime) => decide(runtime, "lead", peerArgs(`${route.paseoProvider}/${route.model}`, route.thinking, "CODING_MEDIUM"), table());
+
+	write(false);
+	for (const runtime of RUNTIMES) assert.equal(create(runtime), null, `${runtime}: on`);
+
+	write(true);
+	const peer = target(AGENT_PEER);
+	for (const runtime of RUNTIMES) {
+		blocked(create(runtime), /ROUTE_CLASS_DISABLED — CODING_MEDIUM is switched off.*not rerouted.*pteam routing enable CODING_MEDIUM\) is the Human's call, not yours — do not run it/, `${runtime}: create_agent`);
+		blocked(
+			decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { model: "Mx/mid" } }, peer, table()),
+			/ROUTE_CLASS_DISABLED.*CODING_MEDIUM/,
+			`${runtime}: update_agent`,
+		);
+		// The other classes are untouched: no fallback, no collateral.
+		const other = BASE_ROUTES.FAST_READ;
+		assert.equal(decide(runtime, "lead", peerArgs(`${other.paseoProvider}/${other.model}`, other.thinking, "FAST_READ"), table()), null, `${runtime}: FAST_READ still routes`);
+	}
+
+	write(false);
+	for (const runtime of RUNTIMES) assert.equal(create(runtime), null, `${runtime}: back on, no restart`);
+});
+
+// --- model switch + job seatings ------------------------------------------------------
+
+/** A host dir you can rewrite between calls, like an operator editing files while seats run. */
+function liveHost() {
+	const dir = join(sandbox, `host-${(dirCount += 1)}`);
+	mkdirSync(dir, { recursive: true });
+	return {
+		dir,
+		routing(extra: Record<string, unknown> = {}) {
+			writeFileSync(join(dir, "model-routing.local.json"), JSON.stringify({ version: 1, hostId: "minnyat", routes: BASE_ROUTES, ...extra }));
+		},
+		jobs(doc: unknown) {
+			writeFileSync(join(dir, "jobs.local.json"), JSON.stringify(doc));
+		},
+		table: () => gateTable({ env: { PST_TEAM_CONFIG_DIR: dir } }) as RouteTable,
+	};
+}
+
+const JOB_DOC = {
+	version: 1,
+	jobs: {
+		// two models of the same tool (pi) plus a claude one: the user's "same tool, several models"
+		review: {
+			run: "parallel",
+			executors: [
+				{ kind: "class", modelClass: "REVIEW_HIGH" },
+				{ kind: "route", paseoProvider: "pi-peer", model: "Other/model-b", thinking: "high" },
+				{ kind: "route", paseoProvider: "pi-peer", model: "Other/model-c", thinking: "low" },
+				{ kind: "route", paseoProvider: "pi-peer", model: "Other/no-thinking" },
+			],
+		},
+		paused: { enabled: false, executors: [{ kind: "class", modelClass: "FAST_READ" }] },
+	},
+};
+const seatFor = (provider: string, thinking: string, labels: Record<string, string>) => ({
+	title: "job seat",
+	initialPrompt: "brief",
+	provider,
+	settings: { thinkingOptionId: thinking, ...(provider.startsWith("claude-") ? { modeId: "auto" } : {}) },
+	labels,
+});
+
+test("the gap this closes: without a job label a route executor's model is refused (ROUTE_MODEL_MISMATCH)", () => {
+	const host = liveHost();
+	host.routing();
+	host.jobs(JOB_DOC);
+	for (const runtime of RUNTIMES) {
+		blocked(
+			decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", { "team.model-class": "CODING_MEDIUM" }), host.table()),
+			/ROUTE_MODEL_MISMATCH/,
+			`${runtime}: a job executor's model is not a class route`,
+		);
+	}
+});
+
+test("job seatings: any active executor of the job passes, anything else is refused with what IS usable", () => {
+	const host = liveHost();
+	host.routing();
+	host.jobs(JOB_DOC);
+	const labels = { "team.model-class": "CODING_MEDIUM", "team.job": "review" };
+	for (const runtime of RUNTIMES) {
+		assert.equal(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", labels), host.table()), null, `${runtime}: route executor b`);
+		assert.equal(decide(runtime, "lead", seatFor("pi-peer/Other/model-c", "low", labels), host.table()), null, `${runtime}: same tool, another model`);
+		assert.equal(
+			decide(runtime, "lead", seatFor("claude-peer/claude-opus-5", "xhigh", { "team.model-class": "REVIEW_HIGH", "team.job": "review" }), host.table()),
+			null,
+			`${runtime}: the class executor resolves to its route`,
+		);
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "low", labels), host.table()), /ROUTE_JOB_EXECUTOR_MISMATCH.*Usable now:.*Other\/model-b @high.*Other\/model-c @low/, `${runtime}: wrong thinking`);
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/nope", "high", labels), host.table()), /ROUTE_JOB_EXECUTOR_MISMATCH/, `${runtime}: a model the job does not list`);
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/no-thinking", "high", labels), host.table()), /ROUTE_JOB_EXECUTOR_MISMATCH/, `${runtime}: an executor without a thinking level is not seatable`);
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", { ...labels, "team.job": "ghost" }), host.table()), /ROUTE_JOB_UNKNOWN.*known: paused, review/, `${runtime}: unknown job`);
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", { ...labels, "team.job": "paused" }), host.table()), /ROUTE_JOB_INACTIVE.*switched off/, `${runtime}: a switched-off job`);
+		// the class label still decides the flow: a Peer seat cannot borrow a governance class
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", { "team.model-class": "SUPERVISOR_GOVERNANCE", "team.job": "review" }), host.table()), /ROUTE_CLASS_WRONG_FLOW/, `${runtime}: flow check kept`);
+	}
+});
+
+test("model switch: a model switched off refuses its class and drops out of its jobs — live, with the alternatives named", () => {
+	const host = liveHost();
+	host.routing();
+	host.jobs(JOB_DOC);
+	const labels = { "team.model-class": "CODING_MEDIUM", "team.job": "review" };
+	const mid = BASE_ROUTES.CODING_MEDIUM;
+	const classSeat = () => peerArgs(`${mid.paseoProvider}/${mid.model}`, mid.thinking, "CODING_MEDIUM");
+	for (const runtime of RUNTIMES) {
+		host.routing();
+		assert.equal(decide(runtime, "lead", classSeat(), host.table()), null, `${runtime}: on`);
+		assert.equal(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", labels), host.table()), null);
+
+		// the whole pi endpoint "Mx" is out of credit: both class routes on it go, the job's other pi models stay
+		host.routing({ disabledModels: ["pi/Mx/*"] });
+		blocked(decide(runtime, "lead", classSeat(), host.table()), /ROUTE_MODEL_DISABLED.*pi\/Mx\/mid.*not moved to another model.*pteam routing enable-model pi\/Mx\/mid\) is the Human's call, not yours — do not run it; seat from what is usable\.\s+No other class is usable now for a pi\/peer seat/, `${runtime}: class on a disabled model`);
+		assert.equal(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", labels), host.table()), null, `${runtime}: the job's other models are unaffected`);
+
+		// switching a job executor's own model off skips it — and only it
+		host.routing({ disabledModels: ["pi/Other/model-b"] });
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", labels), host.table()), /ROUTE_JOB_EXECUTOR_MISMATCH.*Other\/model-c @low/, `${runtime}: that executor is skipped`);
+		assert.equal(decide(runtime, "lead", seatFor("pi-peer/Other/model-c", "low", labels), host.table()), null, `${runtime}: its sibling still seats`);
+
+		host.routing();
+		assert.equal(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", labels), host.table()), null, `${runtime}: back on, no restart`);
+	}
+});
+
+test("job seatings fail closed: an unreadable jobs file refuses only job-labelled seatings", () => {
+	const host = liveHost();
+	host.routing();
+	writeFileSync(join(host.dir, "jobs.local.json"), "{ not json");
+	const labels = { "team.model-class": "CODING_MEDIUM", "team.job": "review" };
+	const mid = BASE_ROUTES.CODING_MEDIUM;
+	for (const runtime of RUNTIMES) {
+		blocked(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", labels), host.table()), /ROUTE_JOB_UNAVAILABLE.*jobs file could not be read/, `${runtime}`);
+		assert.equal(decide(runtime, "lead", peerArgs(`${mid.paseoProvider}/${mid.model}`, mid.thinking, "CODING_MEDIUM"), host.table()), null, `${runtime}: class seatings unaffected`);
+	}
+	// a table from a reader that predates jobs
+	const old = hostTable({ routing: ROUTING_ONLY });
+	for (const runtime of RUNTIMES) blocked(decide(runtime, "lead", seatFor("pi-peer/Other/model-b", "high", labels), old), /ROUTE_JOB_UNAVAILABLE.*no job data/, `${runtime}: old table`);
+});
+
+test("update_agent on a job seat: its job label is fixed and its model cannot be moved", () => {
+	const host = liveHost();
+	host.routing();
+	host.jobs(JOB_DOC);
+	const jobSeat: RouteTarget = { agentId: AGENT_PEER, provider: "pi-peer/Other/model-b", modelClass: "CODING_MEDIUM", job: "review", watch: null };
+	for (const runtime of RUNTIMES) {
+		blocked(decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { model: "Other/model-c" } }, jobSeat, host.table()), /ROUTE_JOB_SEAT_FIXED.*job "review"/, `${runtime}: model move`);
+		blocked(decideUpdate(runtime, "lead", { agentId: AGENT_PEER, labels: { "team.job": "other" } }, jobSeat, host.table()), /ROUTE_JOB_IMMUTABLE/, `${runtime}: job label`);
+		assert.equal(decideUpdate(runtime, "lead", { agentId: AGENT_PEER, labels: { "team.job": "review" } }, jobSeat, host.table()), null, `${runtime}: restating it is a no-op`);
+	}
+});
+
+test("the routing-now notice is the same words for both runtimes, names off models, and changes when a file does", () => {
+	const host = liveHost();
+	host.routing();
+	host.jobs(JOB_DOC);
+	const before = routingAvailabilityNotice("lead", host.table());
+	assert.ok(before);
+	assert.match(before.text, /## Routing now/);
+	assert.match(before.text, /FAST_READ=pi-peer\/Mx\/cheap@low/);
+	assert.match(before.text, /review: .*pi-peer\/Other\/model-b@high/);
+	assert.match(before.text, /paused: OFF \(job switched off/);
+	assert.match(before.text, /pteam jobs resolve <id>/);
+	host.routing({ disabledModels: ["pi/Mx/*"] });
+	const after = routingAvailabilityNotice("lead", host.table());
+	assert.ok(after);
+	assert.notEqual(after.fingerprint, before.fingerprint, "a change is detectable");
+	assert.match(after.text, /FAST_READ=OFF \(model switched off\)/);
+	assert.match(after.text, /Models switched off: pi\/Mx\/\*/);
+	assert.equal(routingAvailabilityNotice("peer", host.table()), null, "a Peer seats nothing");
+	// a Supervisor has no terminal: it is never told to run pteam
+	const supervisorNotice = routingAvailabilityNotice("supervisor", host.table());
+	assert.ok(supervisorNotice);
+	assert.doesNotMatch(supervisorNotice.text, /pteam (jobs resolve|routing show)/);
+	assert.match(supervisorNotice.text, /You have no terminal.*LEAD_RECOVERY.*escalate to the Human/);
+	assert.match(routingAvailabilityNotice("lead", null)?.text ?? "", /UNLOADABLE/);
+});
+
+test("Claude hook: 'Routing now' is injected at session start, again only when a file changed, and a job seating passes the live gate", async () => {
+	const host = liveHost();
+	host.routing();
+	host.jobs(JOB_DOC);
+	const env = { PASEO_TEAM_HOME: host.dir, PASEO_PI_ROLE: "lead", PASEO_TEAM_CLUSTER: "route-gate" };
+	const session = `routing-now-${dirCount}`;
+	const context = (out: any) => String(out?.hookSpecificOutput?.additionalContext ?? "");
+
+	const start = await handleEvent("session-start", { session_id: session }, env);
+	assert.match(context(start), /## Routing now[\s\S]*review: .*Other\/model-b@high/, "a new Lead session starts with the current table");
+
+	const quiet = await handleEvent("user-prompt-submit", { session_id: session, prompt: "next" }, env);
+	assert.doesNotMatch(context(quiet), /Routing now/, "unchanged: not repeated every turn");
+
+	host.routing({ disabledModels: ["pi/Other/model-b"] });
+	const changed = await handleEvent("user-prompt-submit", { session_id: session, prompt: "next" }, env);
+	assert.match(context(changed), /CHANGED since your last turn — ## Routing now/, "a model switched off while the session runs shows up on the next turn");
+	assert.match(context(changed), /Models switched off: pi\/Other\/model-b/);
+	const again = await handleEvent("user-prompt-submit", { session_id: session, prompt: "next" }, env);
+	assert.doesNotMatch(context(again), /Routing now/);
+
+	const seat = (model: string, thinking: string) => ({
+		session_id: session,
+		tool_name: "mcp__paseo__create_agent",
+		tool_input: { ...seatFor(`pi-peer/${model}`, thinking, { "team.model-class": "CODING_MEDIUM", "team.job": "review", "team.cluster": "route-gate" }) },
+	});
+	const refused = await handleEvent("pre-tool-use", seat("Other/model-b", "high"), env);
+	assert.match(String(refused?.hookSpecificOutput?.permissionDecisionReason), /ROUTE_JOB_EXECUTOR_MISMATCH.*Other\/model-c @low/);
+	assert.equal(await handleEvent("pre-tool-use", seat("Other/model-c", "low"), env), null, "the sibling model seats, no restart");
+});
+
+// --- a class with several tools/models: the Lead picks ONE, nothing is chosen for it ---
+
+const OPTIONED_ROUTES = {
+	...BASE_ROUTES,
+	// pi (primary) + claude + a second pi model, all peers; each can be seated, one per agent
+	CODING_MEDIUM: {
+		paseoProvider: "pi-peer",
+		model: "Mx/mid",
+		thinking: "medium",
+		alternates: [
+			{ paseoProvider: "claude-peer", model: "claude-sonnet-5-5", thinking: "high" },
+			{ paseoProvider: "pi-peer", model: "Mx/other", thinking: "low" },
+		],
+	},
+};
+
+test("a class with several options: every usable option can be seated; anything else is refused with the list", () => {
+	const host = liveHost();
+	host.routing({ routes: OPTIONED_ROUTES });
+	for (const runtime of RUNTIMES) {
+		assert.equal(decide(runtime, "lead", peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM"), host.table()), null, `${runtime}: primary`);
+		assert.equal(decide(runtime, "lead", peerArgs("claude-peer/claude-sonnet-5-5", "high", "CODING_MEDIUM"), host.table()), null, `${runtime}: another tool`);
+		assert.equal(decide(runtime, "lead", peerArgs("pi-peer/Mx/other", "low", "CODING_MEDIUM"), host.table()), null, `${runtime}: same tool, another model`);
+		blocked(decide(runtime, "lead", peerArgs("pi-peer/Mx/other", "medium", "CODING_MEDIUM"), host.table()), /ROUTE_THINKING_MISMATCH.*offers "Mx\/other" .* at thinking "low".*Expected one of: provider "pi-peer\/Mx\/mid".*"pi-peer\/Mx\/other"/, `${runtime}: right model, wrong thinking`);
+		blocked(decide(runtime, "lead", peerArgs("pi-peer/Mx/nope", "medium", "CODING_MEDIUM"), host.table()), /ROUTE_MODEL_MISMATCH.*offers no model "Mx\/nope".*Expected one of:/, `${runtime}: a model the class does not list`);
+		// a class with ONE option keeps its exact old wording
+		blocked(decide(runtime, "lead", peerArgs("pi-peer/Mx/big", "low", "FAST_READ"), host.table()), /ROUTE_MODEL_MISMATCH — FAST_READ routes .* to model "Mx\/cheap", but provider "pi-peer\/Mx\/big" asks for "Mx\/big"\. Expected provider "pi-peer\/Mx\/cheap" with settings\.thinkingOptionId "low"\./, `${runtime}: single-option wording`);
+	}
+});
+
+test("switching an option off removes it — and the Lead is NOT moved to another one", () => {
+	const host = liveHost();
+	const routes = structuredClone(OPTIONED_ROUTES) as typeof OPTIONED_ROUTES & Record<string, any>;
+	routes.CODING_MEDIUM.enabled = false; // the primary (pi/Mx/mid) is off
+	host.routing({ routes });
+	for (const runtime of RUNTIMES) {
+		blocked(decide(runtime, "lead", peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM"), host.table()), /ROUTE_MODEL_MISMATCH.*Expected provider "pi-peer\/Mx\/other" with settings\.thinkingOptionId "low"\./, `${runtime}: the primary is gone (and the Lead is told what is left, not moved)`);
+		assert.equal(decide(runtime, "lead", peerArgs("claude-peer/claude-sonnet-5-5", "high", "CODING_MEDIUM"), host.table()), null, `${runtime}: the others still seat`);
+	}
+	// a model switched off (out of credit) drops only the options on it
+	host.routing({ routes: OPTIONED_ROUTES, disabledModels: ["pi/Mx/mid"] });
+	for (const runtime of RUNTIMES) {
+		blocked(decide(runtime, "lead", peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM"), host.table()), /ROUTE_MODEL_MISMATCH/, `${runtime}`);
+		assert.equal(decide(runtime, "lead", peerArgs("pi-peer/Mx/other", "low", "CODING_MEDIUM"), host.table()), null, `${runtime}: the other pi model`);
+	}
+	// every option off: now the class itself is refused, naming why
+	host.routing({ routes: OPTIONED_ROUTES, disabledModels: ["pi/*", "claude/*"] });
+	for (const runtime of RUNTIMES) {
+		blocked(decide(runtime, "lead", peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM"), host.table()), /ROUTE_MODEL_DISABLED.*not moved to another model.*Human's call/, `${runtime}`);
+	}
+	const allOff = structuredClone(OPTIONED_ROUTES) as any;
+	allOff.CODING_MEDIUM.enabled = false;
+	for (const alt of allOff.CODING_MEDIUM.alternates) alt.enabled = false;
+	host.routing({ routes: allOff });
+	for (const runtime of RUNTIMES) blocked(decide(runtime, "lead", peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM"), host.table()), /ROUTE_CLASS_DISABLED/, `${runtime}`);
+});
+
+test("options of another tool serve only seats of that tool; update_agent and team_fork follow the same list", () => {
+	const host = liveHost();
+	host.routing({ routes: OPTIONED_ROUTES });
+	const piSeat: RouteTarget = { agentId: AGENT_PEER, provider: "pi-peer/Mx/mid", modelClass: "CODING_MEDIUM", watch: null };
+	for (const runtime of RUNTIMES) {
+		// a pi seat may move to the other pi option, not to a claude model
+		assert.equal(decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { model: "Mx/other", thinkingOptionId: "low" } }, piSeat, host.table()), null, `${runtime}: to the other pi option`);
+		blocked(decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { model: "claude-sonnet-5-5" } }, piSeat, host.table()), /ROUTE_MODEL_MISMATCH.*Expected one of: settings \{ model: "Mx\/mid".*"Mx\/other"/, `${runtime}: a claude model on a pi seat`);
+		blocked(decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { thinkingOptionId: "high" } }, piSeat, host.table()), /ROUTE_THINKING_MISMATCH/, `${runtime}: thinking of an option the seat's model does not have`);
+		assert.equal(decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { thinkingOptionId: "medium" } }, piSeat, host.table()), null, `${runtime}: its own model's thinking`);
+	}
+	// a claude peer seating for a pi/claude class sees only claude options in a mismatch list
+	for (const runtime of RUNTIMES) {
+		blocked(decide(runtime, "lead", peerArgs("claude-peer/claude-opus-5", "high", "CODING_MEDIUM"), host.table()), /ROUTE_MODEL_MISMATCH.*Expected provider "claude-peer\/claude-sonnet-5-5" with settings\.thinkingOptionId "high"\./, `${runtime}: one claude option => the single wording`);
+	}
+	const fork = (model?: string, thinking?: string) =>
+		forkRouteDecision({ role: "lead", provider: "pi-peer", modelClass: "CODING_MEDIUM", model, thinking, routeTable: host.table(), env: ENFORCED } as any);
+	const ambiguous = fork();
+	assert.equal(ambiguous.ok, false);
+	assert.match((ambiguous as any).reason, /ROUTE_OPTION_AMBIGUOUS.*2 usable options.*nothing is chosen for you/, "no model named, two usable pi options: refuse, do not take the first");
+	assert.deepEqual(fork("Mx/other"), { ok: true, enforced: true, model: "Mx/other", thinking: "low" });
+	assert.equal(fork("Mx/other", "high").ok, false);
+	assert.equal(fork("Mx/nope").ok, false);
+	// a class with one option behaves exactly as before: omitted means "take the route's"
+	const single = forkRouteDecision({ role: "lead", provider: "pi-peer", modelClass: "FAST_READ", routeTable: host.table(), env: ENFORCED } as any);
+	assert.deepEqual(single, { ok: true, enforced: true, model: "Mx/cheap", thinking: "low" });
+});
+
+test("'Routing now' lists every option of a class as 'pick one'", () => {
+	const host = liveHost();
+	host.routing({ routes: OPTIONED_ROUTES, disabledModels: ["pi/Mx/other"] });
+	const notice = routingAvailabilityNotice("lead", host.table());
+	assert.ok(notice);
+	assert.match(notice.text, /CODING_MEDIUM=\[pick one: pi-peer\/Mx\/mid@medium \| claude-peer\/claude-sonnet-5-5@high \| pi-peer\/Mx\/other: OFF \(model switched off\)\]/);
+	assert.match(notice.text, /FAST_READ=pi-peer\/Mx\/cheap@low/, "a one-option class reads as before");
 });

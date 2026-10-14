@@ -74,6 +74,14 @@ const MODELS_DEV_API = {
 	for (const [level, mapped] of Object.entries(THINKING_LEVEL_MAP)) {
 		assert.ok(typeof mapped === "string" && mapped !== "", `thinking level ${level} maps to something`);
 	}
+	const custom = buildModelEntry("m", true, {}, { name: "My model", reasoning: false, input: ["text"], include: true });
+	assert.equal(custom.name, "My model");
+	assert.equal(custom.reasoning, false);
+	assert.equal(custom.thinkingLevelMap, undefined);
+	assert.deepEqual(custom.input, ["text"]);
+	assert.equal(custom.include, undefined);
+	assert.deepEqual(configProblems([{ name: "p", baseUrl: "https://example.com", models: { m: { name: "Model", reasoning: false, input: ["text"], include: true } } }]), []);
+	assert.ok(configProblems([{ name: "p", baseUrl: "https://example.com", models: { m: { reasoning: "false", input: ["audio"] } } }]).length);
 	assert.equal(buildModelEntry("m", false, {}).thinkingLevelMap, undefined, "a non-reasoning model carries no level map");
 	assert.deepEqual(buildModelEntry("m", true, {}).thinkingLevelMap, { ...THINKING_LEVEL_MAP });
 
@@ -165,6 +173,9 @@ const MODELS_DEV_API = {
 	// Per-model overrides: a typo must stop the run, not quietly read as unknown.
 	const withModels = (models) => configProblems([{ name: "p", baseUrl: "https://x", models }]).join(" ");
 	assert.equal(withModels({ review: { contextWindow: 128_000, maxTokens: 16_000 }, other: {} }), "");
+	assert.match(withModels({ " bad id ": {} }), /model ID/);
+	assert.match(withModels({ review: { contextWindow: Number.MAX_SAFE_INTEGER + 1 } }), /positive integer/);
+	assert.match(withModels({ review: { name: "  Model  " } }), /name/);
 	assert.match(withModels({ review: { contextWindow: "128k" } }), /models\.review\.contextWindow must be a positive integer/);
 	assert.match(withModels({ review: { maxTokens: 0 } }), /models\.review\.maxTokens must be a positive integer/);
 	assert.match(withModels({ review: 128_000 }), /models\.review must be an object/);
@@ -172,7 +183,7 @@ const MODELS_DEV_API = {
 	// Only the two limits are overrides; anything else names the bad key.
 	const stray = withModels({ review: { contextWindow: 128_000, context: 64_000, reasoning: true } });
 	assert.match(stray, /models\.review\.context is not an override/);
-	assert.match(stray, /models\.review\.reasoning is not an override/);
+	assert.doesNotMatch(stray, /models\.review\.reasoning is not an override/);
 	assert.doesNotMatch(stray, /contextWindow is not/);
 	assert.match(withModels({ review: { contextWindow: 8_000, maxTokens: 16_000 } }), /models\.review\.maxTokens \(16000\) exceeds its contextWindow \(8000\)/);
 
@@ -231,6 +242,12 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 	const keys = new Map([["testprov", "sk"]]);
 	const modelsPath = join(sandbox, "models.json");
 	const only = (report) => report.providers[0];
+	const manual = await syncModels({ entries: [{ ...entry, models: { custom: { include: true, name: "Manual", reasoning: false, input: ["text"] } } }], keys, modelsPath: join(sandbox, "manual.json"), modelsDev: offlineDev(), warn: quiet });
+	const added = JSON.parse(readFileSync(join(sandbox, "manual.json"), "utf8")).providers.testprov.models.find(model => model.id === "custom");
+	assert.equal(added.name, "Manual");
+	assert.deepEqual(added.input, ["text"]);
+	assert.ok(manual.providers[0].probed.some(model => model.id === "custom" && model.live));
+	calls.length = 0;
 
 	const dry = only(await syncModels({ entries, keys, modelsPath, dryRun: true, modelsDev: offlineDev(), warn: quiet }));
 	assert.equal(dry.ok, true);

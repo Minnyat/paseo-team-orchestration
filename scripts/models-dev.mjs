@@ -69,7 +69,7 @@ export const DEFAULT_FETCH_TIMEOUT_MS = 20_000;
 const CACHE_VERSION = 1;
 
 export function isPositiveInteger(value) {
-	return Number.isInteger(value) && value > 0;
+	return Number.isSafeInteger(value) && value > 0;
 }
 
 /** A time a Date can hold; 1e20 is a number but not a moment. */
@@ -78,7 +78,7 @@ function isTimestamp(value) {
 }
 
 /** The only keys a per-model override may hold. */
-export const OVERRIDE_KEYS = Object.freeze(["contextWindow", "maxTokens"]);
+export const OVERRIDE_KEYS = Object.freeze(["contextWindow", "maxTokens", "name", "reasoning", "input", "include"]);
 
 /**
  * What is wrong with one per-model override, as `models.<id>...` messages.
@@ -89,14 +89,19 @@ export function overrideProblems(modelId, override) {
 	if (override === undefined) return [];
 	if (!override || typeof override !== "object" || Array.isArray(override)) return [`models.${modelId} must be an object`];
 	const problems = [];
-	// Only the two limits: anything else (`context`, `reasoning`, a misspelling)
-	// would be read by nobody and look like it worked.
+	if (typeof modelId !== "string" || !modelId || /[\s\u0000-\u001f\u007f]/u.test(modelId)) problems.push(`model ID không được trống/chứa khoảng trắng — must be non-empty without whitespace: ${JSON.stringify(modelId)}`);
+	// Reject unknown keys rather than accepting settings nobody applies.
 	for (const key of Object.keys(override)) {
 		if (!OVERRIDE_KEYS.includes(key)) {
 			problems.push(`models.${modelId}.${key} is not an override (allowed: ${OVERRIDE_KEYS.join(", ")})`);
 		}
 	}
-	for (const field of OVERRIDE_KEYS) {
+	if (override.name !== undefined && (typeof override.name !== "string" || !override.name.trim() || override.name !== override.name.trim() || /[\u0000-\u001f\u007f]/u.test(override.name))) problems.push(`models.${modelId}.name must be a non-empty string`);
+	for (const field of ["reasoning", "include"]) {
+		if (override[field] !== undefined && typeof override[field] !== "boolean") problems.push(`models.${modelId}.${field} must be a boolean`);
+	}
+	if (override.input !== undefined && (!Array.isArray(override.input) || !override.input.includes("text") || override.input.some(value => !["text", "image"].includes(value)) || new Set(override.input).size !== override.input.length)) problems.push(`models.${modelId}.input must contain text and optionally image`);
+	for (const field of ["contextWindow", "maxTokens"]) {
 		if (override[field] !== undefined && !isPositiveInteger(override[field])) {
 			problems.push(`models.${modelId}.${field} must be a positive integer`);
 		}

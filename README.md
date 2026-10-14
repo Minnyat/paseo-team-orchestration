@@ -308,7 +308,7 @@ Every authority is recomputed from the brief of the **current turn**:
 
 ### A Peer asks the Lead
 
-Peers use the custom `peer_ask_lead` tool, never `paseo send` through bash. The
+Peers use the custom `peer_ask_lead` tool, never `paseo send` through bash. A Peer may also run only the READ-ONLY `pteam` commands from bash (`routing show`, `jobs resolve`, `config read`, `graph` …): `pteam permits allow`, `routing …`, `config|prompts|skills write`, `agent send`, `models sync` and anything unknown are refused, because the CLI is the same authority as the tools it wraps (a heuristic like every bash rule here). The
 tool reads `PASEO_AGENT_ID`, inspects `paseo.parent-agent-id`, sends only to the
 parent Lead, and wraps the payload as `PEER_MESSAGE_V1` carrying `kind`,
 `TASK_ID` and `CORRELATION_ID`.
@@ -897,8 +897,8 @@ skips that step; it is not an error.
 
 The support scripts are `lib-common`, `reliability`, `watchdog`,
 `team-communication`, `team-lease`, `lease-ledger`, `team-fork`, `ocr-review`,
-`remote-paseo`, `model-routing`, `team-scripts-path`, `claude-hook`,
-`claude-team-mcp` and `patch-paseo-mcp`.
+`remote-paseo`, `model-routing`, `jobs`, `gate-table`, `team-scripts-path`,
+`claude-hook`, `claude-team-mcp` and `patch-paseo-mcp`.
 They are copied **flat**, so every import between them
 must stay `./<name>.mjs`. `installer-contract.test.mjs` guards that: every
 shipped file must exist, and every support script it imports must be shipped
@@ -1421,8 +1421,9 @@ pteam activity <ref> --tail 5 --max-chars 2000
 pteam permits list
 pteam seats list                        # custom seats + the providers they generate
 pteam seats apply                       # write those providers into ~/.paseo/config.json
-pteam jobs list                         # job presets, each class executor with its current route
-pteam jobs show <id>                    # one job preset
+pteam jobs list [--all]                 # job presets usable now, each class executor with its current route
+pteam jobs show <id> [--all]            # one job preset
+pteam jobs resolve <id>                 # reload right before seating: exact create_agent arguments + labels
 pteam models sync                       # rebuild pi's catalogs from their endpoints, then refresh
 pteam models refresh                    # daemon re-reads the catalog, without a restart
 pteam web --port 4321 --open            # prints http://127.0.0.1:PORT/#token=...
@@ -1505,11 +1506,60 @@ under **Cấu hình → Công việc**. `pteam jobs list` and `pteam jobs show <
 it for a Lead, with each class executor resolved against the route file the
 create_agent gate reads.
 
-A job is a **preset a Lead reads, nothing more**. It seats no agent, and
-create_agent is not checked against it — every seating is still held to the
-route of its declared class. Every executor of a job is used; `run:
-"sequential"` means in the listed order, never "try the next one if this one
-failed": there is no automatic fallback, here or anywhere in the pack.
+A job is a **preset the gate understands**. It seats no agent by itself; a Lead
+seats each usable executor with `create_agent` and names the job in
+`labels["team.job"]`. The gate then accepts the provider, model and thinking
+level of an **active executor of that job** instead of the one route of the
+declared class — this is how one task runs on several models (the same tool on
+two models, or two tools). The class label is still required and still decides
+the flow (a Peer seat cannot borrow a governance class). Without
+`labels["team.job"]` the gate is exactly the class gate. A route executor must
+spell out `thinking` to be seatable (the gate compares it byte for byte), a
+`cli` executor is a command to run, never a seat, and a seat created for a job
+cannot have its model moved afterwards (`ROUTE_JOB_SEAT_FIXED`) — seat a new
+one. `team_fork` does not take a job yet. Every **enabled** executor of a job is
+used; `run: "sequential"` means in the listed order, never "try the next one if
+this one failed": there is no automatic fallback, here or anywhere in the pack.
+
+**One class, several tools/models.** A model class can offer more than one way to be
+seated: `alternates` on its route (another tool — `pi` or `claude` — or the same tool
+on another model, same role, each with its own `enabled`). The Lead seats **one**
+usable option per agent and names it exactly; the gate checks that pick, nothing
+chooses for it (`pteam routing add-option|remove-option`, `enable|disable <CLASS>
+[--option N]`; WebUI: Định tuyến mô hình → each class, "Tool/model khác của lớp này"
+and a switch per option). A class is refused only when no option is usable.
+Details and the JSON shape: `docs/model-routing.md`.
+
+**Reload before seating.** `pteam jobs resolve <id>` re-reads the route and jobs
+files and prints, for every executor usable now, the exact `create_agent`
+arguments (provider, settings, labels incl. `team.job`), the CLI commands, and
+the steps skipped with why. Lead and Supervisor sessions also open each turn
+(Pi) / each session start and each change (Claude) with a "Routing now" block
+built from the same files, and a gate refusal lists the alternatives that are
+usable — so nothing here needs a restart.
+
+**Model out of credit.** `pteam routing disable-model <family>/<model>` (e.g.
+`pi/Minnyat/gpt-5.5`, `claude/claude-opus-5`; `pi/Minnyat/*` a whole endpoint,
+`pi/*` a whole tool) adds the model to `disabledModels` of the route file the
+gate reads (per host in a cluster file). Every class route and job executor on
+it is refused/skipped on the next seating (`ROUTE_MODEL_DISABLED`), never moved
+to another model; `enable-model` undoes it. The WebUI has a switch per model.
+Limits: agents already running keep their model and will fail — seat a
+replacement; a Lead the Human starts by hand and Pi's own `defaultModel` are not
+covered; switching a CLI tool off only hides it from jobs, a Peer can still run
+it from bash; `remote-paseo.mjs run` ignores all of this.
+
+**Quick switches.** `enabled: false` on a job, on one executor, or a tool name in
+`disabledTools` (`pi`, `claude`, or a `cliTools` entry) switches it off without
+deleting it; a model class is switched off with `pteam routing disable <CLASS>`
+(`enabled: false` on its route — the gate then refuses the class with
+`ROUTE_CLASS_DISABLED`, never rerouting it). The WebUI shows them as toggles at
+the top of Cấu hình → Công việc / Định tuyến mô hình. `pteam jobs list|show`
+list only what is usable now — a switched-off step is reported under `skipped`,
+a switched-off job under `inactive` (`--all` shows everything). Routes and jobs
+are re-read on every use, so a switch is **live at once, without restarting
+Paseo**; running agents keep their model. What does need a reload (Paseo
+`config.json`, Pi `models.json`) is listed in `docs/model-routing.md`.
 
 Both writers — `pteam config write jobs` and the WebUI — run the same validator
 (`scripts/jobs.mjs`) and refuse a malformed file before it is written, naming

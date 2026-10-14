@@ -105,6 +105,7 @@ import {
 	teamTopology,
 	watchSeatNotice,
 	routeEnforcementNotice,
+	routingAvailabilityNotice,
 	routeTargetFor,
 	updateAgentTouchesRoute,
 	type GovernanceContext,
@@ -220,8 +221,28 @@ async function createAgentRouteTable(input: unknown): Promise<RouteTable | null 
 		matchesPaseoToolName(target, ["create_agent"]) ||
 		(matchesPaseoToolName(target, ["update_agent"]) && updateAgentTouchesRoute(extractCreateAgentArgs(input)));
 	if (!needed) return undefined;
+	return fetchGateTable();
+}
+
+/**
+ * The route table (plus jobs) as the gate reads it, from a fresh subprocess — the
+ * file is re-read on every call, which is what makes a switch live without a
+ * restart. Null when it cannot be run or parsed; the core refuses that as
+ * ROUTE_UNVERIFIABLE.
+ */
+async function fetchGateTable(): Promise<RouteTable | null> {
 	try {
-		const result = await runSupportScript("model-routing.mjs", ["gate-routes", "--json"]);
+		// gate-table.mjs = the route table plus the jobs. A support dir that predates
+		// it still has the route-only reader, so class-route seatings keep working.
+		let result: { stdout: string; code: number } | null = null;
+		try {
+			result = await runSupportScript("gate-table.mjs", []);
+		} catch {
+			/* missing or unrunnable: fall back below */
+		}
+		if (!result || (result.code !== 0 && !result.stdout.trim())) {
+			result = await runSupportScript("model-routing.mjs", ["gate-routes", "--json"]);
+		}
 		const parsed = JSON.parse(result.stdout || "null");
 		return parsed && typeof parsed === "object" && typeof parsed.ok === "boolean"
 			? (parsed as RouteTable)
@@ -663,12 +684,17 @@ export default function (pi: ExtensionAPI) {
 		const watchNotice = r === "supervisor" ? watchSeatNotice(r, selfWatch()) : null;
 		// Every turn while the opt-out is set — see routeEnforcementNotice.
 		const routeNotice = routeEnforcementNotice(r);
-		if (!rolePrompt && !notice && !routeNotice && !watchNotice) return;
+		// "Routing now", reloaded from the route and jobs files EVERY turn: pi rebuilds
+		// the system prompt each turn, so a block shown once would be gone on the next.
+		// A spawn of ~100ms, only for the roles that seat agents.
+		const routingNow = r === "lead" || r === "supervisor" ? routingAvailabilityNotice(r, await fetchGateTable())?.text ?? null : null;
+		if (!rolePrompt && !notice && !routeNotice && !watchNotice && !routingNow) return;
 		const sections = [
 			event.systemPrompt,
 			rolePrompt ? `## Paseo Team Role\n${rolePrompt}` : "",
 			watchNotice ?? "",
 			notice ?? "",
+			routingNow ?? "",
 			routeNotice ?? "",
 		].filter(Boolean);
 		return { systemPrompt: sections.join("\n\n") };

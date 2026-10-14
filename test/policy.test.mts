@@ -9,6 +9,8 @@ import {
 	browserMcpAllowed,
 	callsPaseoCli,
 	callsTeamSupportScript,
+	pteamMutationIn,
+	supportScriptBlockReason,
 	classifyMcpInput,
 	createAgentModeArgsBlockReason,
 	CLAUDE_DEFAULT_SEAT_MODE,
@@ -1797,6 +1799,61 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 	assert.equal(callsTeamSupportScript("node scripts/model-routing.mjs resolve"), false);
 	assert.equal(callsTeamSupportScript("echo team-lease"), false, "a bare mention is not an invocation");
 	assert.equal(callsTeamSupportScript(""), false);
+
+	// The pteam CLI is the same authority as the scripts and tools: a Peer may only read.
+	for (const mutating of [
+		"pteam permits allow agent-1 req-9",
+		"pteam permits deny a r",
+		"pteam routing disable-model pi/Minnyat/*",
+		"pteam routing set CODING_MEDIUM --provider pi-peer --model x --thinking low",
+		"pteam routing enable CODING_MEDIUM",
+		"pteam config write routing < f.json",
+		"cd /repo && paseo-team prompts write lead",
+		"pteam skills write paseo-team-lead",
+		"pteam agent send abc",
+		"pteam models sync",
+		"pteam models refresh",
+		"pteam seats apply",
+		"pteam install",
+		"pteam web --open",
+		"echo x | pteam config write mcp",
+		"PASEO_X=1 pteam update",
+		"pteam brandnew-command",
+		"pteam.cmd routing unset LEAD_RECOVERY",
+		"node cli/paseo-team.mjs routing set X",
+		// wrappers and shells that put the invocation somewhere other than the start
+		"env pteam permits allow a b",
+		"/usr/bin/env pteam permits allow a b",
+		"env -i PATH=/x pteam routing set X",
+		'bash -c "pteam permits allow a b"',
+		"sh -c 'pteam routing set X'",
+		"sudo -n pteam install",
+		"echo a b | xargs pteam permits allow",
+		"cat <<'EOF' | bash\npteam routing disable-model pi/*\nEOF",
+	]) {
+		assert.ok(pteamMutationIn(mutating), `a Peer is refused: ${mutating}`);
+		assert.match(String(supportScriptBlockReason("peer", mutating)), /Peer cannot run/, mutating);
+		assert.equal(supportScriptBlockReason("lead", mutating), null, `the Lead is not held to the Peer rule: ${mutating}`);
+	}
+	for (const readOnly of [
+		"pteam routing show",
+		"pteam routing check --json",
+		"pteam jobs resolve review",
+		"pteam jobs list --all",
+		"pteam config read routing",
+		"pteam permits list",
+		"pteam models --provider pi-peer",
+		"pteam graph",
+		"pteam status",
+		"grep -n pteam README.md",
+		"echo 'run pteam to see'",
+		"cat docs/pteam-notes.md",
+		"git log --oneline",
+		"echo 'env pteam is a CLI'",
+		"cat docs/pteam-routing-notes.md | head",
+	]) {
+		assert.equal(pteamMutationIn(readOnly), null, `read-only / prose is fine: ${readOnly}`);
+	}
 }
 
 // The peer branch is a SEPARATE leg of the same handler, and

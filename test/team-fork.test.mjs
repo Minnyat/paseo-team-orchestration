@@ -855,6 +855,46 @@ test("route gate: verify compares against the route of the fork's own class, not
 	});
 });
 
+test("route gate, a class with several options: a fork must NAME one, and verify accepts any usable option but deletes a stray model", async () => {
+	const multi = {
+		...ROUTE_TABLE,
+		routes: {
+			...ROUTE_TABLE.routes,
+			LEAD_RECOVERY: {
+				paseoProvider: "pi-lead",
+				model: "anthropic/claude-opus-5",
+				thinking: "high",
+				alternates: [{ paseoProvider: "pi-lead", model: "anthropic/claude-sonnet-5", thinking: "medium" }],
+			},
+		},
+	};
+	await withState(async ({ agentsRoot, write }) => {
+		// no model named: nothing is chosen for the Lead
+		await assert.rejects(forkAgent(leadFork({ modelClass: "LEAD_RECOVERY" }), routedOptions(agentsRoot, [], { routeTable: multi })), (error) => {
+			assert.equal(error.code, "FORK_ROUTE_BLOCKED");
+			assert.match(error.message, /ROUTE_OPTION_AMBIGUOUS.*nothing is chosen for you/);
+			return true;
+		});
+		// naming one is a fork on that option
+		const named = await forkAgent(leadFork({ modelClass: "LEAD_RECOVERY", model: "anthropic/claude-sonnet-5" }), routedOptions(agentsRoot, [], { routeTable: multi }));
+		assert.deepEqual(named.nextAction.args.settings, { model: "anthropic/claude-sonnet-5", thinkingOptionId: "medium" });
+
+		// verify: the fork runs ONE of the usable options => fine, whichever it is
+		for (const [model, thinking] of [["anthropic/claude-opus-5", "high"], ["anthropic/claude-sonnet-5", "medium"]]) {
+			write(FORKED, { provider: "pi-lead", labels: { "team.model-class": "LEAD_RECOVERY" }, runtimeInfo: { sessionId: "s", model, thinkingOptionId: thinking } });
+			const ok = await verifyFork({ agentId: FORKED }, routedOptions(agentsRoot, [], { routeTable: multi }));
+			assert.equal(ok.ok, true, `${model}: ${ok.message}`);
+		}
+		// ...but a model that is none of them is refused and deleted
+		write(FORKED, { provider: "pi-lead", labels: { "team.model-class": "LEAD_RECOVERY" }, runtimeInfo: { sessionId: "s", model: "anthropic/haiku", thinkingOptionId: "high" } });
+		const deletes = [];
+		const stray = await verifyFork({ agentId: FORKED }, routedOptions(agentsRoot, deletes, { routeTable: multi }));
+		assert.equal(stray.ok, false);
+		assert.equal(stray.code, "FORK_MODEL_UNROUTABLE");
+		assert.deepEqual(deletes, [["delete", FORKED]]);
+	});
+});
+
 // ---------------------------------------------------------------------------
 // The second door to the Supervisor's authority. team_fork is how a successor
 // Lead can be put in place without create_agent, so the rule that a watch seat

@@ -280,6 +280,7 @@ export const ERROR_CODES = Object.freeze([
 	"THINKING_OPTION_UNAVAILABLE",
 	"MODEL_RESOLUTION_MISMATCH",
 	"HOST_ROUTE_UNAVAILABLE",
+	"ROUTE_DISABLED",
 ]);
 
 /** Structured failure. Always fail-closed; never a fallback signal. */
@@ -323,6 +324,82 @@ export const HOST_CAPABILITIES = Object.freeze({
 // Config validation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Model switch — "this model of this tool is off" (out of credit, outage)
+// ---------------------------------------------------------------------------
+//
+// One list per route file (per host in a cluster file): `disabledModels`. An
+// entry is "<family>/<model>" — the runtime family (pi, claude, ...) and the
+// model id exactly as a route spells it ("pi/Minnyat/gpt-5.5",
+// "claude/claude-opus-5") — or ends in "/*" to switch off everything under a
+// prefix ("pi/Minnyat/*" = the whole endpoint). The role is deliberately not part
+// of the key: a model that is out of credit is out of credit for the Lead and
+// the Peer alike. A route (or job executor) on such a model is refused/skipped,
+// never moved to another model.
+
+/** The key a route's model is switched with. */
+export function modelSwitchKey(paseoProvider, model) {
+	return `${providerFamily(paseoProvider)}/${model}`;
+}
+
+/** Why `entry` is not a valid disabledModels entry, or null. */
+export function disabledModelProblem(entry) {
+	if (typeof entry !== "string" || entry !== entry.trim() || entry === "") {
+		return "must be a non-empty string with no surrounding whitespace";
+	}
+	const slash = entry.indexOf("/");
+	const family = slash < 0 ? entry : entry.slice(0, slash);
+	const rest = slash < 0 ? "" : entry.slice(slash + 1);
+	if (!RUNTIME_FAMILIES.includes(family)) {
+		return `must start with a runtime family (${RUNTIME_FAMILIES.join(", ")}) and a slash, e.g. "pi/<provider>/<model>"`;
+	}
+	if (rest === "") return `needs a model (or "*" / "<prefix>/*") after "${family}/"`;
+	if (/\s/u.test(rest)) return "must not contain whitespace";
+	// "pi/*" switches off a whole tool (every pi model); "pi/Minnyat/*" one endpoint.
+	if (rest !== "*" && rest.includes("*") && !(rest.endsWith("/*") && !rest.slice(0, -2).includes("*"))) {
+		return 'may use "*" only as a trailing "/*" (e.g. "pi/Minnyat/*")';
+	}
+	return null;
+}
+
+/** Is `paseoProvider`'s `model` covered by an entry of `disabledModels`? */
+export function isModelDisabled(disabledModels, paseoProvider, model) {
+	if (!Array.isArray(disabledModels) || disabledModels.length === 0) return false;
+	const key = modelSwitchKey(paseoProvider, model);
+	return disabledModels.some((entry) =>
+		entry.endsWith("/*") ? key.startsWith(entry.slice(0, -1)) : key === entry,
+	);
+}
+
+/** Validate `disabledModels` (absent is fine). Returns a fresh de-duplicated array, or undefined. */
+function validateDisabledModels(value, fail) {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw fail("disabledModels must be an array of strings", {});
+	for (const entry of value) {
+		const problem = disabledModelProblem(entry);
+		if (problem) throw fail(`disabledModels entry ${JSON.stringify(entry)} ${problem}`, { entry });
+	}
+	return [...new Set(value)];
+}
+
+/**
+ * The options of a class route, primary first: `[{index, paseoProvider, model,
+ * thinking, enabled}]`. A class is usable when ANY option is usable; which one a
+ * seat uses is the Lead's explicit choice, checked by the gate — nothing here (or
+ * anywhere) picks one on its behalf.
+ */
+export function routeOptions(route) {
+	if (route === null || typeof route !== "object") return [];
+	const toOption = (option, index) => ({
+		index,
+		paseoProvider: option.paseoProvider,
+		model: option.model,
+		thinking: option.thinking,
+		enabled: option.enabled !== false,
+	});
+	return [toOption(route, 0), ...(Array.isArray(route.alternates) ? route.alternates : []).map((option, i) => toOption(option, i + 1))];
+}
+
 /**
  * Validate a parsed model-routing config object.
  * @returns {{hostId: string, routes: Record<string, {paseoProvider: string, model: string, thinking: string}>}}
@@ -359,44 +436,92 @@ export function validateRoutingConfig(data) {
 		if (typeof route !== "object" || route === null) {
 			throw fail(`route for ${modelClass} must be an object`);
 		}
-		const { paseoProvider, model, thinking } = route;
-		if (!ROLE_PROVIDERS.includes(paseoProvider)) {
-			throw fail(
-				`route ${modelClass}: paseoProvider "${paseoProvider}" is not one of the durable role profiles (${ROLE_PROVIDERS.join(", ")})`,
-				{ modelClass, paseoProvider },
+		// One option = a tool (runtime family + role) running a model at a thinking
+		// level. The route's own fields are option 0 (the primary); `alternates` are
+		// further options of the SAME class. Every option is validated exactly the
+		// same way, and all of them seat the same role.
+		const validateOption = (option, where) => {
+			if (typeof option !== "object" || option === null || Array.isArray(option)) {
+				throw fail(`${where} must be an object`, { modelClass });
+			}
+			const { paseoProvider, model, thinking } = option;
+			if (!ROLE_PROVIDERS.includes(paseoProvider)) {
+				throw fail(
+					`${where}: paseoProvider "${paseoProvider}" is not one of the durable role profiles (${ROLE_PROVIDERS.join(", ")})`,
+					{ modelClass, paseoProvider },
+				);
+			}
+			const requiredRole = CLASS_REQUIRED_ROLE[modelClass];
+			if (requiredRole && providerRole(paseoProvider) !== requiredRole) {
+				throw fail(
+					`${where}: paseoProvider "${paseoProvider}" must be a ${requiredRole} role provider (${ROLE_PROVIDERS.filter((name) => providerRole(name) === requiredRole).join(" or ")}) — this class seats a ${requiredRole}, nothing else`,
+					{ modelClass, paseoProvider, requiredRole },
+				);
+			}
+			if (typeof model !== "string" || model.trim() === "") {
+				throw fail(`${where}: model must be a non-empty string`);
+			}
+			const family = providerFamily(paseoProvider);
+			const trimmedModel = validateModelForFamily(
+				family,
+				model,
+				(message, details) => fail(`${where}: ${message}`, details),
+				{ modelClass },
 			);
-		}
-		const requiredRole = CLASS_REQUIRED_ROLE[modelClass];
-		if (requiredRole && providerRole(paseoProvider) !== requiredRole) {
-			throw fail(
-				`route ${modelClass}: paseoProvider "${paseoProvider}" must be a ${requiredRole} role provider (${ROLE_PROVIDERS.filter((name) => providerRole(name) === requiredRole).join(" or ")}) — this class seats a ${requiredRole}, nothing else`,
-				{ modelClass, paseoProvider, requiredRole },
-			);
-		}
-		if (typeof model !== "string" || model.trim() === "") {
-			throw fail(`route ${modelClass}: model must be a non-empty string`);
-		}
-		const family = providerFamily(paseoProvider);
-		const trimmedModel = validateModelForFamily(
-			family,
-			model,
-			(message, details) => fail(`route ${modelClass}: ${message}`, details),
-			{ modelClass },
-		);
-		const levels = THINKING_LEVELS_BY_FAMILY[family];
-		if (!levels.includes(thinking)) {
-			throw fail(
-				`route ${modelClass}: thinking "${thinking}" is not a ${family} thinking level (${levels.join(", ")})`,
-				{ modelClass, thinking, family },
-			);
-		}
-		validated[modelClass] = {
-			paseoProvider,
-			model: trimmedModel,
-			thinking,
+			const levels = THINKING_LEVELS_BY_FAMILY[family];
+			if (!levels.includes(thinking)) {
+				throw fail(
+					`${where}: thinking "${thinking}" is not a ${family} thinking level (${levels.join(", ")})`,
+					{ modelClass, thinking, family },
+				);
+			}
+			// `enabled` is the quick off switch: a disabled option keeps its model and
+			// thinking (so turning it back on restores exactly what was there) but is
+			// never offered. Only `false` is carried; absent means on.
+			if (option.enabled !== undefined && typeof option.enabled !== "boolean") {
+				throw fail(`${where}: enabled must be true or false`, { modelClass });
+			}
+			return {
+				paseoProvider,
+				model: trimmedModel,
+				thinking,
+				...(option.enabled === false ? { enabled: false } : {}),
+			};
 		};
+		const primary = validateOption(route, `route ${modelClass}`);
+		let alternates;
+		if (route.alternates !== undefined) {
+			if (!Array.isArray(route.alternates)) {
+				throw fail(`route ${modelClass}: alternates must be an array of options`, { modelClass });
+			}
+			alternates = route.alternates.map((option, index) => validateOption(option, `route ${modelClass} alternates[${index}]`));
+			// One class seats one ROLE: a Peer class never offers a Supervisor option (the
+			// gate would let a Lead seat a governance seat from it). The tool (family) may differ.
+			alternates.forEach((option, index) => {
+				if (providerRole(option.paseoProvider) !== providerRole(primary.paseoProvider)) {
+					throw fail(
+						`route ${modelClass} alternates[${index}]: paseoProvider "${option.paseoProvider}" is a ${providerRole(option.paseoProvider)} provider, but this class seats a ${providerRole(primary.paseoProvider)} (its primary is "${primary.paseoProvider}") — every option of a class seats the same role`,
+						{ modelClass },
+					);
+				}
+			});
+			const seen = new Set([`${primary.paseoProvider}|${primary.model}|${primary.thinking}`]);
+			alternates.forEach((option, index) => {
+				const key = `${option.paseoProvider}|${option.model}|${option.thinking}`;
+				if (seen.has(key)) {
+					throw fail(`route ${modelClass} alternates[${index}] repeats an option already listed (${option.paseoProvider}/${option.model} at ${option.thinking})`, { modelClass });
+				}
+				seen.add(key);
+			});
+		}
+		validated[modelClass] = { ...primary, ...(alternates && alternates.length > 0 ? { alternates } : {}) };
 	}
-	return { hostId: data.hostId.trim(), routes: validated };
+	const disabledModels = validateDisabledModels(data.disabledModels, fail);
+	return {
+		hostId: data.hostId.trim(),
+		routes: validated,
+		...(disabledModels && disabledModels.length > 0 ? { disabledModels } : {}),
+	};
 }
 
 /**
@@ -550,6 +675,7 @@ export function validateClusterConfig(data) {
 			version: 1,
 			hostId,
 			routes: raw.routes ?? {},
+			disabledModels: raw.disabledModels,
 		});
 		hosts[hostId] = {
 			connection: validatedConnection,
@@ -557,6 +683,7 @@ export function validateClusterConfig(data) {
 			capabilities,
 			limits: { writers, readers },
 			routes: validated.routes,
+			...(validated.disabledModels ? { disabledModels: validated.disabledModels } : {}),
 		};
 	}
 	return { version: 1, hosts };
@@ -649,7 +776,7 @@ export function resolveClusterRoute(
 		{ hostId, routes: host.routes },
 		modelClass,
 		inventory,
-		{ strict: options.strict === true },
+		{ strict: options.strict === true, ...(options.option === undefined ? {} : { option: options.option }) },
 	);
 	return {
 		hostId,
@@ -720,6 +847,7 @@ export function loadLocalRouteTable(options = {}) {
 				path: clusterPath,
 				hostId,
 				routes: host.routes,
+				disabledModels: host.disabledModels ?? [],
 				config: cluster,
 				shadowed: routingExists ? routingPath : null,
 			};
@@ -742,6 +870,7 @@ export function loadLocalRouteTable(options = {}) {
 			path: routingPath,
 			hostId: config.hostId,
 			routes: config.routes,
+			disabledModels: config.disabledModels ?? [],
 			config,
 			shadowed: null,
 		};
@@ -769,7 +898,18 @@ export function gateRouteTable(options = {}) {
 	const table = loadLocalRouteTable(options);
 	if (!table.ok) return table;
 	const { config: _config, ...rest } = table;
-	return rest;
+	// A route on a switched-off model carries `modelDisabled` — the gate refuses it
+	// with its own code. `enabled` is NOT touched: that is the class's own switch
+	// (`routing enable|disable`), and the two must stay separately visible.
+	const mark = (option) =>
+		isModelDisabled(rest.disabledModels, option.paseoProvider, option.model) ? { ...option, modelDisabled: true } : option;
+	const routes = Object.fromEntries(
+		Object.entries(rest.routes).map(([modelClass, route]) => [
+			modelClass,
+			{ ...mark(route), ...(route.alternates ? { alternates: route.alternates.map(mark) } : {}) },
+		]),
+	);
+	return { ...rest, routes };
 }
 
 // ---------------------------------------------------------------------------
@@ -953,12 +1093,30 @@ export function resolveRoute(config, modelClass, inventory, options = {}) {
 			{ modelClass },
 		);
 	}
-	const route = config.routes[modelClass];
-	if (!route) {
+	const classRoute = config.routes[modelClass];
+	if (!classRoute) {
 		throw new RoutingError(
 			"HOST_ROUTE_UNAVAILABLE",
 			`routing config for host ${config.hostId} has no route for ${modelClass}`,
 			{ hostId: config.hostId, modelClass },
+		);
+	}
+	// `options.option` picks one option of the class (0 = the primary, the default).
+	const optionIndex = Number.isInteger(options.option) ? options.option : 0;
+	const route = routeOptions(classRoute)[optionIndex];
+	if (!route) {
+		throw new RoutingError(
+			"HOST_ROUTE_UNAVAILABLE",
+			`the route for ${modelClass} on host ${config.hostId} has no option ${optionIndex}`,
+			{ hostId: config.hostId, modelClass, option: optionIndex },
+		);
+	}
+
+	if (route.enabled === false) {
+		throw new RoutingError(
+			"ROUTE_DISABLED",
+			`${optionIndex === 0 ? `the route for ${modelClass}` : `option ${optionIndex} of ${modelClass}`} on host ${config.hostId} is switched off (enabled: false) — switch it on again with: pteam routing enable ${modelClass}${optionIndex === 0 ? "" : ` --option ${optionIndex}`}`,
+			{ hostId: config.hostId, modelClass, option: optionIndex },
 		);
 	}
 
@@ -1237,7 +1395,10 @@ if (isMainModule()) {
 		// The Pi adapter's half of the create_agent route gate: the same table
 		// the Claude hook loads in-process. Always exit 0 with JSON — a load
 		// failure is DATA the gate refuses on, not a crash to be retried.
-		emit(gateRouteTable(), 0);
+		// Job-less on purpose: the gate subprocess is scripts/gate-table.mjs (this
+		// file cannot import jobs.mjs, which imports it). Kept for `pteam` and tests.
+		const table = gateRouteTable();
+		emit(table, 0);
 	}
 	try {
 		const config = loadRoutingConfig(optArg("--routes"));

@@ -454,7 +454,7 @@ export async function verifyFork(input = {}, options = {}) {
 	// stamped on it at fork time, not from whatever this call repeats: a verify
 	// that echoed the caller's values would pass a fork moved onto any model.
 	// A caller value that disagrees with the route is itself a refusal.
-	const route = forkRoute(
+	let route = forkRoute(
 		role,
 		state.provider ?? "",
 		state.labels?.[MODEL_CLASS_LABEL],
@@ -463,6 +463,13 @@ export async function verifyFork(input = {}, options = {}) {
 		options,
 		state.labels,
 	);
+	// A class that offers several options cannot be verified against "its" route: the
+	// fork was created on ONE of them (named when it was forked). The fork passes when
+	// what it actually runs IS one of the usable options; any other model or thinking
+	// is still refused, and the fork deleted, exactly as before.
+	if (!route.ok && route.reason.includes("ROUTE_OPTION_AMBIGUOUS")) {
+		route = forkRoute(role, state.provider ?? "", state.labels?.[MODEL_CLASS_LABEL], state.model ?? null, state.thinking ?? null, options, state.labels);
+	}
 	const reason =
 		(route.ok ? null : route.reason.replace(/^BLOCKED: /, "BLOCKED: FORK_MODEL_UNROUTABLE — ")) ??
 		forkModelBlockReason({

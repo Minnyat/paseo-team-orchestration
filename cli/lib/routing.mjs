@@ -38,7 +38,10 @@ import {
 	RoutingError,
 	THINKING_LEVELS_BY_FAMILY,
 	composeProviderModel,
+	disabledModelProblem,
+	isModelDisabled,
 	loadLocalRouteTable,
+	routeOptions,
 	providerFamily,
 	resolveRoute,
 	validateClusterConfig,
@@ -75,19 +78,35 @@ function enforcementWarning(env) {
 		: null;
 }
 
-function describeRoutes(routes) {
+function describeRoutes(routes, disabledModels = []) {
 	return ALL_MODEL_CLASSES.map((modelClass) => {
 		const route = routes?.[modelClass];
 		const required = MODEL_CLASSES.includes(modelClass);
 		if (!route) return { class: modelClass, required, configured: false };
+		// Every option of the class (0 = the primary). The class-level fields below
+		// describe the primary, as they always did; `usable` says whether the class
+		// can be seated at all — when ANY option is on and its model is not off.
+		const options = routeOptions(route).map((option) => ({
+			index: option.index,
+			enabled: option.enabled,
+			modelDisabled: isModelDisabled(disabledModels, option.paseoProvider, option.model),
+			paseoProvider: option.paseoProvider,
+			model: option.model,
+			thinking: option.thinking,
+			createAgentProvider: composeProviderModel(option.paseoProvider, option.model),
+		}));
 		return {
 			class: modelClass,
 			required,
 			configured: true,
+			enabled: options.some((option) => option.enabled),
+			modelDisabled: options.every((option) => option.modelDisabled || !option.enabled) && options.some((option) => option.modelDisabled),
+			usable: options.some((option) => option.enabled && !option.modelDisabled),
 			paseoProvider: route.paseoProvider,
 			model: route.model,
 			thinking: route.thinking,
 			createAgentProvider: composeProviderModel(route.paseoProvider, route.model),
+			options,
 		};
 	});
 }
@@ -109,10 +128,17 @@ export function routingShow({ env = process.env } = {}) {
 	if (table.shadowed) {
 		warnings.push(`${table.shadowed} exists but is NOT read: the cluster file's local host "${table.hostId}" is the source`);
 	}
-	const classes = describeRoutes(table.routes);
+	const classes = describeRoutes(table.routes, table.disabledModels);
 	for (const entry of classes) {
 		if (!entry.required && !entry.configured) {
 			warnings.push(`${entry.class} is not configured — the gate refuses the flow that needs it (pteam routing set ${entry.class} ...)`);
+		}
+		if (entry.configured && !entry.usable) {
+			if (entry.modelDisabled) {
+				warnings.push(`${entry.class} routes to a model that is switched off — the gate refuses every seating of this class (the Human switches the model on: pteam routing enable-model <family>/<model>)`);
+			} else {
+				warnings.push(`${entry.class} is switched off — the gate refuses every seating of this class, it is never rerouted (the Human switches it on: pteam routing enable ${entry.class})`);
+			}
 		}
 	}
 	return {
@@ -122,6 +148,7 @@ export function routingShow({ env = process.env } = {}) {
 		path: table.path,
 		hostId: table.hostId,
 		classes,
+		disabledModels: table.disabledModels ?? [],
 		warnings,
 	};
 }
@@ -271,16 +298,8 @@ export function requireClass(modelClass) {
 	}
 }
 
-/**
- * `routing set` — validate strictly against the live inventory, then write.
- *
- * `inventoryFor` is injectable for tests; production reads the local daemon.
- */
-export async function routingSet(
-	{ modelClass, provider, model, thinking, hostId },
-	{ env = process.env, inventoryFor = liveInventory } = {},
-) {
-	requireClass(modelClass);
+/** The --provider/--model/--thinking of `set` and `add-option`, checked the same way. */
+function checkOptionArgs(modelClass, provider, model, thinking) {
 	if (!ROLE_PROVIDERS.includes(provider)) {
 		throw new RoutingCommandError(
 			"PROVIDER_INVALID",
@@ -304,19 +323,45 @@ export async function routingSet(
 			`--thinking "${thinking ?? ""}" is not a ${providerFamily(provider)} thinking level (${levels.join(", ")})`,
 		);
 	}
+}
 
-	const target = editTarget(env, hostId);
+/** A cluster host must be this machine's: its inventory is the local daemon's. */
+function assertLocalHost(target) {
 	if (target.kind === "cluster") {
 		const type = target.raw.hosts[target.hostId]?.connection?.type;
 		if (type !== "local") {
 			throw new RoutingCommandError(
 				"REMOTE_HOST_UNVERIFIABLE",
-				`host "${target.hostId}" is connection.type "${type}" — its inventory lives on another daemon, and this command validates only against the LOCAL one. Nothing written. Run \`pteam routing set\` on that host, or edit ${target.path} and verify with \`pteam preflight --strict --host-id ${target.hostId}\`.`,
+				`host "${target.hostId}" is connection.type "${type}" — its inventory lives on another daemon, and this command validates only against the LOCAL one. Nothing written. Run the command on that host, or edit ${target.path} and verify with \`pteam preflight --strict --host-id ${target.hostId}\`.`,
 			);
 		}
 	}
-	const route = { paseoProvider: provider, model, thinking };
+}
+
+/**
+ * `routing set` — validate strictly against the live inventory, then write.
+ *
+ * `inventoryFor` is injectable for tests; production reads the local daemon.
+ */
+export async function routingSet(
+	{ modelClass, provider, model, thinking, hostId },
+	{ env = process.env, inventoryFor = liveInventory } = {},
+) {
+	requireClass(modelClass);
+	checkOptionArgs(modelClass, provider, model, thinking);
+
+	const target = editTarget(env, hostId);
+	assertLocalHost(target);
 	const previous = routesOf(target)[modelClass] ?? null;
+	// Changing WHAT a class routes to must not silently switch it back on.
+	// ...and must not drop the class's other options.
+	const route = {
+		paseoProvider: provider,
+		model,
+		thinking,
+		...(previous?.enabled === false ? { enabled: false } : {}),
+		...(Array.isArray(previous?.alternates) && previous.alternates.length > 0 ? { alternates: previous.alternates } : {}),
+	};
 	routesOf(target)[modelClass] = route;
 	validateCandidate(target);
 
@@ -329,7 +374,9 @@ export async function routingSet(
 	}
 	let resolved;
 	try {
-		resolved = resolveRoute({ hostId: target.hostId, routes: { [modelClass]: route } }, modelClass, live.inventory, {
+		// The route is verified as a route; whether its class is switched on is a separate fact.
+		const { enabled: _enabled, alternates: _alternates, ...verifiable } = route;
+		resolved = resolveRoute({ hostId: target.hostId, routes: { [modelClass]: verifiable } }, modelClass, live.inventory, {
 			strict: true,
 		});
 	} catch (error) {
@@ -351,6 +398,125 @@ export async function routingSet(
 		createAgentProvider: resolved.createAgentProvider,
 		thinkingValidated: resolved.thinkingValidated,
 	};
+}
+
+/**
+ * `routing enable|disable <CLASS>` — the quick switch. Flips `enabled` on one
+ * route and nothing else: model and thinking stay, so enabling restores exactly
+ * what was there. No live inventory is needed to switch OFF, and none is
+ * demanded to switch ON either — preflight / `routing check` verify it. The
+ * gate reads the file on every create_agent, so the change is live at once.
+ */
+export function routingToggle({ modelClass, enabled, hostId, option }, { env = process.env } = {}) {
+	requireClass(modelClass);
+	const target = editTarget(env, hostId);
+	const routes = routesOf(target);
+	const route = routes[modelClass];
+	if (!route || typeof route !== "object") {
+		throw new RoutingCommandError(
+			"CLASS_UNCONFIGURED",
+			`${modelClass} has no route in ${target.path} — there is nothing to switch (pteam routing set ${modelClass} ...)`,
+		);
+	}
+	// Without --option the whole class is switched (every option); with it, ONE option
+	// (0 = the primary, 1.. = the alternates in file order).
+	const nodes = [route, ...(Array.isArray(route.alternates) ? route.alternates : [])];
+	if (option !== undefined && (!Number.isInteger(option) || option < 0 || option >= nodes.length)) {
+		throw new RoutingCommandError("OPTION_UNKNOWN", `${modelClass} has options 0..${nodes.length - 1}; --option ${option} is not one of them`);
+	}
+	const picked = option === undefined ? nodes : [nodes[option]];
+	const was = picked.every((node) => node.enabled !== false) ? true : picked.every((node) => node.enabled === false) ? false : null;
+	if (was === enabled) {
+		return { ok: true, wrote: false, path: target.path, hostId: target.hostId, class: modelClass, ...(option === undefined ? {} : { option }), enabled, note: `already ${enabled ? "on" : "off"}; nothing to do` };
+	}
+	for (const node of picked) {
+		if (enabled) delete node.enabled;
+		else node.enabled = false;
+	}
+	validateCandidate(target);
+	const backup = writeTarget(target);
+	return { ok: true, wrote: true, path: target.path, backup, hostId: target.hostId, class: modelClass, ...(option === undefined ? {} : { option }), enabled, previous: was };
+}
+
+/**
+ * `routing add-option <CLASS> --provider … --model … --thinking …` — give a class
+ * one more way to be seated (another tool, or the same tool on another model).
+ * Verified as strictly as `set` (the live inventory of the local daemon) and
+ * written the same way (backup, atomic, refuses a concurrent edit). The class
+ * stays one class: the Lead seats ONE of its usable options, and the gate checks
+ * the one it names — adding an option changes what may be chosen, never what is
+ * chosen.
+ */
+export async function routingAddOption(
+	{ modelClass, provider, model, thinking, hostId },
+	{ env = process.env, inventoryFor = liveInventory } = {},
+) {
+	requireClass(modelClass);
+	checkOptionArgs(modelClass, provider, model, thinking);
+	const target = editTarget(env, hostId);
+	assertLocalHost(target);
+	const route = routesOf(target)[modelClass];
+	if (!route || typeof route !== "object") {
+		throw new RoutingCommandError("CLASS_UNCONFIGURED", `${modelClass} has no route in ${target.path} — set the primary first (pteam routing set ${modelClass} ...)`);
+	}
+	const added = { paseoProvider: provider, model, thinking };
+	route.alternates = [...(Array.isArray(route.alternates) ? route.alternates : []), added];
+	validateCandidate(target); // role, model shape, thinking level, duplicates
+	const live = await inventoryFor(provider, { env });
+	if (!live.ok) {
+		throw new RoutingCommandError("INVENTORY_UNAVAILABLE", `${live.message} — the option cannot be verified, and an unverified option is not written`);
+	}
+	let resolved;
+	try {
+		resolved = resolveRoute({ hostId: target.hostId, routes: { [modelClass]: added } }, modelClass, live.inventory, { strict: true });
+	} catch (error) {
+		throw new RoutingCommandError(error instanceof RoutingError ? error.code : "ROUTE_UNROUTABLE", `${String(error?.message ?? error)} — nothing written`);
+	}
+	const backup = writeTarget(target);
+	return { ok: true, wrote: true, path: target.path, backup, hostId: target.hostId, class: modelClass, option: route.alternates.length, added, createAgentProvider: resolved.createAgentProvider, thinkingValidated: resolved.thinkingValidated };
+}
+
+/** `routing remove-option <CLASS> <N>` — drop alternate N (1..); the primary is changed with `set`, never removed. */
+export function routingRemoveOption({ modelClass, option, hostId }, { env = process.env } = {}) {
+	requireClass(modelClass);
+	const target = editTarget(env, hostId);
+	const route = routesOf(target)[modelClass];
+	const alternates = Array.isArray(route?.alternates) ? route.alternates : [];
+	if (!Number.isInteger(option) || option < 1 || option > alternates.length) {
+		throw new RoutingCommandError("OPTION_UNKNOWN", `${modelClass} has ${alternates.length} alternate option(s), numbered 1..${alternates.length || 0}; "${option}" is not one of them (the primary, 0, is changed with \`routing set\`)`);
+	}
+	const [removed] = alternates.splice(option - 1, 1);
+	if (alternates.length === 0) delete route.alternates;
+	validateCandidate(target);
+	const backup = writeTarget(target);
+	return { ok: true, wrote: true, path: target.path, backup, hostId: target.hostId, class: modelClass, removed, option };
+}
+
+/**
+ * `routing disable-model|enable-model <family/model>` — the "this model is out
+ * of credit" switch. One entry in `disabledModels` of the file the gate reads
+ * (the host's own list in a cluster file): every class route and every job
+ * executor on that model is refused/skipped at once, on the next seating. A key
+ * ending in "/*" switches off a whole prefix ("pi/Minnyat/*" = the endpoint).
+ * Nothing is rerouted: a class on that model is simply unavailable until you
+ * switch the model back on or point the class somewhere else.
+ */
+export function routingModelSwitch({ key, enabled, hostId }, { env = process.env } = {}) {
+	const problem = disabledModelProblem(key);
+	if (problem) throw new RoutingCommandError("MODEL_KEY_INVALID", `"${key ?? ""}" ${problem}`);
+	const target = editTarget(env, hostId);
+	const holder = target.kind === "cluster" ? target.raw.hosts[target.hostId] : target.raw;
+	const list = Array.isArray(holder.disabledModels) ? holder.disabledModels : [];
+	const was = list.includes(key);
+	if (was === !enabled) {
+		return { ok: true, wrote: false, path: target.path, hostId: target.hostId, model: key, enabled, note: `already ${enabled ? "on" : "off"}; nothing to do` };
+	}
+	const next = enabled ? list.filter((entry) => entry !== key) : [...list, key];
+	if (next.length > 0) holder.disabledModels = next;
+	else delete holder.disabledModels;
+	validateCandidate(target);
+	const backup = writeTarget(target);
+	return { ok: true, wrote: true, path: target.path, backup, hostId: target.hostId, model: key, enabled, disabledModels: next };
 }
 
 /** `routing unset` — optional classes only; the five required ones are the contract. */
@@ -411,16 +577,28 @@ export async function routingCheck({ env = process.env, inventoryFor = liveInven
 				add(`route:${modelClass}`, "warn", "optional class not configured — the flow that needs it is refused until it is");
 				continue;
 			}
-			const live = await inventoryFor(route.paseoProvider, { env });
-			if (!live.ok) {
-				add(`route:${modelClass}`, "fail", `${live.message} — unverifiable is not a pass`);
-				continue;
-			}
-			try {
-				const resolved = resolveRoute(table, modelClass, live.inventory, { strict: true });
-				add(`route:${modelClass}`, "pass", `${resolved.createAgentProvider} + thinking=${route.thinking}`);
-			} catch (error) {
-				add(`route:${modelClass}`, "fail", String(error?.message ?? error));
+			// Every option is checked; the id of option N > 0 is `route:CLASS#N`.
+			for (const option of routeOptions(route)) {
+				const id = option.index === 0 ? `route:${modelClass}` : `route:${modelClass}#${option.index}`;
+				if (!option.enabled) {
+					add(id, "warn", `switched off — ${option.index === 0 && !route.alternates ? "the gate refuses every seating of this class" : "this option is not offered"} (pteam routing enable ${modelClass}${option.index === 0 && !route.alternates ? "" : ` --option ${option.index}`})`);
+					continue;
+				}
+				if (isModelDisabled(table.disabledModels, option.paseoProvider, option.model)) {
+					add(id, "warn", `its model is switched off (disabledModels) — this option is not offered (pteam routing enable-model <family>/<model>)`);
+					continue;
+				}
+				const live = await inventoryFor(option.paseoProvider, { env });
+				if (!live.ok) {
+					add(id, "fail", `${live.message} — unverifiable is not a pass`);
+					continue;
+				}
+				try {
+					const resolved = resolveRoute(table, modelClass, live.inventory, { strict: true, option: option.index });
+					add(id, "pass", `${resolved.createAgentProvider} + thinking=${option.thinking}`);
+				} catch (error) {
+					add(id, "fail", String(error?.message ?? error));
+				}
 			}
 		}
 	}
@@ -437,15 +615,20 @@ export function formatShow(result) {
 	} else {
 		lines.push(`route table: ${result.path}  (host "${result.hostId}", source ${result.source})`);
 		lines.push(`enforcement: ${result.enforcement}`);
+		const tags = (option) => `${option.enabled ? "" : " [OFF]"}${option.modelDisabled ? " [MODEL OFF]" : ""}`;
 		for (const entry of result.classes) {
-			const tag = entry.required ? "" : " (optional)";
-			lines.push(
-				entry.configured
-					? `  ${entry.class.padEnd(22)} ${entry.createAgentProvider}  thinking=${entry.thinking}${tag}`
-					: `  ${entry.class.padEnd(22)} — not configured${tag}`,
-			);
+			const optional = entry.required ? "" : " (optional)";
+			if (!entry.configured) {
+				lines.push(`  ${entry.class.padEnd(22)} — not configured${optional}`);
+				continue;
+			}
+			const [first, ...more] = entry.options;
+			lines.push(`  ${entry.class.padEnd(22)} ${first.createAgentProvider}  thinking=${first.thinking}${optional}${tags(first)}`);
+			// Several options: the Lead seats ONE of the usable ones; none is chosen for it.
+			for (const option of more) lines.push(`  ${"".padEnd(22)} #${option.index} ${option.createAgentProvider}  thinking=${option.thinking}${tags(option)}`);
 		}
 	}
+	if (result.ok && (result.disabledModels ?? []).length > 0) lines.push(`models switched off: ${result.disabledModels.join(", ")}`);
 	for (const warning of result.warnings ?? []) lines.push(`WARN ${warning}`);
 	return `${lines.join("\n")}\n`;
 }

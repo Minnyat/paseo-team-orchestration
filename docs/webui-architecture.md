@@ -382,4 +382,16 @@ trình soạn thảo. Vì vậy:
   khi lưu (Pi còn có provider có sẵn không nằm trong file). Các thẻ giống nhau (5 lớp việc
   trong routing, từng host trong cluster) chỉ in lời gợi ý ở thẻ đầu; thẻ sau để dưới dạng
   tooltip.
+- **Sửa một chỗ không dựng lại cả trang.** Thêm/bớt một lựa chọn, một thẻ, một dòng chỉ vẽ lại
+  chính control đó (không gọi dựng lại toàn form), nên nút vừa bấm vẫn ở chỗ cũ và dòng mới
+  được cuộn vào tầm nhìn + lấy focus. Phần còn dựng lại toàn form (Lưu → đọc lại file, mẫu
+  điền sẵn, hộp thoại model) giữ vị trí: nhớ thẻ đầu tiên đang thấy và độ lệch của nó rồi
+  đặt lại, và nhớ thẻ/“Tuỳ chọn nâng cao” nào người dùng đã mở hay đóng (khoá theo vị trí
+  trong tài liệu). Đổi sang mục khác thì bắt đầu lại từ đầu trang.
+- **Lớp việc chia theo vai trò rồi chức năng** (`keyGroups` / `keyInfo` trong schema, dùng
+  chung cho routing và từng host của cluster): Peer (làm việc) · Supervisor (giám sát, quản
+  trị) · Lead (khôi phục). Mỗi lớp là một thẻ gập một dòng — `runtime · model · thinking`,
+  vai trò thực của route, “+N lựa chọn”, “x/y đang bật” — và mở ra thành bảng mỗi lựa chọn một
+  dòng. Thẻ không bao giờ đổi nhóm khi người dùng đổi vai trò trong route. Bảng “Công tắc
+  nhanh” chia nhóm giống hệt.
 

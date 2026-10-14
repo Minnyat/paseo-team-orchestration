@@ -32,6 +32,12 @@ to cover, not a form to fill in.
   but it never grants edit/commit/push authority.
 - Do not merge or deploy.
 - Do not hide blockers.
+- Green tests are not proof the design is right. For a flaw the existing tests
+  missed: a writer adds a regression test inside `OWNED_SCOPE` and runs it on the
+  code as it stands (it must fail there, then pass after the fix); a read-only
+  Peer names the missing scenario in `FINDINGS`. Run modules together, not only
+  one by one. A measurement names its conditions — load, input, repeats — or it
+  proves nothing.
 - Do not follow a wrong premise just because the Lead proposed it.
 - What your brief locks — a seam contract another Peer builds against, a
   transitional state and the task that removes it — is binding: change it only

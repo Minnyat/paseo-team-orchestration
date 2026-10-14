@@ -506,6 +506,29 @@ async function leasesForDecision({ core, claude }, role, toolName, toolInput, en
  * an import failure as null — both refused by the core, never read as "no
  * routes to check".
  */
+/**
+ * "Routing now" for a Lead/Supervisor, rebuilt from the route and jobs files on
+ * the call. Null for other roles, or when the core predates the notice. Claude's
+ * additionalContext persists in the transcript, so the hook injects it at session
+ * start and again only when `fingerprint` changed (see user-prompt-submit).
+ */
+async function routingNowFor(core, role, env) {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (typeof core.routingAvailabilityNotice !== "function") return null;
+	try {
+		const { gateRouteTable } = await import("./model-routing.mjs");
+		let table;
+		try {
+			table = (await import("./gate-table.mjs")).gateTable({ env });
+		} catch {
+			table = gateRouteTable({ env });
+		}
+		return core.routingAvailabilityNotice(role, table);
+	} catch {
+		return core.routingAvailabilityNotice(role, null);
+	}
+}
+
 async function routeTableForDecision({ core, claude }, role, toolName, toolInput, env) {
 	if (role !== "lead" && role !== "supervisor") return undefined;
 	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
@@ -519,7 +542,12 @@ async function routeTableForDecision({ core, claude }, role, toolName, toolInput
 	if (!needed) return undefined;
 	try {
 		const { gateRouteTable } = await import("./model-routing.mjs");
-		return gateRouteTable({ env });
+		try {
+			return (await import("./gate-table.mjs")).gateTable({ env });
+		} catch {
+			// An install that predates gate-table.mjs: class-route seatings still work.
+			return gateRouteTable({ env });
+		}
 	} catch {
 		return null;
 	}
@@ -563,13 +591,30 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		const rolePrompt = core.loadRolePrompt(role);
 		const routeNotice = core.routeEnforcementNotice?.(role, env) ?? null;
 		const watchNotice = watchNoticeFor(core, role, env);
-		if (!rolePrompt && !routeNotice && !watchNotice) return null;
+		const routingNow = await routingNowFor(core, role, env);
+		if (routingNow) {
+			// Remember what was shown, so a later turn re-injects only on a change.
+			writeSessionState(
+				payload?.session_id,
+				{
+					sessionId: payload?.session_id ?? null,
+					role,
+					updatedAt: new Date(now).toISOString(),
+					rolePromptInjected: true,
+					brief: null,
+					routingFingerprint: routingNow.fingerprint,
+				},
+				env,
+			);
+		}
+		if (!rolePrompt && !routeNotice && !watchNotice && !routingNow) return null;
 		return {
 			hookSpecificOutput: {
 				hookEventName: "SessionStart",
 				additionalContext: [
 					rolePrompt ? roleContextBlock(rolePrompt, role) : "",
 					watchNotice ?? "",
+					routingNow?.text ?? "",
 					routeNotice ?? "",
 				]
 					.filter(Boolean)
@@ -585,6 +630,10 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		const brief = role === "peer" ? core.parseTaskBrief(prompt) : null;
 		const previous = readSessionState(payload?.session_id, env, now);
 		const injected = previous?.rolePromptInjected === true;
+		// Reload "routing now" from the files; show it when it differs from what this
+		// session was last told (first turn of a resumed session included).
+		const routingNow = await routingNowFor(core, role, env);
+		const routingChanged = routingNow !== null && routingNow.fingerprint !== previous?.routingFingerprint;
 		writeSessionState(
 			payload?.session_id,
 			{
@@ -593,6 +642,7 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 				updatedAt: new Date(now).toISOString(),
 				rolePromptInjected: true,
 				brief: brief ? core.serializeBrief(brief) : null,
+				...(routingNow ? { routingFingerprint: routingNow.fingerprint } : {}),
 			},
 			env,
 		);
@@ -640,6 +690,7 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		// Every turn, not once: an opt-out left on after an emergency is exactly
 		// the state nobody remembers by turn fifty.
 		const routeNotice = core.routeEnforcementNotice?.(role, env) ?? null;
+		if (routingChanged) blocks.push(`${previous?.routingFingerprint ? "CHANGED since your last turn — " : ""}${routingNow.text}`);
 		if (routeNotice) blocks.push(routeNotice);
 		if (blocks.length === 0) return null;
 		return {

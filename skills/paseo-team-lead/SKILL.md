@@ -118,6 +118,17 @@ accepts exactly that spelling. Do not tell the writer to leave the tree in
 place: review runs from the SHA, and the writer removes it when it has reported
 (a correction re-adds it from the branch).
 
+### Work that needs several models or tools
+
+A turn opens with "Routing now", re-read from the files, so a model the Human
+switched off is already gone. For work set up as a job, run `pteam jobs resolve
+<id>` right before each seating: it prints, per usable executor, the exact
+`create_agent` arguments — provider, `settings.thinkingOptionId`, and the labels
+`team.model-class` and `team.job`. Seat exactly those, one per executor, in the
+job's `run` order. An executor in `skipped` is off: leave it out, never swap in
+another. Every seating still passes the route gate; a refusal lists what is
+usable now. Running seats keep their model, so replace one whose model went off.
+
 ## Accessing Paseo tools
 
 Paseo tools are not separate tools in the prompt — they are reached through the
@@ -766,13 +777,14 @@ After implementation:
    Pass A never carries the verdict: it has no acceptance authority and cannot
    tell a benign mismatch from a real one. Splitting the work does not split
    the independence — Pass B still runs in the fresh exact-SHA worktree and
-   still reaches its own conclusion. What it stops doing is re-reading two
-   thousand cross-references by hand on the most expensive model in the
-   cluster.
+   still reaches its own conclusion.
 5. Require every OCR `reviewable_files` item to end as `reviewed` or
    `skipped:<concrete reason>`, with total/reviewed/skipped/coverage evidence.
    Require structured findings and a recommendation of only `PASS`,
    `CHANGES_REQUIRED`, or `BLOCKED`; the Reviewer has no acceptance authority.
+   Green tests are not acceptance evidence by themselves: a flaw the old tests
+   missed needs a regression test that fails on the code as it stood and passes
+   on the candidate SHA, and what spans modules is run together.
 6. Lead decides candidate acceptance — and DECIDING is not the same as
    CHECKING. Acceptance has a mechanical half too: does the document carry the
    headers the brief asked for, does its content follow the instructions, do

@@ -13,6 +13,12 @@
  *   lines:  { path, type: "lines" }            one string per textarea line
  *   kv:     { path, type: "kv" }               object of string -> string
  *   map:    { path, type: "map", keyLabel?, addLabel?, fixedKeys?, item? }
+ *           Presentation extras for a map of fixed keys: `keyGroups`
+ *           [{ id, label, labelEn, keys }] prints the cards under sub-headings
+ *           (a key in no group goes under "Khác"; a card never moves between
+ *           groups), `keyInfo` { KEY: { label, labelEn } } is one line on what a
+ *           key is for, and `item.layout: "route"` draws each card as a
+ *           collapsible line plus a table of its options. None of it is stored.
  *   list:   { path, type: "list", label, addLabel?, minItems?,
  *             item: { seed: {...}, fields: [...] } }
  *           an ARRAY of objects, one card per element, in order (the order
@@ -125,9 +131,49 @@ function thinkingByProvider() {
 const OPTIONAL_ROUTES_HINT =
 	"Hai lớp tuỳ chọn: SUPERVISOR_GOVERNANCE (vai trò supervisor — Lead dựng Supervisor) và LEAD_RECOVERY (vai trò lead — Supervisor khôi phục Lead). Để trống thì hợp lệ, nhưng luồng tương ứng bị chặn cho tới khi cấu hình; không bao giờ mượn route của lớp khác.";
 
+/**
+ * How the class cards are laid out, said once for the routing form and every
+ * cluster host. Presentation only: the stored keys, validators and gate never
+ * read it. Grouped by the role of the seat each class builds, then by what the
+ * class is for, so a card never moves when its role dropdown changes.
+ * MONITOR_ECONOMY sits with the Supervisor: its route must name a *-supervisor
+ * provider (docs/model-routing.md), it is just the cheap observation tier.
+ */
+export const ROUTE_CLASS_GROUPS = Object.freeze([
+	{
+		id: "peer",
+		label: "Peer — Lead dựng để làm việc",
+		labelEn: "Peer — seated by the Lead to do the work",
+		keys: ["FAST_READ", "CODING_MEDIUM", "REASONING_HIGH", "REVIEW_HIGH"],
+	},
+	{
+		id: "supervisor",
+		label: "Supervisor — giám sát và quản trị",
+		labelEn: "Supervisor — watching and governing",
+		keys: ["MONITOR_ECONOMY", "SUPERVISOR_GOVERNANCE"],
+	},
+	{
+		id: "lead",
+		label: "Lead — khôi phục",
+		labelEn: "Lead — recovery",
+		keys: ["LEAD_RECOVERY"],
+	},
+]);
+
+/** One line on what each class is for (skills/paseo-team-lead/SKILL.md, "Model classes"). */
+export const ROUTE_CLASS_INFO = Object.freeze({
+	FAST_READ: { label: "Đọc, khảo sát, kiểm tra cơ học", labelEn: "Scout, research, mechanical checks" },
+	CODING_MEDIUM: { label: "Viết code, sửa lỗi, viết test", labelEn: "Implementation, bugfix, tests" },
+	REASONING_HIGH: { label: "Kiến trúc, an toàn, di trú", labelEn: "Architecture, safety, migrations" },
+	REVIEW_HIGH: { label: "Reviewer độc lập, nghiệm thu", labelEn: "Independent review, acceptance" },
+	MONITOR_ECONOMY: { label: "Quan sát thường ngày (rẻ)", labelEn: "Everyday observation (cheap)" },
+	SUPERVISOR_GOVERNANCE: { label: "Ghế Supervisor quyết định", labelEn: "Deciding Supervisor seat" },
+	LEAD_RECOVERY: { label: "Dựng lại Lead", labelEn: "Seating a Lead again" },
+});
+
 /** Shared shape of one route card inside routing and every cluster host. */
-function routeFields() {
-	return [
+function routeFields({ nested = false } = {}) {
+	const fields = [
 		{
 			path: "paseoProvider",
 			// One stored key ("claude-peer"), two dropdowns: VAI TRÒ first, then
@@ -143,12 +189,14 @@ function routeFields() {
 			// the full flat vocabulary to fall back to.
 			enum: [...ROLE_PROVIDERS],
 			label: "Vai trò & runtime",
+			labelEn: "Role & runtime",
 			hint: "Chọn VAI TRÒ trước (supervisor/lead/peer), rồi RUNTIME chạy nó. Ô mô hình và mức suy nghĩ bên dưới đổi theo lựa chọn này.",
 		},
 		{
 			path: "model",
 			type: "enum",
 			label: "Mô hình",
+			labelEn: "Model",
 			hint: `Danh sách model của chính provider đã chọn, đọc từ daemon. Daemon không trả về được thì ô này lùi về nhập tay — ${MODEL_SHAPE_SENTENCE}.`,
 			// `source: "models"` marks this map as filled at read time from the live
 			// inventory (withModelInventory). An empty map therefore means "the
@@ -162,11 +210,41 @@ function routeFields() {
 			type: "enum",
 			enum: ALL_THINKING_LEVELS,
 			label: "Mức suy nghĩ",
+			labelEn: "Thinking level",
 			hint: "Danh sách đổi theo family: minimal chỉ có ở pi, ultracode chỉ có ở claude. Mức mô hình không hỗ trợ sẽ bị ép xuống âm thầm — chạy preflight để chắc.",
 			optionsBy: { path: "paseoProvider", map: thinkingByProvider() },
 		},
+		{
+			path: "enabled",
+			type: "bool",
+			default: true,
+			label: "Đang bật",
+			labelEn: "Enabled",
+			hint: "Tắt = lựa chọn này không còn được đưa ra (không có gì thay thế tự động). Lớp việc chỉ bị từ chối khi không còn lựa chọn nào đang bật. Model và mức suy nghĩ vẫn được giữ để bật lại. Có hiệu lực ngay, không cần chạy lại Paseo.",
+		},
+		{
+			path: "alternates",
+			type: "list",
+			label: "Tool/model khác của lớp này",
+			labelEn: "Other tools/models for this class",
+			addLabel: "+ Thêm tool/model",
+			hint: "Một lớp việc có thể có nhiều cách dựng: tool khác (pi hoặc claude), hoặc cùng tool với model khác. Lead chọn MỘT trong số các lựa chọn đang bật; cổng chỉ kiểm lựa chọn đó có hợp lệ không. Không có gì tự chọn thay Lead.",
+			hintEn: "A class can be seated several ways: another tool (pi or claude), or the same tool on another model. The Lead picks ONE of the options that are on; the gate only checks that pick. Nothing is chosen for the Lead.",
+			// An alternate is a route without alternates of its own (one level, no tree).
+			item: { seed: { thinking: "medium" }, get fields() { return routeFields({ nested: true }); } },
+		},
 	];
+	return nested ? fields.filter((field) => field.path !== "alternates") : fields;
 }
+
+/** The on/off switch every executor carries, whatever its kind. */
+const executorEnabledField = {
+	path: "enabled",
+	type: "bool",
+	default: true,
+	label: "Đang bật",
+	hint: "Tắt = bỏ qua bước này (không thay bằng bước khác). Cấu hình vẫn được giữ để bật lại.",
+};
 
 /**
  * One executor card of a job. Every field shows for exactly one `kind`; the
@@ -190,12 +268,14 @@ function executorFields() {
 			label: "Lớp việc",
 			hint: "Mô hình thực tế là route của lớp này trong Định tuyến mô hình, đọc lúc dùng.",
 		}),
-		...routeFields().map((field) =>
-			forKind(
-				"route",
-				field.path === "thinking" ? { ...field, hint: `Không bắt buộc. ${field.hint}` } : field,
+		...routeFields({ nested: true })
+			.filter((field) => field.path !== "enabled")
+			.map((field) =>
+				forKind(
+					"route",
+					field.path === "thinking" ? { ...field, hint: `Không bắt buộc. ${field.hint}` } : field,
+				),
 			),
-		),
 		forKind("cli", {
 			path: "tool",
 			type: "string",
@@ -208,6 +288,7 @@ function executorFields() {
 			label: "Tham số thêm",
 			hint: "Mỗi dòng một tham số, nối sau tham số của công cụ.",
 		}),
+		executorEnabledField,
 	];
 }
 
@@ -318,6 +399,15 @@ export const CONFIG_SCHEMAS = {
 						default: false,
 						label: "Ẩn khối suy nghĩ trong kết quả",
 					},
+				],
+			},
+			{
+				id: "tools",
+				label: "Công cụ & phạm vi model",
+				fields: [
+					{ path: "defaultTools", type: "lines", label: "Công cụ khởi động", hint: "Mỗi dòng một tên: read, bash, edit, write; +codemode để thêm, -bash để bỏ. Đây không phải sandbox hay cơ chế duyệt quyền." },
+					{ path: "enabledModels", type: "lines", label: "Model được chọn / luân phiên", hint: "Mỗi dòng một mẫu provider/model. Để trống = không giới hạn." },
+					{ path: "defaultProjectTrust", type: "enum", enum: ["ask", "always", "never"], label: "Tin cậy cấu hình dự án", hint: "ask = hỏi; always = tự nạp cấu hình/extension dự án; never = không nạp. Không giới hạn quyền công cụ trên hệ điều hành." },
 				],
 			},
 			{
@@ -538,15 +628,24 @@ export const CONFIG_SCHEMAS = {
 						keyLabel: "Lớp việc",
 						fixedKeys: [...MODEL_CLASSES],
 						optionalKeys: [...OPTIONAL_MODEL_CLASSES],
-						item: { fields: routeFields() },
+						keyGroups: ROUTE_CLASS_GROUPS,
+						keyInfo: ROUTE_CLASS_INFO,
+						item: { layout: "route", fields: routeFields() },
 					},
 				],
+			},
+			{
+				id: "disabledModels",
+				label: "Model đang tắt",
+				hint: "Model hết tiền hoặc đang lỗi. Mỗi dòng một khoá \"<họ>/<model>\", ví dụ pi/Minnyat/gpt-5.5 hoặc claude/claude-opus-5; kết thúc bằng /* để tắt cả nhóm (pi/Minnyat/* = cả endpoint, pi/* = cả công cụ pi). Lớp việc và bước công việc dùng model này bị từ chối/bỏ qua ngay, không đổi sang model khác. Bật/tắt nhanh ở bảng công tắc phía trên.",
+				fields: [{ path: "disabledModels", type: "lines", label: "Model tắt" }],
 			},
 		],
 	},
 
 	"pi-models": {
 		label: "Kho model Pi",
+		labelEn: "Pi model catalog",
 		// Buttons the form offers above the fields. The whole reason this
 		// section exists is that keeping pi's catalog current used to mean a
 		// terminal; a form you can fill in but not act on would only move half
@@ -556,24 +655,32 @@ export const CONFIG_SCHEMAS = {
 				id: "models-sync",
 				api: "/api/models/sync",
 				label: "Cập nhật danh sách model",
+				labelEn: "Sync model list",
 				hint: "Gọi thử từng model của mọi điểm cuối, rồi chỉ giữ lại những model còn trả lời. Mất vài phút.",
+				hintEn: "Probes every model of every provider and keeps only the ones that answer. Takes minutes.",
 				busy: "Đang gọi thử từng model…",
+				busyEn: "Probing each model…",
 				primary: true,
 			},
 			{
 				id: "models-refresh",
 				api: "/api/models/refresh",
 				label: "Nạp lại cho Paseo",
+				labelEn: "Reload for Paseo",
 				hint: "Dùng khi bạn tự sửa file model: Paseo giữ danh sách cũ tới khi được bảo đọc lại.",
+				hintEn: "Use after editing the model file yourself: Paseo keeps the old list until told to re-read.",
 				busy: "Đang nạp lại…",
+				busyEn: "Reloading…",
 			},
 		],
 		intro: "Mỗi thẻ là một nơi Pi lấy model về. Khoá API không lưu ở đây — chỉ lưu tên biến và đường dẫn file chứa khoá.",
+		introEn: "Each card is a source Pi pulls models from. API keys are never stored here — only env var names and key-file paths.",
 		seed: { version: 1, providers: {} },
 		groups: [
 			{
 				id: "providers",
 				label: "Điểm cuối",
+				labelEn: "Providers",
 				fields: [
 					{
 						path: "providers",
@@ -590,19 +697,25 @@ export const CONFIG_SCHEMAS = {
 								concurrency: 5,
 							},
 							fields: [
-								{ path: "baseUrl", type: "string", label: "Địa chỉ endpoint", hint: "Ví dụ: https://ten-mien/v1" },
+								{ path: "baseUrl", type: "string", trim: true, label: "Địa chỉ endpoint", labelEn: "Base URL", hint: "Ví dụ: https://ten-mien/v1", hintEn: "e.g. https://host/v1" },
 								{
 									path: "keyEnv",
 									type: "string",
+									trim: true,
 									default: "CODING_API_KEY",
 									label: "Biến môi trường chứa khoá",
+									labelEn: "Env var for API key",
 									hint: "Ghi tên biến, không ghi khoá.",
+									hintEn: "The variable name, never the key itself.",
 								},
 								{
 									path: "keyFile",
 									type: "string",
+									trim: true,
 									label: "File chứa khoá",
+									labelEn: "Key file",
 									hint: "Dùng khi biến môi trường trống.",
+									hintEn: "Used when the env var is empty.",
 								},
 								{
 									path: "probe",
@@ -619,26 +732,37 @@ export const CONFIG_SCHEMAS = {
 								// Keys are model ids and stay whole even with dots ("gpt-5.5").
 								{
 									path: "models",
-									type: "map",
+									type: "model-overrides",
 									keyLabel: "Model id",
-									addLabel: "+ Ghi đè giới hạn cho một model",
-									hint: "Để trống = tự tra từ models.dev; thêm model ở đây để ghi đè context window / max output của riêng model đó. Khoá là model id đúng như endpoint trả về (ví dụ gpt-5.5, poolside/laguna-s-2.1). Ô nào để trống thì ô đó vẫn tự tra.",
+									addLabel: "+ Thêm cấu hình model",
+									label: "Cấu hình model",
+									labelEn: "Model overrides",
+									hint: "Bền vững qua các lần đồng bộ. Giới hạn để trống được tra từ models.dev. Lưu rồi Cập nhật danh sách model để áp dụng; xoá cấu hình không xoá model ở endpoint.",
+									hintEn: "Survives every sync. Blank limits resolve from models.dev. Save then Sync to apply; removing an override never removes the model at the endpoint.",
 									item: {
 										fields: [
 											{
 												path: "contextWindow",
 												type: "number",
 												min: 1,
-												label: "Context window",
+												label: "Cửa sổ ngữ cảnh",
+												labelEn: "Context window",
 												hint: "Để trống = tự tra từ models.dev.",
+												hintEn: "Leave blank to resolve from models.dev.",
 											},
 											{
 												path: "maxTokens",
 												type: "number",
 												min: 1,
-												label: "Max output tokens",
+												label: "Token đầu ra tối đa",
+												labelEn: "Max output tokens",
 												hint: "Để trống = tự tra từ models.dev. Không được lớn hơn context window.",
+												hintEn: "Leave blank to resolve from models.dev. Must not exceed the context window.",
 											},
+											{ path: "name", type: "string", trim: true, label: "Tên hiển thị", labelEn: "Display name", hint: "Để trống dùng model ID.", hintEn: "Leave blank to use the model ID." },
+											{ path: "reasoning", type: "bool", choices: [{ label: "Có", labelEn: "Supported", value: true }, { label: "Không", labelEn: "Not supported", value: false }], label: "Suy luận", labelEn: "Reasoning", hint: "Auto = theo kết quả gọi thử; chỉ ghi đè khi đã xác nhận.", hintEn: "Auto follows probe results; override only verified capabilities." },
+											{ path: "input", type: "lines", choices: [{ label: "Văn bản", labelEn: "Text", value: ["text"] }, { label: "Văn bản + ảnh", labelEn: "Text + image", value: ["text", "image"] }], label: "Đầu vào", labelEn: "Input modalities", hint: "Auto hiện dùng text + image, chưa được xác minh.", hintEn: "Auto currently assumes text + image; unverified." },
+											{ path: "include", type: "bool", choices: [{ label: "Thêm thủ công", labelEn: "Include manually", value: true }, { label: "Chỉ khi endpoint liệt kê", labelEn: "Listed only", value: false }], label: "Nguồn model", labelEn: "Discovery", hint: "ID thủ công vẫn qua probe.", hintEn: "Manual IDs still go through probes." },
 										],
 									},
 								},
@@ -720,8 +844,10 @@ export const CONFIG_SCHEMAS = {
 									keyLabel: "Lớp việc",
 									fixedKeys: [...MODEL_CLASSES],
 									optionalKeys: [...OPTIONAL_MODEL_CLASSES],
+									keyGroups: ROUTE_CLASS_GROUPS,
+									keyInfo: ROUTE_CLASS_INFO,
 									hint: OPTIONAL_ROUTES_HINT,
-									item: { fields: routeFields() },
+									item: { layout: "route", fields: routeFields() },
 								},
 							],
 						},
@@ -734,8 +860,73 @@ export const CONFIG_SCHEMAS = {
 	jobs: {
 		label: "Công việc",
 		intro:
-			"Mỗi công việc là một bộ gợi ý cho Lead: làm việc này thì dùng những mô hình hoặc công cụ nào. Mọi executor trong một công việc đều được dùng — \"lần lượt\" là theo thứ tự, không phải \"hỏng cái này thì thử cái kia\". Công việc không tự dựng agent; Lead đọc bằng: pteam jobs list.",
+			"Mỗi công việc là một bộ gợi ý cho Lead: làm việc này thì dùng những mô hình hoặc công cụ nào. Mọi executor đang bật trong một công việc đều được dùng — \"lần lượt\" là theo thứ tự, không phải \"hỏng cái này thì thử cái kia\"; bước đang tắt bị bỏ qua chứ không được thay bằng bước khác. Công việc không tự dựng agent; Lead đọc bằng: pteam jobs list. Công tắc bật/tắt có hiệu lực ngay, không cần chạy lại Paseo.",
 		seed: { version: 1, jobs: {} },
+		// One click, no typing: each preset adds a ready job. They use CLASS executors,
+		// so the model of each step is whatever route that class has on this host — to
+		// pin a specific model, change an executor's kind to "route" afterwards.
+		presets: [
+			{
+				id: "two-reviewers",
+				label: "Mẫu: hai reviewer độc lập (hai model khác nhau)",
+				labelEn: "Preset: two independent reviewers (two different models)",
+				hint: "Chạy song song REVIEW_HIGH và REASONING_HIGH trên cùng một SHA. Tắt model nào hết tiền ở bảng công tắc, bước đó tự bị bỏ qua.",
+				hintEn: "Runs REVIEW_HIGH and REASONING_HIGH side by side on one SHA. Switch off a model that ran out of credit and its step is skipped.",
+				patch: {
+					jobs: {
+						"two-reviewers": {
+							label: "Hai reviewer độc lập",
+							disposition: "independent-reviewer",
+							run: "parallel",
+							executors: [
+								{ kind: "class", modelClass: "REVIEW_HIGH" },
+								{ kind: "class", modelClass: "REASONING_HIGH" },
+							],
+						},
+					},
+				},
+			},
+			{
+				id: "many-models",
+				label: "Mẫu: cùng một việc, nhiều model",
+				labelEn: "Preset: one task, several models",
+				hint: "FAST_READ, CODING_MEDIUM và REASONING_HIGH chạy song song — cùng công cụ nhưng model khác nhau nếu route của chúng khác nhau.",
+				hintEn: "FAST_READ, CODING_MEDIUM and REASONING_HIGH side by side — the same tool on different models when their routes differ.",
+				patch: {
+					jobs: {
+						"many-models": {
+							label: "Một việc, nhiều model",
+							run: "parallel",
+							executors: [
+								{ kind: "class", modelClass: "FAST_READ" },
+								{ kind: "class", modelClass: "CODING_MEDIUM" },
+								{ kind: "class", modelClass: "REASONING_HIGH" },
+							],
+						},
+					},
+				},
+			},
+			{
+				id: "scout-then-build",
+				label: "Mẫu: khảo sát rồi làm (lần lượt)",
+				labelEn: "Preset: scout, then build (in order)",
+				hint: "FAST_READ khảo sát trước, CODING_MEDIUM làm sau. Lần lượt theo thứ tự; bước bị tắt bị bỏ qua, không thay bằng bước khác.",
+				hintEn: "FAST_READ scouts first, CODING_MEDIUM builds after. In order; a switched-off step is skipped, never replaced.",
+				patch: {
+					jobs: {
+						"scout-then-build": {
+							label: "Khảo sát rồi làm",
+							disposition: "engineer",
+							run: "sequential",
+							executors: [
+								{ kind: "class", modelClass: "FAST_READ" },
+								{ kind: "class", modelClass: "CODING_MEDIUM" },
+							],
+						},
+					},
+				},
+			},
+		],
 		groups: [
 			{
 				id: "jobs",
@@ -768,6 +959,13 @@ export const CONFIG_SCHEMAS = {
 									hint: "parallel: các executor chạy cùng lúc. sequential: lần lượt theo thứ tự trong danh sách.",
 								},
 								{
+									path: "enabled",
+									type: "bool",
+									default: true,
+									label: "Đang bật",
+									hint: "Tắt = Lead không thấy công việc này trong pteam jobs list. Có hiệu lực ngay.",
+								},
+								{
 									path: "executors",
 									type: "list",
 									label: "Executor",
@@ -780,6 +978,12 @@ export const CONFIG_SCHEMAS = {
 						},
 					},
 				],
+			},
+			{
+				id: "disabledTools",
+				label: "Công cụ đang tắt",
+				hint: "Mỗi dòng một tên công cụ (pi, claude hoặc công cụ khai báo bên dưới). Executor dùng công cụ này bị bỏ qua. Bật/tắt nhanh ở bảng công tắc phía trên.",
+				fields: [{ path: "disabledTools", type: "lines", label: "Công cụ tắt" }],
 			},
 			{
 				id: "cliTools",

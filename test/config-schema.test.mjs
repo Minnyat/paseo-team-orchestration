@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import {
 	CONFIG_SCHEMAS,
 	MODEL_INVENTORY_SECTIONS,
+	ROUTE_CLASS_GROUPS,
+	ROUTE_CLASS_INFO,
 	ROUTING_SECTIONS,
 	schemaForSection,
 	withModelInventory,
@@ -324,13 +326,14 @@ console.log("[paseo-team] config-schema tests passed");
 	assert.ok(!("models" in providers.item.seed), "a new endpoint card starts with no overrides");
 	const models = providers.item.fields.find((f) => f.path === "models");
 	assert.ok(models, "the endpoint card offers per-model overrides");
-	assert.equal(models.type, "map", "keyed by model id");
+	assert.equal(models.type, "model-overrides", "a dedicated table+modal control, still keyed by model id");
+	assert.equal(models.labelEn, "Model overrides", "the control's label is bilingual");
 	assert.equal(models.fixedKeys, undefined, "any model id may be a key");
 	assert.match(models.hint, /models\.dev/, "says where a model without an override gets its limits");
-	assert.match(models.hint, /gpt-5\.5/, "and shows that a dotted model id is a valid key");
+	assert.match(models.hintEn, /models\.dev/, "in English too");
 	// Exactly the keys the sync accepts: anything else would be refused at sync time.
 	assert.deepEqual(models.item.fields.map((f) => f.path), [...OVERRIDE_KEYS]);
-	for (const field of models.item.fields) {
+	for (const field of models.item.fields.filter(f => ["contextWindow", "maxTokens"].includes(f.path))) {
 		assert.equal(field.type, "number");
 		assert.equal(field.default, undefined, `${field.path} has no default: blank means unknown`);
 		assert.match(field.hint, /models\.dev/, `${field.path} says where a blank value comes from`);
@@ -378,6 +381,45 @@ console.log("[paseo-team] config-schema tests passed");
 	seeded.jobs.j.executors[0].modelClass = "FAST_READ";
 	validateJobsConfig(seeded);
 
+	// The routing form's class card offers more tools/models for the class (alternates).
+	const routeItem = CONFIG_SCHEMAS.routing.groups.find((g) => g.id === "routes").fields[0].item;
+	const alt = routeItem.fields.find((f) => f.path === "alternates");
+	assert.equal(alt.type, "list");
+	assert.deepEqual(alt.item.fields.map((f) => f.path), ["paseoProvider", "model", "thinking", "enabled"], "an alternate is a route without alternates of its own");
+	assert.ok(alt.labelEn && alt.hintEn);
+	assert.equal(JSON.parse(JSON.stringify(CONFIG_SCHEMAS.routing)).groups.find((g) => g.id === "routes").fields[0].item.fields.find((f) => f.path === "alternates").item.fields.length, 4, "it survives the JSON the CLI sends to the form");
+	// Class cards are grouped by role then function: every class sits in exactly
+	// one group (a class in none would vanish from the form), and the optional
+	// classes sit with the role they seat.
+	const grouped = ROUTE_CLASS_GROUPS.flatMap((group) => group.keys);
+	assert.deepEqual([...grouped].sort(), [...ALL_MODEL_CLASSES].sort(), "every class is in exactly one group");
+	assert.equal(new Set(grouped).size, grouped.length);
+	assert.ok(ROUTE_CLASS_GROUPS.find((g) => g.id === "supervisor").keys.includes("SUPERVISOR_GOVERNANCE"));
+	assert.ok(ROUTE_CLASS_GROUPS.find((g) => g.id === "lead").keys.includes("LEAD_RECOVERY"));
+	for (const cls of ALL_MODEL_CLASSES) assert.ok(ROUTE_CLASS_INFO[cls]?.label && ROUTE_CLASS_INFO[cls]?.labelEn, `${cls} says what it is for, in both languages`);
+	for (const group of ROUTE_CLASS_GROUPS) assert.ok(group.label && group.labelEn);
+	const routesField = CONFIG_SCHEMAS.routing.groups.find((g) => g.id === "routes").fields[0];
+	assert.equal(routesField.item.layout, "route", "the routing form lays each class out as an options table");
+	assert.deepEqual(routesField.keyGroups, ROUTE_CLASS_GROUPS);
+	const clusterRoutes = CONFIG_SCHEMAS.cluster.groups[0].fields.find((f) => f.type === "map").item.fields.find((f) => f.path === "routes");
+	assert.deepEqual(clusterRoutes.keyGroups, ROUTE_CLASS_GROUPS, "every cluster host groups its classes the same way");
+	for (const column of ["paseoProvider", "model", "thinking", "enabled"]) {
+		assert.ok(routeItem.fields.find((f) => f.path === column)?.labelEn, `${column} has an English column label`);
+	}
+	// job route executors do not get it (a job names its executors itself)
+	assert.ok(!executors.item.fields.some((f) => f.path === "alternates"));
+
+	// One-click presets: each merged onto the seed is a file the validator accepts.
+	const presets = CONFIG_SCHEMAS.jobs.presets;
+	assert.ok(presets.length >= 3, "the jobs form offers starter jobs");
+	for (const preset of presets) {
+		assert.ok(preset.labelEn && preset.hintEn, `${preset.id} has an English alternate`);
+		const doc = structuredClone(CONFIG_SCHEMAS.jobs.seed);
+		for (const [id, job] of Object.entries(preset.patch.jobs)) doc.jobs[id] = structuredClone(job);
+		validateJobsConfig(doc);
+		assert.ok(Object.values(doc.jobs).every((job) => job.executors.length >= 2), `${preset.id}: several models/tools in one job`);
+	}
+
 	const byPath = Object.fromEntries(executors.item.fields.map((f) => [f.path, f]));
 	assert.deepEqual(byPath.kind.enum, [...EXECUTOR_KINDS]);
 	assert.equal(byPath.kind.showIf, undefined, "the kind picker is always visible");
@@ -387,10 +429,15 @@ console.log("[paseo-team] config-schema tests passed");
 		const shown = executors.item.fields.filter((f) => f.showIf?.equals === kind).map((f) => f.path);
 		assert.deepEqual(
 			shown.sort(),
-			EXECUTOR_KEYS[kind].filter((key) => key !== "kind").sort(),
+			// `enabled` is the quick switch every kind takes: one field, always shown.
+			EXECUTOR_KEYS[kind].filter((key) => key !== "kind" && key !== "enabled").sort(),
 			`kind "${kind}" shows exactly the fields it takes`,
 		);
+		assert.ok(EXECUTOR_KEYS[kind].includes("enabled"), `kind "${kind}" takes the switch`);
 	}
+	assert.equal(byPath.enabled.type, "bool");
+	assert.equal(byPath.enabled.default, true);
+	assert.equal(byPath.enabled.showIf, undefined, "the switch is visible whatever the kind");
 	for (const field of executors.item.fields) {
 		if (field.showIf) assert.equal(field.showIf.path, "kind", `${field.path} toggles on its sibling kind`);
 	}

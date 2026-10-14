@@ -374,6 +374,15 @@ export function formatTokens(value) {
 	return String(Math.trunc(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 }
 
+/** 1000000 -> "1M", 131072 -> "131.1K", 900 -> "900": a size small enough for a chip. The exact figure belongs in a tooltip. */
+export function compactTokens(value) {
+	const n = Math.trunc(value);
+	const trim = (x, digits) => String(Number(x.toFixed(digits)));
+	if (n >= 1_000_000) return `${trim(n / 1_000_000, 2)}M`;
+	if (n >= 1_000) return `${trim(n / 1_000, 1)}K`;
+	return String(n);
+}
+
 /** One limit cell: the number, or a plain "unknown" that says pi decides. */
 export function limitCell(value) {
 	return Number.isInteger(value) && value > 0 ? formatTokens(value) : UNKNOWN_LIMIT;

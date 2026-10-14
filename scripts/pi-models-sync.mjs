@@ -297,14 +297,15 @@ async function pool(items, limit, fn) {
  * `limits` carries contextWindow/maxTokens only when they are known: a field
  * that is not a positive integer is left out, and pi reads absent as unknown.
  */
-export function buildModelEntry(id, reasoning, limits = {}) {
+export function buildModelEntry(id, reasoning, limits = {}, override = {}) {
+	reasoning = typeof override.reasoning === "boolean" ? override.reasoning : reasoning;
 	return {
 		id,
-		name: id,
+		name: override.name ?? id,
 		...(isPositiveInteger(limits.contextWindow) ? { contextWindow: limits.contextWindow } : {}),
 		...(isPositiveInteger(limits.maxTokens) ? { maxTokens: limits.maxTokens } : {}),
 		reasoning,
-		input: ["text", "image"],
+		input: override.input ?? ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		...(reasoning ? { thinkingLevelMap: { ...THINKING_LEVEL_MAP } } : {}),
 	};
@@ -382,6 +383,7 @@ export async function syncProvider(options) {
 	} catch (error) {
 		return { ok: false, provider: entry.name, baseUrl, code: "ENDPOINT_LIST_UNREADABLE", message: String(error?.message ?? error) };
 	}
+	ids = [...new Set([...ids, ...Object.entries(entry.models ?? {}).filter(([, model]) => model?.include === true).map(([id]) => id)])].sort();
 	if (ids.length === 0) {
 		return { ok: false, provider: entry.name, baseUrl, code: "ENDPOINT_LIST_EMPTY", message: `${baseUrl}/models returned no model` };
 	}
@@ -423,7 +425,8 @@ export async function syncProvider(options) {
 	const models = live.map((id) => {
 		const limits = limitsFor(id);
 		limitSources.set(id, limits.source);
-		return buildModelEntry(id, proven.has(id) ? proven.get(id) : previousReasoning.get(id) === true, limits);
+		const override = entry.models && Object.hasOwn(entry.models, id) ? entry.models[id] : {};
+		return buildModelEntry(id, proven.has(id) ? proven.get(id) : previousReasoning.get(id) === true, limits, override);
 	});
 	return {
 		ok: true,
