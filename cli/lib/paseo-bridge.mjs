@@ -219,8 +219,9 @@ export async function mapWithConcurrency(items, limit, fn) {
 export async function refreshProviderSnapshot(providers = [], options = {}) {
 	const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
 	let connectToDaemon;
+	let moduleUrl;
 	try {
-		const moduleUrl = resolvePaseoClientModule((reason, tried) => {
+		moduleUrl = resolvePaseoClientModule((reason, tried) => {
 			throw new PaseoError("PASEO_CLIENT_MISSING", `${reason} (tried: ${tried.join(", ") || "nothing"})`);
 		});
 		({ connectToDaemon } = await import(moduleUrl));
@@ -241,7 +242,29 @@ export async function refreshProviderSnapshot(providers = [], options = {}) {
 
 	let client;
 	try {
-		client = await connectToDaemon({ timeout: timeoutMs, ...(options.host ? { host: options.host } : {}) });
+		// Paseo 0.10 made connectToDaemon's `target` mandatory: without one the
+		// call dies on `options.target.kind` before any socket opens, so every
+		// refresh reports DAEMON_UNREACHABLE against a daemon that is up. The
+		// SDK that needs the field ships selectDaemonTarget in daemon-target.js
+		// next to client.js — resolve it from the same directory and pass the
+		// target through; an older SDK without that file keeps the targetless
+		// call it was built for.
+		let target;
+		try {
+			const { selectDaemonTarget } = await import(new URL("./daemon-target.js", moduleUrl).href);
+			if (typeof selectDaemonTarget === "function") {
+				target = selectDaemonTarget(options.host ? { host: options.host } : {}, process.env);
+			}
+		} catch {
+			// No daemon-target module: a pre-0.10 SDK, which takes no target.
+		}
+		client = await connectToDaemon({
+			timeout: timeoutMs,
+			// One source of truth: with a target-bearing SDK the host has already
+			// been folded into the target, so sending it twice would let the two
+			// disagree about which daemon to reach.
+			...(target ? { target } : options.host ? { host: options.host } : {}),
+		});
 	} catch (error) {
 		return {
 			ok: false,
