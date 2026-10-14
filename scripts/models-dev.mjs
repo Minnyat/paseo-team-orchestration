@@ -78,7 +78,7 @@ function isTimestamp(value) {
 }
 
 /** The only keys a per-model override may hold. */
-export const OVERRIDE_KEYS = Object.freeze(["contextWindow", "maxTokens", "name", "reasoning", "input", "include"]);
+export const OVERRIDE_KEYS = Object.freeze(["contextWindow", "maxTokens", "name", "reasoning", "input", "compat", "include"]);
 
 /**
  * What is wrong with one per-model override, as `models.<id>...` messages.
@@ -101,6 +101,20 @@ export function overrideProblems(modelId, override) {
 		if (override[field] !== undefined && typeof override[field] !== "boolean") problems.push(`models.${modelId}.${field} must be a boolean`);
 	}
 	if (override.input !== undefined && (!Array.isArray(override.input) || !override.input.includes("text") || override.input.some(value => !["text", "image"].includes(value)) || new Set(override.input).size !== override.input.length)) problems.push(`models.${modelId}.input must contain text and optionally image`);
+	// compat is pi's own escape hatch (merged over what it auto-detects from
+	// the baseUrl), so its inner keys are not enumerated here — only their
+	// value shapes: pi's compat holds booleans, strings, and plain objects.
+	if (override.compat !== undefined) {
+		if (!override.compat || typeof override.compat !== "object" || Array.isArray(override.compat)) {
+			problems.push(`models.${modelId}.compat must be an object of pi compat flags`);
+		} else {
+			for (const [key, value] of Object.entries(override.compat)) {
+				if (typeof value !== "boolean" && typeof value !== "string" && (!value || typeof value !== "object" || Array.isArray(value))) {
+					problems.push(`models.${modelId}.compat.${key} must be a boolean, string, or object`);
+				}
+			}
+		}
+	}
 	for (const field of ["contextWindow", "maxTokens"]) {
 		if (override[field] !== undefined && !isPositiveInteger(override[field])) {
 			problems.push(`models.${modelId}.${field} must be a positive integer`);

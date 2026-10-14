@@ -99,6 +99,29 @@ const MODELS_DEV_API = {
 	}
 	// An endpoint entry passed by an old caller carries no limits any more.
 	assert.equal("contextWindow" in buildModelEntry("m", false, { name: "p", baseUrl: "https://x" }), false);
+
+	// compat is passed through verbatim so a gateway that is not what its URL
+	// says can be fixed per model in the sync config and the fix SURVIVES every
+	// sync. Earned the hard way: pi marks a reasoning model behind a generic
+	// OpenAI proxy as supportsDeveloperRole=true and sends the system prompt as
+	// role "developer"; a vLLM-style backend answers 422 "unknown variant
+	// `developer`" and the model is unusable until compat says otherwise.
+	const withCompat = buildModelEntry("m", true, {}, { compat: { supportsDeveloperRole: false } });
+	assert.deepEqual(withCompat.compat, { supportsDeveloperRole: false });
+	assert.equal(withCompat.thinkingLevelMap !== undefined, true, "a compat-carrying reasoning model keeps its level map");
+	assert.equal("compat" in buildModelEntry("m", true, {}), false, "no compat override: no compat key");
+	assert.equal("compat" in buildModelEntry("m", true, {}, { compat: {} }), false, "an empty compat override writes nothing");
+	assert.deepEqual(
+		configProblems([{ name: "p", baseUrl: "https://example.com", models: { m: { compat: { supportsDeveloperRole: false, thinkingFormat: "deepseek" } } } }]),
+		[],
+	);
+	assert.ok(configProblems([{ name: "p", baseUrl: "https://example.com", models: { m: { compat: "no" } } }]).length, "compat must be an object");
+	assert.ok(configProblems([{ name: "p", baseUrl: "https://example.com", models: { m: { compat: null } } }]).length, "compat must not be null");
+	assert.ok(configProblems([{ name: "p", baseUrl: "https://example.com", models: { m: { compat: [false] } } }]).length, "compat must not be an array");
+	assert.ok(
+		configProblems([{ name: "p", baseUrl: "https://example.com", models: { m: { compat: { supportsDeveloperRole: 42 } } } }]).length,
+		"compat values must be boolean, string, or object",
+	);
 }
 
 // --- the key is read from the file systemd hands the daemon -----------------
@@ -149,6 +172,15 @@ const MODELS_DEV_API = {
 
 	assert.deepEqual(normalizeConfig(null).entries, [], "a missing document is empty, not a crash");
 	assert.deepEqual(normalizeConfig({ providers: { "": { baseUrl: "x" }, ok: null } }).entries, [], "junk entries are dropped");
+
+	// The WebUI edits compat as a kv control (string values); pi wants
+	// booleans. Exactly "true"/"false" coerce, anything else passes through
+	// (thinkingFormat: "deepseek"), and a "false" left as a string would flip
+	// the flag the wrong way round at pi's end — it merges with ??, not with
+	// Boolean().
+	const [coerced] = normalizeConfig({ providers: { p: { baseUrl: "https://a/v1", models: { m: { compat: { supportsDeveloperRole: "false", supportsStore: "true", thinkingFormat: "deepseek" } } } } } }).entries;
+	assert.deepEqual(coerced.models.m.compat, { supportsDeveloperRole: false, supportsStore: true, thinkingFormat: "deepseek" });
+	assert.equal("models" in normalizeConfig({ providers: { p: { baseUrl: "https://a/v1" } } }).entries[0], false, "no models key: nothing invented");
 
 	assert.deepEqual(configProblems([]), ["no provider configured"]);
 	assert.match(configProblems([{ name: "x" }])[0], /baseUrl is required/);
