@@ -602,6 +602,19 @@ try {
 		assert.equal(noSdk.status, 3, noSdk.stderr);
 		assert.equal(noSdk.json.ok, false);
 		assert.equal(noSdk.json.code, "PASEO_CLIENT_MISSING");
+
+		// Paseo 0.10 made connectToDaemon's `target` mandatory; without one the
+		// call dies on `options.target.kind` before any socket opens, and every
+		// refresh reports DAEMON_UNREACHABLE while the daemon is perfectly up.
+		// The SDK that needs the field ships selectDaemonTarget one file over —
+		// when it is there, the target must reach the connect call; when it is
+		// not (an older SDK), the call is made exactly as before.
+		const clientV010 = join(HERE, "fixtures", "fake-paseo-client-0.10", "client.mjs");
+		const withTarget = clientRun(["models", "refresh"], { PASEO_TEAM_PASEO_CLIENT: clientV010, PASEO_HOME: "/fake/paseo-home" });
+		assert.equal(withTarget.status, 0, withTarget.stderr);
+		const connectOptions = withTarget.calls.find((c) => c.event === "connect").options;
+		assert.deepEqual(connectOptions.target, { kind: "instance", home: "/fake/paseo-home" }, "a 0.10 SDK gets a target, resolved the way the paseo CLI resolves its own");
+		assert.ok(withTarget.calls.some((c) => c.event === "refresh"), "and the refresh itself still happens");
 	}
 
 	// --- models sync: fail closed before it can touch models.json ------------
