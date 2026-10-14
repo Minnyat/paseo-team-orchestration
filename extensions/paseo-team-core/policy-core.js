@@ -911,10 +911,70 @@ export function leaseBlockReason({ role, args, leases, selfAgentId, cluster, }) 
     }
     return null;
 }
-/** Reason a Peer may not run a pack support script from bash. */
+/**
+ * The `pteam` / `paseo-team` CLI is the same authority as the tools and scripts
+ * this file gates: `pteam permits allow` answers permission requests, `pteam
+ * agent send` prompts any agent, `pteam routing …` rewrites the routes the
+ * create_agent gate trusts (and now switches models off), `pteam config|prompts|
+ * skills write` rewrites the pack itself. A Peer has none of those powers, so it
+ * may run only the READ-ONLY subcommands below; anything else — including a
+ * subcommand this table has never heard of — is refused. Heuristic like every
+ * bash rule here: it names the obvious door.
+ */
+// An INVOCATION: at the start of a command (line start, or after ; & | ( ` $( ), or
+// inside `sh -c "…"` / after `xargs`, past VAR=value prefixes and wrappers such as
+// sudo/env/exec (also by path) — or `node …/paseo-team.mjs`. "grep pteam README.md"
+// and "echo pteam" are prose, not invocations. A heredoc body is NOT stripped: it
+// can be fed to a shell, so a line there that starts with `pteam routing set …` is
+// refused too (write it as prose, or indent it into a code span).
+const PTEAM_START = "(?:(?:^|[;&|(`\\n]|\\$\\()\\s*|\\b(?:ba|z|da|k)?sh\\s+-[a-z]*c\\s+[\"']\\s*|\\bxargs\\s+(?:-\\S+\\s+)*)";
+const PTEAM_WRAPPERS = "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*(?:(?:\\S*[\\\\/])?(?:sudo|command|exec|time|nohup|env)\\s+(?:-\\S+\\s+|[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*)*";
+const PTEAM_CALL_RE = new RegExp(`(?:${PTEAM_START}${PTEAM_WRAPPERS}(?:npx\\s+)?(?:\\S*[\\\\/])?(?:pteam|paseo-team)(?:\\.(?:cmd|exe|ps1))?|\\bnode(?:\\.exe)?\\s+(?:-\\S+\\s+)*\\S*paseo-team\\.mjs)\\s+([a-z][a-z-]*)(?:\\s+([a-z][a-z-]*))?`, "gi");
+const PTEAM_READ_ONLY = {
+    status: null,
+    preflight: null,
+    graph: null,
+    agents: null,
+    activity: null,
+    cost: null,
+    watchdog: null,
+    models: null, // `models sync|refresh` are checked separately
+    env: ["list"],
+    protocol: ["status"],
+    agent: ["inspect"],
+    jobs: ["list", "show", "resolve"],
+    config: ["read"],
+    prompts: ["read"],
+    skills: ["list", "read"],
+    seats: ["list"],
+    routing: ["show", "check"],
+    permits: ["list"],
+};
+/** The first `pteam` invocation in `command` that is not read-only, as "pteam <a> <b>", or null. */
+export function pteamMutationIn(command) {
+    if (typeof command !== "string" || command.trim() === "")
+        return null;
+    for (const match of command.matchAll(PTEAM_CALL_RE)) {
+        const sub = (match[1] ?? "").toLowerCase();
+        const arg = (match[2] ?? "").toLowerCase();
+        if (!Object.hasOwn(PTEAM_READ_ONLY, sub))
+            return `pteam ${sub}${arg ? ` ${arg}` : ""}`;
+        const allowed = PTEAM_READ_ONLY[sub] ?? null;
+        if (allowed !== null && !allowed.includes(arg))
+            return `pteam ${sub}${arg ? ` ${arg}` : ""}`;
+        if (sub === "models" && (arg === "sync" || arg === "refresh"))
+            return `pteam models ${arg}`;
+    }
+    return null;
+}
+/** Reason a Peer may not run a pack support script (or a changing `pteam` command) from bash. */
 export function supportScriptBlockReason(role, command) {
     if (role !== "peer")
         return null;
+    const pteam = pteamMutationIn(command);
+    if (pteam) {
+        return `Peer cannot run \`${pteam}\` from bash — the pteam CLI answers permission requests, prompts agents and rewrites routes, models and the pack's own files, none of which the Peer role holds. Read-only pteam commands (routing show, jobs resolve, graph …) are fine. Use peer_ask_lead to raise a DEPENDENCY_REQUEST instead.`;
+    }
     if (!callsTeamSupportScript(command))
         return null;
     return "Peer cannot run this Paseo team support script from bash — it would grant coordination or remote-host authority the Peer role does not have. Use peer_ask_lead to raise a DEPENDENCY_REQUEST instead.";
@@ -2551,7 +2611,7 @@ export function leadCreateSupervisorArgsBlockReason(args, context = {}) {
         ? rec.settings.thinkingOptionId
         : undefined;
     if (typeof thinking !== "string" || thinking.trim() === "") {
-        return "Refusing create_agent: a Supervisor seat requires settings.thinkingOptionId, routed from cluster-routing.local.json. Never drop the thinking level and let the daemon choose it for the seat that decides on the Human's behalf.";
+        return "Refusing create_agent: a Supervisor seat requires settings.thinkingOptionId, routed from the route the gate reads (pteam routing show). Never drop the thinking level and let the daemon choose it for the seat that decides on the Human's behalf.";
     }
     const multi = (context.topology ?? "single") === "multi";
     let own = null;
@@ -3106,6 +3166,13 @@ export function isLeadRecoveryProvider(provider) {
 // here — which is also what keeps both runtimes deciding identically.
 /** Mirrors MODEL_CLASS_LABEL in scripts/model-routing.mjs (test-locked). */
 export const MODEL_CLASS_LABEL = "team.model-class";
+/**
+ * Optional companion label: the JOB this seat was seated for (jobs.local.json).
+ * With it, the gate accepts the provider/model/thinking of an active executor of
+ * that job instead of the single route of the declared class — which is how one
+ * task runs on several models. Without it the gate is exactly the class gate.
+ */
+export const TEAM_JOB_LABEL = "team.job";
 /** Mirrors ROUTE_ENFORCE_ENV in scripts/model-routing.mjs (test-locked). */
 export const ROUTE_ENFORCE_ENV = "PASEO_TEAM_ROUTE_ENFORCE";
 /**
@@ -3133,6 +3200,12 @@ export const ALL_MODEL_CLASSES = [
     ...PEER_MODEL_CLASSES,
     ...OPTIONAL_MODEL_CLASSES,
 ];
+/** The options of a class route, primary first. */
+function routeOptionsOf(route) {
+    return [route, ...(route.alternates ?? [])];
+}
+const optionUsable = (option) => option.enabled !== false && !option.modelDisabled;
+const optionLabel = (option) => `${option.paseoProvider}/${option.model} @${option.thinking}`;
 /**
  * On unless the variable is EXACTLY "off". Any other value — "OFF", "0",
  * "false", a typo — keeps the gate on: a mistyped opt-out costs one refused
@@ -3140,6 +3213,69 @@ export const ALL_MODEL_CLASSES = [
  */
 export function routeEnforcement(env = process.env) {
     return env[ROUTE_ENFORCE_ENV] === "off" ? "off" : "on";
+}
+/**
+ * "Routing now": what this host can seat from AT THIS MOMENT, as a short block
+ * for a Lead/Supervisor — the reload the Human asked for. It is rebuilt from the
+ * route and jobs files each time the adapter asks (session start, and on later
+ * turns whenever it changed), so switching a model off needs no restart: the next
+ * turn says so, and the gate refuses it anyway. Pure over the table, so the two
+ * runtimes print the same words. Null for roles that seat nothing.
+ *
+ * `fingerprint` lets an adapter whose context persists (Claude) re-inject only
+ * when the text changed; Pi rebuilds the system prompt every turn and injects it
+ * each time.
+ */
+export function routingAvailabilityNotice(role, routeTable) {
+    if (role !== "lead" && role !== "supervisor")
+        return null;
+    const lines = ["## Routing now", "Read from the host's route and jobs files for this turn. Seat only from what is usable here; a refusal lists the alternatives. Nothing is rerouted for you."];
+    if (!routeTable) {
+        lines.push("Route table: UNLOADABLE — every create_agent will be refused until `pteam routing check` passes.");
+    }
+    else if (!routeTable.ok) {
+        lines.push(`Route table: UNAVAILABLE (${routeTable.code}) — every create_agent will be refused. ${routeTable.message}`);
+    }
+    else {
+        const classes = Object.entries(routeTable.routes)
+            .filter(([, route]) => route)
+            .map(([cls, route]) => {
+            const options = routeOptionsOf(route).map((option) => {
+                const off = option.enabled === false ? "OFF (switched off)" : option.modelDisabled ? "OFF (model switched off)" : null;
+                return off ? `${option.paseoProvider}/${option.model}: ${off}` : `${option.paseoProvider}/${option.model}@${option.thinking}`;
+            });
+            const all = routeOptionsOf(route);
+            // Several options: the Lead picks ONE of the usable ones — say so, once, in the line.
+            if (all.length === 1) {
+                const only = all[0];
+                const off = only.enabled === false ? "OFF (class switched off)" : only.modelDisabled ? "OFF (model switched off)" : null;
+                return `${cls}=${off ? off : `${only.paseoProvider}/${only.model}@${only.thinking}`}`;
+            }
+            return `${cls}=[pick one: ${options.join(" | ")}]`;
+        });
+        lines.push(`Classes: ${classes.join(" · ") || "none"}`);
+        if (routeTable.jobsProblem) {
+            lines.push(`Jobs: UNREADABLE — ${routeTable.jobsProblem}`);
+        }
+        else {
+            const jobs = Object.entries(routeTable.jobs ?? {}).map(([id, job]) => job.active
+                ? `${id}: ${job.seats.map((seat) => `${seat.paseoProvider}/${seat.model}@${seat.thinking}`).join(", ") || "CLI steps only"}`
+                : `${id}: OFF (${job.reason ?? "inactive"})`);
+            if (jobs.length > 0)
+                lines.push(`Jobs: ${jobs.join(" · ")}`);
+        }
+        if ((routeTable.disabledModels ?? []).length > 0) {
+            lines.push(`Models switched off: ${(routeTable.disabledModels ?? []).join(", ")}`);
+        }
+    }
+    lines.push(role === "supervisor"
+        ? "You have no terminal: this block is re-read every turn. Recover a Lead only from LEAD_RECOVERY as shown above; if it is absent or OFF the gate refuses — escalate to the Human to configure or switch it on, never borrow another route."
+        : `Before EVERY seating, re-read it: \`pteam jobs resolve <id>\` (prints the exact create_agent arguments and labels, labels["${TEAM_JOB_LABEL}"] included) or \`pteam routing show\`.`);
+    const text = lines.join("\n");
+    let h = 5381;
+    for (let i = 0; i < text.length; i++)
+        h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+    return { text, fingerprint: (h >>> 0).toString(16) };
 }
 /**
  * The loud half of the opt-out: injected into every Lead/Supervisor turn on
@@ -3193,6 +3329,22 @@ export function modelClassesForFlow(creator, target, labels) {
     }
     return PEER_MODEL_CLASSES;
 }
+/** "CLASS provider/model thinking" for each class of `target`'s family+role that is on and usable — what to seat instead of a refused one. */
+function usableNow(routeTable, target) {
+    const usable = [];
+    for (const [cls, route] of Object.entries(routeTable.routes)) {
+        if (!route)
+            continue;
+        for (const option of routeOptionsOf(route)) {
+            if (!optionUsable(option))
+                continue;
+            const routed = parseRoleProvider(option.paseoProvider);
+            if (routed !== null && routed.family === target.family && routed.role === target.role)
+                usable.push(`${cls} → ${optionLabel(option)}`);
+        }
+    }
+    return usable.length > 0 ? ` Usable now for a ${target.family}/${target.role} seat: ${usable.join("; ")}.` : ` No other class is usable now for a ${target.family}/${target.role} seat.`;
+}
 function routeSetHint(modelClass, family, role) {
     return `pteam routing set ${modelClass} --provider ${family}-${role} --model <model-id> --thinking <level>`;
 }
@@ -3220,9 +3372,32 @@ function routeForClass(modelClass, target, routeTable, what) {
             reason: `BLOCKED: ROUTE_CLASS_UNCONFIGURED — ${modelClass} has no route on host "${routeTable.hostId}" (${routeTable.path})${optional ? `; it is an optional class, so this host cannot seat that flow until it is configured` : ""}. Configure it with: ${routeSetHint(modelClass, target.family, target.role)}. The gate does not fall back to another class.`,
         };
     }
+    const all = routeOptionsOf(route);
+    const usable = all.filter(optionUsable);
+    if (usable.length === 0) {
+        if (all.every((option) => option.enabled === false)) {
+            return {
+                reason: `BLOCKED: ROUTE_CLASS_DISABLED — ${modelClass} is switched off on host "${routeTable.hostId}" (${routeTable.path}), so this ${what} is refused. It is not rerouted to another class or model. Switching it back on (pteam routing enable ${modelClass}) is the Human's call, not yours — do not run it; seat from what is usable.${usableNow(routeTable, target)}`,
+            };
+        }
+        const off = all.find((option) => option.modelDisabled && option.enabled !== false) ?? route;
+        const routedFamily = parseRoleProvider(off.paseoProvider)?.family ?? off.paseoProvider;
+        return {
+            reason: `BLOCKED: ROUTE_MODEL_DISABLED — ${modelClass} routes on host "${routeTable.hostId}" to model "${routedFamily}/${off.model}", which is switched off (out of credit, outage), so this ${what} is refused. It is not moved to another model. Switching it back on (pteam routing enable-model ${routedFamily}/${off.model}) is the Human's call, not yours — do not run it; seat from what is usable.${usableNow(routeTable, target)}`,
+        };
+    }
     const where = `on host "${routeTable.hostId}" (${routeTable.path})`;
-    const routed = parseRoleProvider(route.paseoProvider);
-    if (!routed || routed.family !== target.family || routed.role !== target.role) {
+    const mine = usable.filter((option) => {
+        const routed = parseRoleProvider(option.paseoProvider);
+        return routed !== null && routed.family === target.family && routed.role === target.role;
+    });
+    if (mine.length === 0) {
+        if (all.length > 1) {
+            return {
+                reason: `BLOCKED: ROUTE_PROVIDER_MISMATCH — ${modelClass} has no usable option for a ${target.family}/${target.role} seat ${where}. Usable options: ${usable.map(optionLabel).join("; ")}.`,
+            };
+        }
+        const routed = parseRoleProvider(route.paseoProvider);
         const roleNote = routed && routed.role !== target.role
             ? ` A class routed to a *-${routed.role} provider cannot be used to seat a ${target.role}: pick a class whose route names a ${target.role} provider, or change this class's route.`
             : "";
@@ -3230,7 +3405,54 @@ function routeForClass(modelClass, target, routeTable, what) {
             reason: `BLOCKED: ROUTE_PROVIDER_MISMATCH — ${modelClass} routes ${where} to "${route.paseoProvider}", but the seat is ${target.family}/${target.role}. Expected provider "${route.paseoProvider}/${route.model}" with settings.thinkingOptionId "${route.thinking}".${roleNote}`,
         };
     }
-    return { route, where };
+    return { options: mine, where };
+}
+/** "Expected provider … with settings.thinkingOptionId …" for one option, or "Expected one of: …" for several. */
+function expectedSeat(options) {
+    const one = (option) => `provider "${option.paseoProvider}/${option.model}" with settings.thinkingOptionId "${option.thinking}"`;
+    const first = options[0];
+    return options.length === 1 && first ? `Expected ${one(first)}.` : `Expected one of: ${options.map(one).join("; ")}.`;
+}
+/**
+ * A job seating: the executor of `jobId` this create_agent must be. Chosen by
+ * the provider (family + role), model and thinking the call asks for; refused
+ * with the seats that ARE usable when none matches. Never a fallback — a model
+ * that is off is simply not among the seats.
+ */
+function jobSeatRoute(jobId, target, askedModel, askedThinking, routeTable) {
+    if (!routeTable) {
+        return { reason: `BLOCKED: ROUTE_UNVERIFIABLE — the host's route table could not be loaded, so a job seating cannot be checked. Unverifiable is not a pass.` };
+    }
+    if (!routeTable.ok) {
+        return { reason: `BLOCKED: ROUTE_TABLE_UNAVAILABLE (${routeTable.code}) — ${routeTable.message}. No seating is routed until the route file loads.` };
+    }
+    if (typeof jobId !== "string" || jobId === "") {
+        return { reason: `BLOCKED: ROUTE_JOB_UNKNOWN — labels["${TEAM_JOB_LABEL}"] must name a job from pteam jobs list (got ${JSON.stringify(jobId)}). Omit the label to seat from the declared class's route.` };
+    }
+    if (routeTable.jobsProblem) {
+        return { reason: `BLOCKED: ROUTE_JOB_UNAVAILABLE — the jobs file could not be read: ${routeTable.jobsProblem}. Class-route seatings (no "${TEAM_JOB_LABEL}" label) are unaffected.` };
+    }
+    if (!routeTable.jobs) {
+        return { reason: `BLOCKED: ROUTE_JOB_UNAVAILABLE — this host's gate has no job data (an install that predates jobs seatings). Re-run the installer, or seat from the declared class's route.` };
+    }
+    const job = Object.hasOwn(routeTable.jobs, jobId) ? routeTable.jobs[jobId] : undefined;
+    if (!job) {
+        const known = Object.keys(routeTable.jobs);
+        return { reason: `BLOCKED: ROUTE_JOB_UNKNOWN — there is no job "${jobId}" on this host (known: ${known.join(", ") || "none"}). See pteam jobs list.` };
+    }
+    if (!job.active) {
+        return { reason: `BLOCKED: ROUTE_JOB_INACTIVE — job "${jobId}" cannot be seated from right now: ${job.reason ?? "no active executor"}. Nothing is substituted; see pteam jobs show ${jobId} --all.` };
+    }
+    const mine = job.seats.filter((seat) => {
+        const routed = parseRoleProvider(seat.paseoProvider);
+        return routed !== null && routed.family === target.family && routed.role === target.role;
+    });
+    const match = mine.find((seat) => seat.model === askedModel && seat.thinking === askedThinking);
+    if (!match) {
+        const offered = mine.map((seat) => `${seat.paseoProvider}/${seat.model} @${seat.thinking}`);
+        return { reason: `BLOCKED: ROUTE_JOB_EXECUTOR_MISMATCH — job "${jobId}" has no usable executor for a ${target.family}/${target.role} seat with model "${askedModel || "<missing>"}" at thinking ${typeof askedThinking === "string" ? `"${askedThinking}"` : "<missing>"}. Usable now: ${offered.join("; ") || "none for this seat role"}.` };
+    }
+    return { options: [{ paseoProvider: match.paseoProvider, model: match.model, thinking: match.thinking }], where: `for job "${jobId}" executor [${match.index}] on host "${routeTable.hostId}"` };
 }
 function declaredClassReason(declared, allowed, who) {
     if (typeof declared !== "string" || declared === "") {
@@ -3301,23 +3523,35 @@ export function createAgentRouteBlockReason({ role, args, routeTable, env = proc
     if (!allowed.includes(modelClass)) {
         return `BLOCKED: ROUTE_CLASS_WRONG_FLOW — ${flow} routes from ${allowed.join(" or ")}, not ${modelClass}. Each seat role has its own class so that the governance and recovery seats never borrow a Peer's route.`;
     }
-    const resolved = routeForClass(modelClass, target, routeTable, "create_agent");
+    const jobId = labels[TEAM_JOB_LABEL];
+    const resolved = TEAM_JOB_LABEL in labels
+        ? jobSeatRoute(jobId, target, tail, typeof rec.settings === "object" && rec.settings !== null ? rec.settings.thinkingOptionId : undefined, routeTable)
+        : routeForClass(modelClass, target, routeTable, "create_agent");
     if ("reason" in resolved)
         return resolved.reason;
-    const { route, where } = resolved;
-    const expected = `${route.paseoProvider}/${route.model}`;
-    if (tail !== route.model) {
-        return `BLOCKED: ROUTE_MODEL_MISMATCH — ${modelClass} routes ${where} to model "${route.model}", but provider "${provider}" asks for "${tail || "<missing>"}". Expected provider "${expected}" with settings.thinkingOptionId "${route.thinking}".`;
+    const { options, where } = resolved;
+    // The Lead names the option it seats; the gate only checks that it is one of the
+    // usable ones. Nothing here chooses for the caller.
+    const byModel = options.filter((option) => option.model === tail);
+    const only = options.length === 1 ? options[0] : undefined;
+    if (byModel.length === 0) {
+        return only
+            ? `BLOCKED: ROUTE_MODEL_MISMATCH — ${modelClass} routes ${where} to model "${only.model}", but provider "${provider}" asks for "${tail || "<missing>"}". ${expectedSeat(options)}`
+            : `BLOCKED: ROUTE_MODEL_MISMATCH — ${modelClass} offers no model "${tail || "<missing>"}" ${where} for this seat. ${expectedSeat(options)}`;
     }
     const settings = typeof rec.settings === "object" && rec.settings !== null
         ? rec.settings
         : {};
     const thinking = settings.thinkingOptionId;
-    if (thinking !== route.thinking) {
-        return `BLOCKED: ROUTE_THINKING_MISMATCH — ${modelClass} routes ${where} at thinking "${route.thinking}", but settings.thinkingOptionId is ${typeof thinking === "string" ? `"${thinking}"` : "<missing>"}. Expected provider "${expected}" with settings.thinkingOptionId "${route.thinking}".`;
+    const chosen = byModel.find((option) => option.thinking === thinking);
+    if (!chosen) {
+        const asked = typeof thinking === "string" ? `"${thinking}"` : "<missing>";
+        return only
+            ? `BLOCKED: ROUTE_THINKING_MISMATCH — ${modelClass} routes ${where} at thinking "${only.thinking}", but settings.thinkingOptionId is ${asked}. ${expectedSeat(options)}`
+            : `BLOCKED: ROUTE_THINKING_MISMATCH — ${modelClass} offers "${tail}" ${where} at thinking ${byModel.map((option) => `"${option.thinking}"`).join(" or ")}, but settings.thinkingOptionId is ${asked}. ${expectedSeat(options)}`;
     }
-    if (rec.thinking !== undefined && rec.thinking !== route.thinking) {
-        return `BLOCKED: ROUTE_THINKING_MISMATCH — a top-level "thinking" (legacy) overrides settings.thinkingOptionId in Paseo's top-level create_agent, and it is ${JSON.stringify(rec.thinking)}, not the route's "${route.thinking}". Drop it; settings.thinkingOptionId is the only place thinking goes.`;
+    if (rec.thinking !== undefined && rec.thinking !== chosen.thinking) {
+        return `BLOCKED: ROUTE_THINKING_MISMATCH — a top-level "thinking" (legacy) overrides settings.thinkingOptionId in Paseo's top-level create_agent, and it is ${JSON.stringify(rec.thinking)}, not the route's "${chosen.thinking}". Drop it; settings.thinkingOptionId is the only place thinking goes.`;
     }
     return null;
 }
@@ -3342,6 +3576,7 @@ export function routeTargetFor(agentId, env = process.env) {
         agentId: state.agentId,
         provider: state.provider,
         modelClass: typeof label === "string" && label !== "" ? label : null,
+        job: typeof state.labels[TEAM_JOB_LABEL] === "string" && state.labels[TEAM_JOB_LABEL] !== "" ? state.labels[TEAM_JOB_LABEL] : null,
         watch: state.watch,
     };
 }
@@ -3384,7 +3619,7 @@ export function updateAgentWatchBlockReason({ role, args, }) {
  */
 export function updateAgentTouchesRoute(args) {
     const { settings, labels } = updateArgsParts(args);
-    return "model" in settings || "thinkingOptionId" in settings || MODEL_CLASS_LABEL in labels;
+    return "model" in settings || "thinkingOptionId" in settings || MODEL_CLASS_LABEL in labels || TEAM_JOB_LABEL in labels;
 }
 /**
  * Refuse a Lead/Supervisor update_agent that moves a seat off the route of its
@@ -3411,10 +3646,16 @@ export function updateAgentRouteBlockReason({ role, args, target, routeTable, en
     if (MODEL_CLASS_LABEL in labels && labels[MODEL_CLASS_LABEL] !== target.modelClass) {
         return `BLOCKED: ROUTE_CLASS_IMMUTABLE — labels["${MODEL_CLASS_LABEL}"] of ${target.agentId} is ${target.modelClass ? `"${target.modelClass}"` : "unset"} and update_agent may not change it (asked for ${JSON.stringify(labels[MODEL_CLASS_LABEL])}). A seat's class is fixed when it is created; a seat on another class is a new create_agent.`;
     }
+    if (TEAM_JOB_LABEL in labels && labels[TEAM_JOB_LABEL] !== (target.job ?? undefined)) {
+        return `BLOCKED: ROUTE_JOB_IMMUTABLE — labels["${TEAM_JOB_LABEL}"] of ${target.agentId} is ${target.job ? `"${target.job}"` : "unset"} and update_agent may not change it. The job a seat was seated for is fixed at creation; a seat for another job is a new create_agent.`;
+    }
     const changesModel = "model" in settings;
     const changesThinking = "thinkingOptionId" in settings;
     if (!changesModel && !changesThinking)
         return null;
+    if (target.job) {
+        return `BLOCKED: ROUTE_JOB_SEAT_FIXED — ${target.agentId} was seated for job "${target.job}", and moving a job seat's model or thinking is refused: the job names which executor it is. Seat a new agent for the executor you want (create_agent with labels["${TEAM_JOB_LABEL}"]), then archive this one.`;
+    }
     const seat = parseRoleProvider(target.provider ?? "");
     if (!seat) {
         return `BLOCKED: ROUTE_PROVIDER_UNKNOWN — ${target.agentId} runs provider "${target.provider ?? "<unknown>"}", which is not a role provider this pack routes, so no class route can apply to it. Refusing to move its model.`;
@@ -3430,13 +3671,23 @@ export function updateAgentRouteBlockReason({ role, args, target, routeTable, en
     const resolved = routeForClass(modelClass, seat, routeTable, "update_agent");
     if ("reason" in resolved)
         return resolved.reason;
-    const { route, where } = resolved;
-    const expected = `settings { model: "${route.model}", thinkingOptionId: "${route.thinking}" }`;
-    if (changesModel && settings.model !== route.model) {
-        return `BLOCKED: ROUTE_MODEL_MISMATCH — ${target.agentId} is a ${modelClass} seat, which routes ${where} to model "${route.model}", but update_agent sets ${settings.model === null ? "null (clears it to the daemon default)" : JSON.stringify(settings.model)}. Expected ${expected}.`;
+    const { options, where } = resolved;
+    const only = options.length === 1 ? options[0] : undefined;
+    const expectedSettings = (option) => `settings { model: "${option.model}", thinkingOptionId: "${option.thinking}" }`;
+    const expected = only ? `Expected ${expectedSettings(only)}.` : `Expected one of: ${options.map(expectedSettings).join("; ")}.`;
+    const slash = (target.provider ?? "").indexOf("/");
+    const currentModel = slash < 0 ? "" : (target.provider ?? "").slice(slash + 1);
+    const newModel = changesModel ? settings.model : currentModel;
+    if (changesModel && !options.some((option) => option.model === settings.model)) {
+        return `BLOCKED: ROUTE_MODEL_MISMATCH — ${target.agentId} is a ${modelClass} seat, which ${only ? `routes ${where} to model "${only.model}"` : `offers other models ${where}`}, but update_agent sets ${settings.model === null ? "null (clears it to the daemon default)" : JSON.stringify(settings.model)}. ${expected}`;
     }
-    if (changesThinking && settings.thinkingOptionId !== route.thinking) {
-        return `BLOCKED: ROUTE_THINKING_MISMATCH — ${target.agentId} is a ${modelClass} seat, which routes ${where} at thinking "${route.thinking}", but update_agent sets ${settings.thinkingOptionId === null ? "null (clears it to the daemon default)" : JSON.stringify(settings.thinkingOptionId)}. Expected ${expected}.`;
+    if (changesThinking) {
+        // Held to the option of the model the seat will run (the new one, else its current one).
+        const forModel = options.filter((option) => option.model === newModel);
+        const candidates = forModel.length > 0 ? forModel : options;
+        if (!candidates.some((option) => option.thinking === settings.thinkingOptionId)) {
+            return `BLOCKED: ROUTE_THINKING_MISMATCH — ${target.agentId} is a ${modelClass} seat, which ${only ? `routes ${where} at thinking "${only.thinking}"` : `offers ${candidates.map((option) => `"${option.thinking}"`).join(" or ")} for that model ${where}`}, but update_agent sets ${settings.thinkingOptionId === null ? "null (clears it to the daemon default)" : JSON.stringify(settings.thinkingOptionId)}. ${expected}`;
+        }
     }
     return null;
 }
@@ -3468,20 +3719,40 @@ export function forkRouteDecision({ role, provider, modelClass, model, thinking,
     const resolved = routeForClass(modelClass, seat, routeTable, "team_fork");
     if ("reason" in resolved)
         return { ok: false, reason: resolved.reason };
-    const { route, where } = resolved;
-    if (model != null && model !== route.model) {
+    const { options, where } = resolved;
+    const only = options.length === 1 ? options[0] : undefined;
+    let candidates = options;
+    if (model != null) {
+        candidates = options.filter((option) => option.model === model);
+        if (candidates.length === 0) {
+            return {
+                ok: false,
+                reason: only
+                    ? `BLOCKED: ROUTE_MODEL_MISMATCH — ${String(modelClass)} routes ${where} to model "${only.model}", but the fork asks for "${model}". Omit model to take the route's, or pass exactly "${only.model}".`
+                    : `BLOCKED: ROUTE_MODEL_MISMATCH — ${String(modelClass)} offers no model "${model}" ${where} for this fork. ${expectedSeat(options)}`,
+            };
+        }
+    }
+    if (thinking != null) {
+        const byThinking = candidates.filter((option) => option.thinking === thinking);
+        if (byThinking.length === 0) {
+            return {
+                ok: false,
+                reason: only
+                    ? `BLOCKED: ROUTE_THINKING_MISMATCH — ${String(modelClass)} routes ${where} at thinking "${only.thinking}", but the fork asks for "${thinking}". Omit thinkingOptionId to take the route's, or pass exactly "${only.thinking}".`
+                    : `BLOCKED: ROUTE_THINKING_MISMATCH — ${String(modelClass)} offers no such thinking level for that model ${where}. ${expectedSeat(candidates)}`,
+            };
+        }
+        candidates = byThinking;
+    }
+    const picked = candidates.length === 1 ? candidates[0] : undefined;
+    if (!picked) {
         return {
             ok: false,
-            reason: `BLOCKED: ROUTE_MODEL_MISMATCH — ${String(modelClass)} routes ${where} to model "${route.model}", but the fork asks for "${model}". Omit model to take the route's, or pass exactly "${route.model}".`,
+            reason: `BLOCKED: ROUTE_OPTION_AMBIGUOUS — ${String(modelClass)} has ${candidates.length} usable options ${where} for this fork and nothing is chosen for you. Pass model (and thinkingOptionId) to name one. ${expectedSeat(candidates)}`,
         };
     }
-    if (thinking != null && thinking !== route.thinking) {
-        return {
-            ok: false,
-            reason: `BLOCKED: ROUTE_THINKING_MISMATCH — ${String(modelClass)} routes ${where} at thinking "${route.thinking}", but the fork asks for "${thinking}". Omit thinkingOptionId to take the route's, or pass exactly "${route.thinking}".`,
-        };
-    }
-    return { ok: true, enforced: true, model: route.model, thinking: route.thinking };
+    return { ok: true, enforced: true, model: picked.model, thinking: picked.thinking };
 }
 // ---------------------------------------------------------------------------
 // Permission mode — the mode a seat actually comes up in
@@ -4755,7 +5026,7 @@ export function teamForkToolBlockReason(role, toolName = TEAM_FORK_TOOL) {
 }
 export function teamForkToolDescription() {
     return ("Hand a session over WITHOUT retelling it: copy an agent's transcript into a new session file and import it as a new agent. " +
-        "`fork` requires modelClass and is route-checked like create_agent: it validates, copies and imports (stamping team.model-class), then returns the update_agent call that moves the fork onto the route of that class (the CLI cannot set the model) plus a seed prompt that revokes the inherited identity; " +
+        "`fork` requires modelClass and is route-checked like create_agent (when the class offers several tools/models, pass model — and thinkingOptionId — to name ONE: nothing is chosen for you): it validates, copies and imports (stamping team.model-class), then returns the update_agent call that moves the fork onto the route of that class (the CLI cannot set the model) plus a seed prompt that revokes the inherited identity; " +
         "`verify` confirms the fork runs that route and DELETES it if not; `seed` returns the seed prompt alone. " +
         "Choose a fork only when the reasoning history itself must travel (split-load, change-host, change-model, takeover). " +
         "A role that must be independent (reviewer, challenger, supervisor) is refused — a fork inherits the framing it exists to question. " +

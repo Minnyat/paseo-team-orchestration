@@ -369,6 +369,8 @@ export function optionalEntryProblems(schema, doc, prefix = []) {
 			if (entry === undefined) continue;
 			const missing = (field.item.fields ?? [])
 				.filter((child) => {
+					// A field with a default (the on/off switch) and a list (more options, optional) are never "left blank".
+					if (child.default !== undefined || child.type === "list") return false;
 					const value = getPath(entry, fieldPath([], child.path));
 					return value === undefined || value === null || value === "";
 				})
@@ -387,4 +389,154 @@ export function parseLines(text) {
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0);
+}
+
+// --- quick switches ------------------------------------------------------------
+//
+// The on/off switches of the routing and jobs files, as plain data. They are NOT
+// form fields: the panel flips one switch on the SAVED document and writes it
+// back at once (so a switch is "quick" and does not wait behind Save), and these
+// two functions are the whole of what it knows about the file shapes.
+
+/** Tools every host knows; `cliTools` adds others (mirrors scripts/jobs.mjs BUILTIN_CLI_TOOLS). */
+export const BUILTIN_TOOL_NAMES = Object.freeze(["pi", "claude"]);
+
+function executorSummary(executor) {
+	if (executor?.kind === "class") return `class · ${executor.modelClass ?? "?"}`;
+	if (executor?.kind === "route") return `route · ${executor.paseoProvider ?? "?"}/${executor.model ?? "?"}`;
+	if (executor?.kind === "cli") return `cli · ${executor.tool ?? "?"}`;
+	return String(executor?.kind ?? "?");
+}
+
+/**
+ * The switches `doc` offers for `section` ("routing" | "jobs"), grouped. Each
+ * item names what it flips (`kind` + `cls` / `id` / `index` / `name`) and its
+ * current state `on`; anything else yields no groups.
+ */
+/**
+ * Is this route option's model listed in `disabledModels`? Same key and `/*`
+ * matching as the gate ("<family>/<model>", the family being the part of the
+ * provider before its role) — so the form says "off" exactly when the gate refuses.
+ */
+export function optionModelOff(doc, option) {
+	const offModels = Array.isArray(doc?.disabledModels) ? doc.disabledModels : [];
+	const key = `${String(option?.paseoProvider ?? "?").split("-")[0]}/${option?.model ?? "?"}`;
+	return offModels.some((entry) => (entry.endsWith("/*") ? key.startsWith(entry.slice(0, -1)) : entry === key));
+}
+
+export function listSwitches(section, doc) {
+	if (doc === null || typeof doc !== "object") return [];
+	if (section === "routing") {
+		const modelOff = (option) => optionModelOff(doc, option);
+		const items = [];
+		for (const [cls, route] of Object.entries(doc.routes ?? {})) {
+			if (route === null || typeof route !== "object") continue;
+			// A class can offer several options (a tool running a model each). Its own switch
+			// flips them all; each option has one of its own. The Lead seats ONE usable option.
+			const options = [route, ...(Array.isArray(route.alternates) ? route.alternates : [])].filter((option) => option && typeof option === "object");
+			const describe = (option) => `${option.paseoProvider ?? "?"} · ${option.model ?? "?"}${modelOff(option) ? " · model OFF" : ""}`;
+			items.push({
+				kind: "route",
+				cls,
+				label: cls,
+				detail: options.length === 1 ? describe(route) : `${options.length} options`,
+				on: options.some((option) => option.enabled !== false),
+			});
+			if (options.length > 1) {
+				options.forEach((option, index) => {
+					items.push({ kind: "option", cls, index, label: `#${index}`, detail: describe(option), on: option.enabled !== false, child: true });
+				});
+			}
+		}
+		const groups = items.length > 0 ? [{ id: "routes", items }] : [];
+		// Models: one switch per model the routes use (and every entry already in
+		// disabledModels), keyed "<family>/<model>" — the family is the part of the
+		// role provider before its role ("pi-peer" -> "pi"). Off = the model is out of
+		// credit/down: every class and job executor on it is refused/skipped.
+		const off = Array.isArray(doc.disabledModels) ? doc.disabledModels : [];
+		const keys = new Set();
+		for (const route of Object.values(doc.routes ?? {})) {
+			if (route === null || typeof route !== "object") continue;
+			for (const option of [route, ...(Array.isArray(route.alternates) ? route.alternates : [])]) {
+				if (option && typeof option.paseoProvider === "string" && typeof option.model === "string") keys.add(`${option.paseoProvider.split("-")[0]}/${option.model}`);
+			}
+		}
+		for (const entry of off) keys.add(entry);
+		const covered = (key) => off.some((entry) => (entry.endsWith("/*") ? key.startsWith(entry.slice(0, -1)) : entry === key));
+		const modelItems = [...keys].sort().map((key) => ({
+			kind: "model",
+			key,
+			label: key,
+			detail: key.endsWith("/*") ? "pattern" : "",
+			on: !covered(key),
+			// a model off only because a pattern covers it is flipped by the pattern's own switch
+			locked: !off.includes(key) && covered(key),
+		}));
+		if (modelItems.length > 0) groups.push({ id: "models", items: modelItems });
+		return groups;
+	}
+	if (section === "jobs") {
+		const groups = [];
+		const jobItems = [];
+		for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+			if (job === null || typeof job !== "object") continue;
+			jobItems.push({ kind: "job", id, label: job.label || id, detail: `${id} · ${job.run ?? "parallel"}`, on: job.enabled !== false });
+			(Array.isArray(job.executors) ? job.executors : []).forEach((executor, index) => {
+				jobItems.push({ kind: "executor", id, index, label: executorSummary(executor), detail: "", on: executor?.enabled !== false, child: true });
+			});
+		}
+		if (jobItems.length > 0) groups.push({ id: "jobs", items: jobItems });
+		const off = Array.isArray(doc.disabledTools) ? doc.disabledTools : [];
+		const names = [...BUILTIN_TOOL_NAMES, ...Object.keys(doc.cliTools ?? {})];
+		// A name left in disabledTools that no tool carries any more is shown too:
+		// the validator would refuse the file, and hiding it would hide why.
+		for (const name of off) if (!names.includes(name)) names.push(name);
+		groups.push({ id: "tools", items: names.map((name) => ({ kind: "tool", name, label: name, detail: BUILTIN_TOOL_NAMES.includes(name) ? "built-in" : "cliTools", on: !off.includes(name) })) });
+		return groups;
+	}
+	return [];
+}
+
+/** Flip one switch from `listSwitches` on `doc`, in place. On is the absence of the key. */
+export function applySwitch(section, doc, item, on) {
+	const setFlag = (node) => {
+		if (on) delete node.enabled;
+		else node.enabled = false;
+	};
+	if (section === "routing" && item.kind === "route") {
+		const route = own(own(doc, "routes"), item.cls);
+		if (route === null || typeof route !== "object") throw new Error(`no route for ${item.cls}`);
+		// the class switch flips every option
+		setFlag(route);
+		for (const option of Array.isArray(route.alternates) ? route.alternates : []) if (option && typeof option === "object") setFlag(option);
+	} else if (section === "routing" && item.kind === "option") {
+		const route = own(own(doc, "routes"), item.cls);
+		if (route === null || typeof route !== "object") throw new Error(`no route for ${item.cls}`);
+		const option = item.index === 0 ? route : route.alternates?.[item.index - 1];
+		if (option === null || typeof option !== "object") throw new Error(`no option ${item.index} of ${item.cls}`);
+		setFlag(option);
+	} else if (section === "routing" && item.kind === "model") {
+		const off = new Set(Array.isArray(doc.disabledModels) ? doc.disabledModels : []);
+		if (on) off.delete(item.key);
+		else off.add(item.key);
+		if (off.size > 0) doc.disabledModels = [...off];
+		else delete doc.disabledModels;
+	} else if (section === "jobs" && item.kind === "job") {
+		const job = own(own(doc, "jobs"), item.id);
+		if (job === null || typeof job !== "object") throw new Error(`no job ${item.id}`);
+		setFlag(job);
+	} else if (section === "jobs" && item.kind === "executor") {
+		const executor = own(own(doc, "jobs"), item.id)?.executors?.[item.index];
+		if (executor === null || typeof executor !== "object") throw new Error(`no executor ${item.index} in job ${item.id}`);
+		setFlag(executor);
+	} else if (section === "jobs" && item.kind === "tool") {
+		const off = new Set(Array.isArray(doc.disabledTools) ? doc.disabledTools : []);
+		if (on) off.delete(item.name);
+		else off.add(item.name);
+		if (off.size > 0) doc.disabledTools = [...off];
+		else delete doc.disabledTools;
+	} else {
+		throw new Error(`unknown switch ${item.kind} in ${section}`);
+	}
+	return doc;
 }

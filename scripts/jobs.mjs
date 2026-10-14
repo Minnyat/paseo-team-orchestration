@@ -7,9 +7,17 @@
  * It is a preset only: nothing here seats an agent, and the create_agent gate
  * still checks every seating against the route file, never against this one.
  *
- * Every executor of a job is used. `run: "sequential"` means in the listed
- * order; it is NOT "try the next one when the previous failed" — this pack
- * never falls back to another model or host on its own (model-routing.mjs).
+ * Every ENABLED executor of a job is used. `run: "sequential"` means in the
+ * listed order; it is NOT "try the next one when the previous failed" — this
+ * pack never falls back to another model or host on its own (model-routing.mjs).
+ *
+ * Quick switches, all plain `enabled: false` / a name in `disabledTools`, all
+ * kept in the file so switching back on restores exactly what was there:
+ *   job.enabled, executor.enabled, disabledTools (a CLI tool, built-in or not),
+ * and — in the route file, not here — route.enabled / disabledModels for a
+ * model class or a model. An inactive step is SKIPPED, never replaced by another
+ * one. The file is read on every `pteam jobs list|show|resolve`, so a switch is
+ * live at once.
  *
  * File: <teamConfigDir>/jobs.local.json, example config/jobs.example.json.
  * Vocabulary (model classes, role providers, thinking levels, model shapes) is
@@ -22,7 +30,11 @@ import {
 	ROLE_PROVIDERS,
 	THINKING_LEVELS_BY_FAMILY,
 	composeProviderModel,
+	isModelDisabled,
+	modelSwitchKey,
 	providerFamily,
+	providerRole,
+	routeOptions,
 } from "./model-routing.mjs";
 import { teamConfigDir } from "./lib-common.mjs";
 
@@ -49,9 +61,9 @@ export const EXECUTOR_KINDS = Object.freeze(["class", "route", "cli"]);
 
 /** The keys each executor kind may carry; a key of another kind is refused. */
 export const EXECUTOR_KEYS = Object.freeze({
-	class: Object.freeze(["kind", "modelClass"]),
-	route: Object.freeze(["kind", "paseoProvider", "model", "thinking"]),
-	cli: Object.freeze(["kind", "tool", "args"]),
+	class: Object.freeze(["kind", "modelClass", "enabled"]),
+	route: Object.freeze(["kind", "paseoProvider", "model", "thinking", "enabled"]),
+	cli: Object.freeze(["kind", "tool", "args", "enabled"]),
 });
 
 /** CLI tools every host knows; `cliTools` adds others, it cannot redefine these. */
@@ -81,8 +93,8 @@ function nameProblem(name) {
 	return null;
 }
 
-const TOP_LEVEL_KEYS = ["$comment", "version", "cliTools", "jobs"];
-const JOB_KEYS = ["label", "description", "disposition", "run", "executors"];
+const TOP_LEVEL_KEYS = ["$comment", "version", "cliTools", "disabledTools", "jobs"];
+const JOB_KEYS = ["label", "description", "disposition", "run", "enabled", "executors"];
 const CLI_TOOL_KEYS = ["command", "args"];
 
 export class JobsConfigError extends Error {
@@ -146,6 +158,9 @@ function validateExecutor(executor, jobId, index, toolNames) {
 	if (extra.length > 0) {
 		throw fail(`kind "${kind}" does not take ${extra.join(", ")} (allowed: ${EXECUTOR_KEYS[kind].join(", ")})`, { kind });
 	}
+	if (executor.enabled !== undefined && typeof executor.enabled !== "boolean") {
+		throw fail("enabled must be true or false", { kind });
+	}
 	if (kind === "class") {
 		if (!ALL_MODEL_CLASSES.includes(executor.modelClass)) {
 			throw fail(`modelClass ${JSON.stringify(executor.modelClass)} is not a MODEL_CLASS (${ALL_MODEL_CLASSES.join(", ")})`, { kind });
@@ -194,6 +209,7 @@ function validateJob(jobId, job, toolNames) {
 	if (job.disposition !== undefined && !JOB_DISPOSITIONS.includes(job.disposition)) {
 		throw fail(`disposition ${JSON.stringify(job.disposition)} is not one of ${JOB_DISPOSITIONS.join(", ")}`);
 	}
+	if (job.enabled !== undefined && typeof job.enabled !== "boolean") throw fail("enabled must be true or false");
 	if (job.run !== undefined && !JOB_RUN_MODES.includes(job.run)) {
 		throw fail(`run ${JSON.stringify(job.run)} is not one of ${JOB_RUN_MODES.join(", ")}`);
 	}
@@ -221,6 +237,15 @@ export function validateJobsConfig(doc) {
 	}
 	validateCliTools(doc.cliTools);
 	const toolNames = [...Object.keys(BUILTIN_CLI_TOOLS), ...Object.keys(doc.cliTools ?? {})];
+	if (doc.disabledTools !== undefined) {
+		if (!Array.isArray(doc.disabledTools) || doc.disabledTools.some((name) => typeof name !== "string")) {
+			throw new JobsConfigError("disabledTools must be an array of tool names");
+		}
+		const unknown = doc.disabledTools.filter((name) => !toolNames.includes(name));
+		if (unknown.length > 0) {
+			throw new JobsConfigError(`disabledTools names unknown tool(s) ${unknown.join(", ")} (known: ${toolNames.join(", ")})`, { unknown });
+		}
+	}
 	if (doc.jobs !== undefined) {
 		if (!isObject(doc.jobs)) throw new JobsConfigError("jobs must be an object of job-id -> job");
 		for (const [jobId, job] of Object.entries(doc.jobs)) validateJob(jobId, job, toolNames);
@@ -229,11 +254,41 @@ export function validateJobsConfig(doc) {
 }
 
 /**
- * One executor as a Lead reads it: a class executor carries the route that
+ * One executor as a Lead reads it: a class executor carries the options that
  * class has on this host now (or why it has none), a cli executor the command
  * line it stands for. `routeTable` is loadLocalRouteTable()'s answer.
+ *
+ * `active` is whether it will be used right now, `inactiveReason` why not:
+ * the executor's own switch, a disabled tool, a switched-off or missing route.
  */
-function describeExecutor(executor, routeTable, cliTools) {
+function describeExecutor(executor, index, routeTable, cliTools, disabledTools, disabledModels) {
+	const described = describeExecutorBody(executor, routeTable, cliTools);
+	let inactiveReason = null;
+	if (executor.enabled === false) inactiveReason = "executor switched off (enabled: false)";
+	else if (executor.kind === "cli" && disabledTools.includes(executor.tool)) inactiveReason = `tool "${executor.tool}" is switched off (disabledTools)`;
+	else if (executor.kind === "class" && described.route === null) inactiveReason = described.routeProblem;
+	else if (executor.kind === "class") {
+		// A class can offer several options (a tool running a model each); the executor
+		// is active when ANY is usable, and the Lead seats ONE of the usable ones —
+		// nothing here chooses.
+		const options = described.options.map((option) => {
+			const key = modelSwitchKey(option.paseoProvider, option.model);
+			let why = null;
+			if (!option.enabled) why = `${described.options.length === 1 ? `${executor.modelClass} is switched off in the route file` : `option ${option.index} of ${executor.modelClass} (${key}) is switched off`} (the Human switches it on: pteam routing enable ${executor.modelClass}${described.options.length === 1 ? "" : ` --option ${option.index}`})`;
+			else if (isModelDisabled(disabledModels, option.paseoProvider, option.model)) why = `model ${key} is switched off (the Human switches it on: pteam routing enable-model ${key})`;
+			return { ...option, usable: why === null, ...(why ? { inactiveReason: why } : {}) };
+		});
+		described.options = options;
+		if (!options.some((option) => option.usable)) {
+			inactiveReason = options.length === 1 ? options[0].inactiveReason : `no option of ${executor.modelClass} is usable: ${options.map((option) => option.inactiveReason).join("; ")}`;
+		}
+	} else if (executor.kind === "route" && isModelDisabled(disabledModels, executor.paseoProvider, executor.model)) {
+		inactiveReason = `model ${modelSwitchKey(executor.paseoProvider, executor.model)} is switched off (the Human switches it on: pteam routing enable-model ${modelSwitchKey(executor.paseoProvider, executor.model)})`;
+	}
+	return { index, enabled: executor.enabled !== false, active: inactiveReason === null, inactiveReason, ...described };
+}
+
+function describeExecutorBody(executor, routeTable, cliTools) {
 	if (executor.kind === "class") {
 		const out = { kind: "class", modelClass: executor.modelClass };
 		if (!routeTable?.ok) {
@@ -243,14 +298,25 @@ function describeExecutor(executor, routeTable, cliTools) {
 		if (!route) {
 			return { ...out, route: null, routeProblem: `${executor.modelClass} is not configured in ${routeTable.path} (pteam routing set ${executor.modelClass} ...)` };
 		}
+		const options = routeOptions(route).map((option) => ({
+			index: option.index,
+			paseoProvider: option.paseoProvider,
+			model: option.model,
+			thinking: option.thinking,
+			enabled: option.enabled,
+			createAgentProvider: composeProviderModel(option.paseoProvider, option.model),
+		}));
 		return {
 			...out,
+			// `route` is the primary option, kept in its old shape for readers that predate options.
 			route: {
 				paseoProvider: route.paseoProvider,
 				model: route.model,
 				thinking: route.thinking,
+				...(route.enabled === false ? { enabled: false } : {}),
 				createAgentProvider: composeProviderModel(route.paseoProvider, route.model),
 			},
+			options,
 		};
 	}
 	if (executor.kind === "route") {
@@ -268,20 +334,117 @@ function describeExecutor(executor, routeTable, cliTools) {
 	return { kind: "cli", tool: executor.tool, builtin, command: tool.command, args };
 }
 
-/** A validated document's jobs, sorted by id, each executor described. */
+/** The model class a job seating declares by default, by the role of the seat — a flow label, see seatInfo. */
+const DEFAULT_SEAT_CLASS = Object.freeze({ peer: "CODING_MEDIUM", supervisor: "SUPERVISOR_GOVERNANCE", lead: "LEAD_RECOVERY" });
+
+/**
+ * What seating this executor looks like: the exact create_agent arguments that
+ * the route gate accepts for it, or why it cannot be seated.
+ *
+ * A job seating names its job in labels["team.job"]; the gate then accepts the
+ * provider/model/thinking of an ACTIVE executor of that job instead of the one
+ * route of a class. The class label is still required — it decides the flow (a
+ * Lead seats a Peer from a Peer class, never from a governance class) — and for
+ * a class executor it is that class; for a route executor it is a flow label,
+ * defaulting by the role of the provider. The thinking level must be spelled
+ * out by the executor: the gate compares it byte for byte, and a level left to
+ * the Lead would be a level nobody checked.
+ */
+function seatInfo(executor, jobId) {
+	if (executor.kind === "cli") return { ...executor, seat: null, seats: [] };
+	if (!executor.active) return { ...executor, seat: null, seats: [] };
+	if (executor.kind === "class") {
+		// One seat per USABLE option. With several, the Lead seats ONE of them
+		// (`pickOne`) — this module never chooses, and a model that is off is simply
+		// not in the list.
+		const seats = executor.options
+			.filter((option) => option.usable)
+			.map((option) => ({
+				option: option.index,
+				paseoProvider: option.paseoProvider,
+				model: option.model,
+				thinking: option.thinking,
+				createAgent: {
+					provider: option.createAgentProvider,
+					settings: { thinkingOptionId: option.thinking },
+					labels: { "team.model-class": executor.modelClass, "team.job": jobId },
+				},
+			}));
+		return { ...executor, seat: seats.length === 1 ? seats[0].createAgent : null, seats, ...(seats.length > 1 ? { pickOne: true } : {}) };
+	}
+	const thinking = executor.thinking;
+	if (thinking === undefined) {
+		return {
+			...executor,
+			seat: null,
+			seats: [],
+			seatProblem: "this route executor has no thinking level, and the gate compares thinking byte for byte — set one on the executor to make it seatable",
+		};
+	}
+	const createAgent = {
+		provider: executor.createAgentProvider ?? composeProviderModel(executor.paseoProvider, executor.model),
+		settings: { thinkingOptionId: thinking },
+		labels: { "team.model-class": DEFAULT_SEAT_CLASS[providerRole(executor.paseoProvider)], "team.job": jobId },
+		note: `"team.model-class" is a flow label here; use another class valid for the seat's role if the task fits it better`,
+	};
+	return {
+		...executor,
+		seat: createAgent,
+		seats: [{ option: 0, paseoProvider: executor.paseoProvider, model: executor.model, thinking, createAgent }],
+	};
+}
+
+/**
+ * A validated document's jobs, sorted by id, each executor described — ALL of
+ * them, with `active` / `inactiveReason`. What a Lead is shown by default is
+ * `activeJobs(...)` of this.
+ */
 export function describeJobs(doc, routeTable) {
 	const cliTools = doc.cliTools ?? {};
+	const disabledTools = doc.disabledTools ?? [];
+	const disabledModels = routeTable?.ok ? (routeTable.disabledModels ?? []) : [];
 	return Object.keys(doc.jobs ?? {})
 		.sort()
 		.map((id) => {
 			const job = doc.jobs[id];
+			const executors = job.executors.map((executor, index) => seatInfo(describeExecutor(executor, index, routeTable, cliTools, disabledTools, disabledModels), id));
+			const enabled = job.enabled !== false;
+			const anyActive = executors.some((executor) => executor.active);
+			const inactiveReason = !enabled
+				? "job switched off (enabled: false)"
+				: anyActive
+					? null
+					: `no executor of this job is active — ${executors.map((executor) => `[${executor.index}] ${executor.inactiveReason}`).join("; ")}`;
 			return {
 				id,
 				...(job.label !== undefined ? { label: job.label } : {}),
 				...(job.description !== undefined ? { description: job.description } : {}),
 				...(job.disposition !== undefined ? { disposition: job.disposition } : {}),
 				run: job.run ?? DEFAULT_RUN_MODE,
-				executors: job.executors.map((executor) => describeExecutor(executor, routeTable, cliTools)),
+				enabled,
+				active: enabled && anyActive,
+				inactiveReason,
+				executors,
 			};
 		});
+}
+
+/**
+ * What a Lead may use right now: jobs that are on and have at least one active
+ * executor, trimmed to those executors (original `index` kept, so a sequential
+ * order stays readable). Everything else is named in `inactive` with its reason
+ * — a skipped step is reported, never silently replaced by another.
+ */
+export function activeJobs(jobs) {
+	const usable = [];
+	const inactive = [];
+	for (const job of jobs) {
+		if (!job.active) {
+			inactive.push({ id: job.id, reason: job.inactiveReason });
+			continue;
+		}
+		const skipped = job.executors.filter((executor) => !executor.active).map(({ index, inactiveReason }) => ({ index, reason: inactiveReason }));
+		usable.push({ ...job, executors: job.executors.filter((executor) => executor.active), skipped });
+	}
+	return { jobs: usable, inactive };
 }

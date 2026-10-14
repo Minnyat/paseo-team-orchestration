@@ -339,3 +339,206 @@ test("dispatch: usage errors exit 2, help lists every subcommand", () => {
 		assert.match(help.stdout, new RegExp(`pteam routing ${sub}`), `help names routing ${sub}`);
 	}
 });
+
+// --- enable / disable: the quick switch ----------------------------------------------
+
+test("disable / enable flip one route's switch, keep its model, back up, and show it in `show` and `check`", () => {
+	const h = routingOnly();
+	const off = h.run(["disable", "CODING_MEDIUM", "--json"]);
+	assert.equal(off.status, 0, off.stderr);
+	assert.equal(off.json.enabled, false);
+	assert.equal(off.json.wrote, true);
+	assert.equal(h.backups().length, 1, "a backup of what it replaced");
+	assert.deepEqual(h.read(h.routingPath).routes.CODING_MEDIUM, { ...BASE_ROUTES.CODING_MEDIUM, enabled: false }, "model and thinking are kept");
+
+	const show = h.run(["show", "--json"]);
+	const entry = show.json.classes.find((c) => c.class === "CODING_MEDIUM");
+	assert.equal(entry.enabled, false);
+	assert.ok(show.json.warnings.some((w) => /CODING_MEDIUM is switched off.*pteam routing enable/.test(w)));
+	assert.match(h.run(["show"]).stdout, /CODING_MEDIUM\s+pi-peer\/Mx\/mid\s+thinking=medium \[OFF\]/);
+
+	const check = h.run(["check", "--json"]);
+	const row = check.json.checks.find((c) => c.id === "route:CODING_MEDIUM");
+	assert.equal(row.status, "warn", "a deliberate switch-off is a warning, never a failure");
+	assert.equal(check.json.ok, true);
+
+	const again = h.run(["disable", "CODING_MEDIUM", "--json"]);
+	assert.equal(again.json.wrote, false, "already off: nothing written");
+	assert.equal(h.backups().length, 1);
+
+	// `set` changes what the class routes to without silently switching it back on.
+	const set = h.run(["set", "CODING_MEDIUM", "--provider", "pi-peer", "--model", "Mx/cheap", "--thinking", "low", "--json"]);
+	assert.equal(set.status, 0, set.stderr);
+	assert.deepEqual(h.read(h.routingPath).routes.CODING_MEDIUM, { paseoProvider: "pi-peer", model: "Mx/cheap", thinking: "low", enabled: false });
+
+	const on = h.run(["enable", "CODING_MEDIUM", "--json"]);
+	assert.equal(on.status, 0, on.stderr);
+	assert.equal("enabled" in h.read(h.routingPath).routes.CODING_MEDIUM, false, "on is the absence of the key");
+});
+
+test("enable/disable refuse an unknown class and a class with no route, writing nothing", () => {
+	const h = routingOnly();
+	const unknown = h.run(["disable", "NOPE", "--json"]);
+	assert.equal(unknown.status, 1);
+	assert.equal(unknown.json.code, "CLASS_UNKNOWN");
+	const none = h.run(["disable", "LEAD_RECOVERY", "--json"]);
+	assert.equal(none.status, 1);
+	assert.equal(none.json.code, "CLASS_UNCONFIGURED");
+	assert.equal(h.backups().length, 0);
+});
+
+test("disable works on a cluster host's route file too (--host-id)", () => {
+	const h = clusterHost();
+	const result = h.run(["disable", "FAST_READ", "--host-id", "ctl", "--json"]);
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(h.read(h.clusterPath).hosts.ctl.routes.FAST_READ.enabled, false);
+	assert.equal(h.read(h.clusterPath).hosts.mac.routes.FAST_READ.enabled, undefined, "only the named host");
+});
+
+// --- disable-model / enable-model: "this model is out of credit" ----------------------
+
+test("disable-model / enable-model edit one list in the file the gate reads, validated, backed up", () => {
+	const h = routingOnly();
+	const off = h.run(["disable-model", "pi/Mx/mid", "--json"]);
+	assert.equal(off.status, 0, off.stderr);
+	assert.deepEqual(off.json.disabledModels, ["pi/Mx/mid"]);
+	assert.equal(h.backups().length, 1);
+	assert.deepEqual(h.read(h.routingPath).disabledModels, ["pi/Mx/mid"]);
+	assert.deepEqual(h.read(h.routingPath).routes, BASE_ROUTES, "no route is touched");
+
+	const again = h.run(["disable-model", "pi/Mx/mid", "--json"]);
+	assert.equal(again.json.wrote, false);
+	assert.equal(h.backups().length, 1);
+
+	const show = h.run(["show", "--json"]);
+	assert.deepEqual(show.json.disabledModels, ["pi/Mx/mid"]);
+	const byClass = Object.fromEntries(show.json.classes.map((c) => [c.class, c]));
+	assert.equal(byClass.CODING_MEDIUM.modelDisabled, true, "the class on that model is flagged");
+	assert.equal(byClass.CODING_MEDIUM.enabled, true, "its own switch is a separate fact");
+	assert.equal(byClass.FAST_READ.modelDisabled, false);
+	assert.ok(show.json.warnings.some((w) => /CODING_MEDIUM routes to a model that is switched off/.test(w)));
+	assert.match(h.run(["show"]).stdout, /CODING_MEDIUM .*\[MODEL OFF\]/);
+	assert.match(h.run(["show"]).stdout, /models switched off: pi\/Mx\/mid/);
+	const check = h.run(["check", "--json"]);
+	assert.equal(check.json.checks.find((c) => c.id === "route:CODING_MEDIUM").status, "warn", "a deliberate switch-off is a warning");
+
+	h.run(["disable-model", "claude/claude-opus-5"]);
+	const wild = h.run(["disable-model", "pi/Mx/*", "--json"]);
+	assert.deepEqual(wild.json.disabledModels, ["pi/Mx/mid", "claude/claude-opus-5", "pi/Mx/*"]);
+
+	const on = h.run(["enable-model", "pi/Mx/mid", "--json"]);
+	assert.deepEqual(on.json.disabledModels, ["claude/claude-opus-5", "pi/Mx/*"]);
+	h.run(["enable-model", "claude/claude-opus-5"]);
+	h.run(["enable-model", "pi/Mx/*"]);
+	assert.equal("disabledModels" in h.read(h.routingPath), false, "an empty list is dropped");
+});
+
+test("disable-model refuses a bad key and writes nothing; works per host in a cluster file", () => {
+	const h = routingOnly();
+	for (const bad of ["Mx/gpt", "pi", "pi/a*b", "gpt/x"]) {
+		const r = h.run(["disable-model", bad, "--json"]);
+		assert.equal(r.status, 1, bad);
+		assert.equal(r.json.code, "MODEL_KEY_INVALID", bad);
+	}
+	assert.equal(h.run(["disable-model"]).status, 2, "a missing key is a usage error");
+	assert.equal(h.backups().length, 0);
+
+	const c = clusterHost();
+	const r = c.run(["disable-model", "pi/Mx/*", "--host-id", "ctl", "--json"]);
+	assert.equal(r.status, 0, r.stderr);
+	assert.deepEqual(c.read(c.clusterPath).hosts.ctl.disabledModels, ["pi/Mx/*"]);
+	assert.equal(c.read(c.clusterPath).hosts.mac.disabledModels, undefined, "only the named host");
+	// without --host-id it edits the host the gate reads (the local one)
+	const d = c.run(["disable-model", "claude/claude-opus-5", "--json"]);
+	assert.equal(d.status, 0, d.stderr);
+	assert.deepEqual(c.read(c.clusterPath).hosts.ctl.disabledModels, ["pi/Mx/*", "claude/claude-opus-5"]);
+});
+
+// --- a class with several options: add-option / remove-option / --option ---------------
+
+test("add-option gives a class another tool/model, verified live; set keeps it; show lists every option", () => {
+	const h = routingOnly();
+	// claude-peer has claude-opus-5 (high/xhigh) in the fake inventory
+	const added = h.run(["add-option", "CODING_MEDIUM", "--provider", "claude-peer", "--model", "claude-opus-5", "--thinking", "high", "--json"]);
+	assert.equal(added.status, 0, added.stderr);
+	assert.equal(added.json.option, 1);
+	assert.equal(added.json.createAgentProvider, "claude-peer/claude-opus-5");
+	assert.equal(h.backups().length, 1);
+	assert.deepEqual(h.read(h.routingPath).routes.CODING_MEDIUM.alternates, [{ paseoProvider: "claude-peer", model: "claude-opus-5", thinking: "high" }]);
+
+	const show = h.run(["show", "--json"]);
+	const entry = show.json.classes.find((c) => c.class === "CODING_MEDIUM");
+	assert.deepEqual(entry.options.map((o) => `${o.index}:${o.createAgentProvider}`), ["0:pi-peer/Mx/mid", "1:claude-peer/claude-opus-5"]);
+	assert.equal(entry.usable, true);
+	assert.match(h.run(["show"]).stdout, /CODING_MEDIUM\s+pi-peer\/Mx\/mid\s+thinking=medium\n\s+#1 claude-peer\/claude-opus-5\s+thinking=high/);
+
+	// `set` changes the primary and must not drop the other options
+	const set = h.run(["set", "CODING_MEDIUM", "--provider", "pi-peer", "--model", "Mx/cheap", "--thinking", "low", "--json"]);
+	assert.equal(set.status, 0, set.stderr);
+	const after = h.read(h.routingPath).routes.CODING_MEDIUM;
+	assert.equal(after.model, "Mx/cheap");
+	assert.equal(after.alternates.length, 1, "set kept the alternates");
+
+	const check = h.run(["check", "--json"]);
+	assert.equal(check.json.checks.find((c) => c.id === "route:CODING_MEDIUM#1").status, "pass", "every option is checked, as route:CLASS#N");
+});
+
+test("add-option refuses an unverifiable, duplicate or wrong-role option and writes nothing", () => {
+	const h = routingOnly();
+	const missingModel = h.run(["add-option", "CODING_MEDIUM", "--provider", "claude-peer", "--model", "no-such", "--thinking", "high", "--json"]);
+	assert.equal(missingModel.status, 1);
+	assert.ok(missingModel.json.code);
+	const dup = h.run(["add-option", "CODING_MEDIUM", "--provider", "pi-peer", "--model", "Mx/mid", "--thinking", "medium", "--json"]);
+	assert.equal(dup.status, 1, "an exact repeat of the primary");
+	const wrongRole = h.run(["add-option", "FAST_READ", "--provider", "pi-supervisor", "--model", "Mx/cheap", "--thinking", "low", "--json"]);
+	assert.equal(wrongRole.status, 1, "a Supervisor option in a Peer class");
+	assert.equal(h.run(["add-option", "NOPE", "--provider", "pi-peer", "--model", "x", "--thinking", "low", "--json"]).json.code, "CLASS_UNKNOWN");
+	assert.equal(h.run(["add-option", "CODING_MEDIUM", "--provider", "pi-peer"]).status, 2, "all three flags are required");
+	assert.equal(h.backups().length, 0);
+	assert.deepEqual(h.read(h.routingPath).routes.CODING_MEDIUM, BASE_ROUTES.CODING_MEDIUM);
+});
+
+test("enable/disable --option switches one option; without it the whole class; remove-option drops an alternate", () => {
+	const h = host({
+		routing: {
+			version: 1,
+			hostId: "minnyat",
+			routes: { ...BASE_ROUTES, CODING_MEDIUM: { ...BASE_ROUTES.CODING_MEDIUM, alternates: [{ paseoProvider: "claude-peer", model: "claude-opus-5", thinking: "high" }] } },
+		},
+	});
+	const off = h.run(["disable", "CODING_MEDIUM", "--option", "0", "--json"]);
+	assert.equal(off.status, 0, off.stderr);
+	let route = h.read(h.routingPath).routes.CODING_MEDIUM;
+	assert.equal(route.enabled, false);
+	assert.equal(route.alternates[0].enabled, undefined, "only the primary");
+	let show = h.run(["show", "--json"]).json;
+	let entry = show.classes.find((c) => c.class === "CODING_MEDIUM");
+	assert.equal(entry.usable, true, "the class is still usable through its other option");
+	assert.deepEqual(entry.options.map((o) => o.enabled), [false, true]);
+	assert.ok(!show.warnings.some((w) => /CODING_MEDIUM is switched off/.test(w)), "no class-level warning while an option is on");
+	assert.match(h.run(["show"]).stdout, /CODING_MEDIUM\s+pi-peer\/Mx\/mid\s+thinking=medium \[OFF\]/);
+
+	// the whole class: every option off, then a class-level warning
+	h.run(["disable", "CODING_MEDIUM"]);
+	route = h.read(h.routingPath).routes.CODING_MEDIUM;
+	assert.equal(route.enabled, false);
+	assert.equal(route.alternates[0].enabled, false);
+	show = h.run(["show", "--json"]).json;
+	assert.equal(show.classes.find((c) => c.class === "CODING_MEDIUM").usable, false);
+	assert.ok(show.warnings.some((w) => /CODING_MEDIUM is switched off/.test(w)));
+	const bad = h.run(["disable", "CODING_MEDIUM", "--option", "7", "--json"]);
+	assert.equal(bad.status, 1);
+	assert.equal(bad.json.code, "OPTION_UNKNOWN");
+	assert.equal(h.run(["disable", "CODING_MEDIUM", "--option", "x"]).status, 2);
+
+	h.run(["enable", "CODING_MEDIUM"]);
+	route = h.read(h.routingPath).routes.CODING_MEDIUM;
+	assert.equal("enabled" in route, false);
+	assert.equal("enabled" in route.alternates[0], false);
+
+	const removed = h.run(["remove-option", "CODING_MEDIUM", "1", "--json"]);
+	assert.equal(removed.status, 0, removed.stderr);
+	assert.equal("alternates" in h.read(h.routingPath).routes.CODING_MEDIUM, false, "an empty list is dropped");
+	assert.equal(h.run(["remove-option", "CODING_MEDIUM", "1", "--json"]).json.code, "OPTION_UNKNOWN");
+	assert.equal(h.run(["remove-option", "CODING_MEDIUM", "0", "--json"]).json.code, "OPTION_UNKNOWN", "the primary is changed with set, not removed");
+});

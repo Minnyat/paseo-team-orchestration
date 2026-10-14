@@ -71,7 +71,7 @@ import { agentCluster, extraToolDiagnostics, normalizeCluster } from "../extensi
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
 import * as routing from "./lib/routing.mjs";
-import { JOBS_SECTION, JobsConfigError, defaultJobsPath, describeJobs, validateJobsConfig } from "../scripts/jobs.mjs";
+import { JOBS_SECTION, JobsConfigError, activeJobs, defaultJobsPath, describeJobs, validateJobsConfig } from "../scripts/jobs.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -488,10 +488,9 @@ function fileRev(path) {
  * Never throws: no file, a corrupt one, or an unexpected shape is an empty
  * catalog, and the fields it would have fed stay plain text boxes.
  */
-function piModelCatalog() {
-	const doc = cw.readJsonOrNull(cw.piModelsPath());
+function piModelCatalog(doc = cw.readJsonOrNull(cw.piModelsPath())) {
 	const providers = doc && typeof doc === "object" ? doc.providers : null;
-	const catalog = {};
+	const catalog = Object.create(null);
 	if (!providers || typeof providers !== "object") return catalog;
 	for (const [name, provider] of Object.entries(providers)) {
 		const models = Array.isArray(provider?.models) ? provider.models : [];
@@ -500,6 +499,43 @@ function piModelCatalog() {
 			.filter((id) => typeof id === "string" && id !== "");
 	}
 	return catalog;
+}
+
+/** Read-only, IDs-only snapshot: never expose endpoint credentials to the UI. */
+function piCatalogSnapshot() {
+	const path = cw.piModelsPath();
+	if (!existsSync(path)) return { status: "missing", byProvider: {}, detail: {} };
+	const doc = cw.readJsonOrNull(path);
+	if (!doc?.providers || typeof doc.providers !== "object" || Array.isArray(doc.providers)) {
+		return { status: "invalid", byProvider: {}, detail: {} };
+	}
+	if (Object.values(doc.providers).some(provider => !provider || typeof provider !== "object" || Array.isArray(provider) || (provider.models !== undefined && !Array.isArray(provider.models)))) {
+		return { status: "invalid", byProvider: {}, detail: {} };
+	}
+	return { status: "ready", byProvider: piModelCatalog(doc), detail: catalogDetail(doc) };
+}
+
+/**
+ * Per-model metadata the modal shows as "current" values: name, limits,
+ * reasoning, input modalities — sanitized to safe types, never credentials.
+ * String model entries and missing fields simply contribute nothing.
+ */
+function catalogDetail(doc) {
+	const detail = Object.create(null);
+	for (const [name, provider] of Object.entries(doc.providers ?? {})) {
+		const forProvider = Object.create(null);
+		for (const model of provider?.models ?? []) {
+			if (!model || typeof model !== "object" || typeof model.id !== "string" || !model.id) continue;
+			const meta = {};
+			if (typeof model.name === "string" && model.name.trim()) meta.name = model.name;
+			for (const key of ["contextWindow", "maxTokens"]) if (Number.isSafeInteger(model[key]) && model[key] > 0) meta[key] = model[key];
+			if (typeof model.reasoning === "boolean") meta.reasoning = model.reasoning;
+			if (Array.isArray(model.input) && model.input.every((v) => v === "text" || v === "image")) meta.input = [...model.input];
+			forProvider[model.id] = meta;
+		}
+		detail[name] = forProvider;
+	}
+	return detail;
 }
 
 async function cmdConfigRead(section, rest = []) {
@@ -536,6 +572,7 @@ async function cmdConfigRead(section, rest = []) {
 	if (schema && section === "pi-settings") schema = withPiModelCatalog(schema, piModelCatalog());
 	const extras = {
 		...(schema ? { schema } : {}),
+		...(section === "pi-models" ? { catalog: piCatalogSnapshot() } : {}),
 		...(inventory ? { inventory: { providers: Object.keys(inventory.byProvider), degraded: inventory.degraded } } : {}),
 	};
 	if (invalid) {
@@ -1495,8 +1532,48 @@ function dispatchRouting(argv) {
 			rejectUnknownFlags(options, ["--host-id", "--json"]);
 			return runRouting(asJson, () => routing.routingUnset({ modelClass, hostId: flagValue(options, "--host-id") }));
 		}
+		case "enable":
+		case "disable": {
+			const [modelClass] = rest;
+			if (!modelClass || modelClass.startsWith("-")) usageFail(`routing ${sub}: missing <CLASS>`);
+			const options = rest.slice(1);
+			rejectUnknownFlags(options, ["--host-id", "--option", "--json"]);
+			const optionRaw = flagValue(options, "--option");
+			const option = optionRaw === undefined ? undefined : Number(optionRaw);
+			if (optionRaw !== undefined && !Number.isInteger(option)) usageFail(`routing ${sub}: --option must be a whole number (0 = the primary)`);
+			return runRouting(asJson, () => routing.routingToggle({ modelClass, enabled: sub === "enable", hostId: flagValue(options, "--host-id"), option }));
+		}
+		case "add-option": {
+			const [modelClass] = rest;
+			if (!modelClass || modelClass.startsWith("-")) usageFail("routing add-option: missing <CLASS>");
+			const options = rest.slice(1);
+			rejectUnknownFlags(options, ["--provider", "--model", "--thinking", "--host-id", "--json"]);
+			const provider = flagValue(options, "--provider");
+			const model = flagValue(options, "--model");
+			const thinking = flagValue(options, "--thinking");
+			if (provider === undefined || model === undefined || thinking === undefined) {
+				usageFail("routing add-option: --provider, --model and --thinking are all required");
+			}
+			return runRouting(asJson, () => routing.routingAddOption({ modelClass, provider, model, thinking, hostId: flagValue(options, "--host-id") }));
+		}
+		case "remove-option": {
+			const [modelClass, optionRaw] = rest;
+			if (!modelClass || modelClass.startsWith("-")) usageFail("routing remove-option: missing <CLASS>");
+			if (optionRaw === undefined || optionRaw.startsWith("-") || !Number.isInteger(Number(optionRaw))) usageFail("routing remove-option: missing <N> (the alternate's number, 1..)");
+			const options = rest.slice(2);
+			rejectUnknownFlags(options, ["--host-id", "--json"]);
+			return runRouting(asJson, () => routing.routingRemoveOption({ modelClass, option: Number(optionRaw), hostId: flagValue(options, "--host-id") }));
+		}
+		case "enable-model":
+		case "disable-model": {
+			const [key] = rest;
+			if (!key || key.startsWith("-")) usageFail(`routing ${sub}: missing <family/model> (e.g. pi/Minnyat/gpt-5.5, or pi/Minnyat/* for a whole endpoint)`);
+			const options = rest.slice(1);
+			rejectUnknownFlags(options, ["--host-id", "--json"]);
+			return runRouting(asJson, () => routing.routingModelSwitch({ key, enabled: sub === "enable-model", hostId: flagValue(options, "--host-id") }));
+		}
 		default:
-			usageFail(`routing: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected show|check|set|unset)`);
+			usageFail(`routing: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected show|check|set|unset|enable|disable|add-option|remove-option|enable-model|disable-model)`);
 	}
 }
 
@@ -1510,7 +1587,7 @@ function dispatchRouting(argv) {
  * "no jobs yet", not an error; an invalid one is exit 1 with the validator's
  * sentence, so a Lead never reads a preset the form would have refused.
  */
-function loadJobsView() {
+function loadJobsView({ all = false } = {}) {
 	const path = defaultJobsPath();
 	// One shape whether or not the file exists: every field is always present,
 	// null where it does not apply, so a script never branches on a missing key.
@@ -1525,7 +1602,9 @@ function loadJobsView() {
 			hint: "copy config/jobs.example.json there, or add jobs in the WebUI under Cấu hình → Công việc",
 			routeSource,
 			cliTools: {},
+			disabledTools: [],
 			jobs: [],
+			inactive: [],
 		};
 	}
 	let doc;
@@ -1537,30 +1616,88 @@ function loadJobsView() {
 		json({ ok: false, code: "CONFIG_INVALID", path, message });
 		fail(`jobs: CONFIG_INVALID: ${path}: ${message}`);
 	}
-	return { exists: true, path, hint: null, routeSource, cliTools: doc.cliTools ?? {}, jobs: describeJobs(doc, table) };
+	const described = describeJobs(doc, table);
+	// A Lead is shown what it may use right now; `--all` shows every job with its switches.
+	const view = all ? { jobs: described, inactive: [] } : activeJobs(described);
+	return { exists: true, path, hint: null, routeSource, cliTools: doc.cliTools ?? {}, disabledTools: doc.disabledTools ?? [], ...view };
 }
 
 function dispatchJobs(argv) {
 	const [sub, ...rest] = argv;
 	switch (sub) {
 		case "list": {
-			rejectUnknownFlags(rest, []);
-			return json({ ok: true, ...loadJobsView() });
+			rejectUnknownFlags(rest, ["--all"]);
+			return json({ ok: true, ...loadJobsView({ all: flag(rest, "--all") }) });
 		}
 		case "show": {
 			const [id, ...options] = rest;
 			if (!id || id.startsWith("-")) usageFail("jobs show: missing <id>");
-			rejectUnknownFlags(options, []);
-			const { jobs, ...view } = loadJobsView();
+			rejectUnknownFlags(options, ["--all"]);
+			const all = flag(options, "--all");
+			const { jobs, inactive, ...view } = loadJobsView({ all });
 			const job = jobs.find((entry) => entry.id === id);
 			if (!job) {
-				json({ ok: false, code: "JOB_NOT_FOUND", path: view.path, id, known: jobs.map((entry) => entry.id) });
-				return fail(`jobs: JOB_NOT_FOUND: no job "${id}" in ${view.path} (known: ${jobs.map((entry) => entry.id).join(", ") || "none"})`);
+				const off = inactive.find((entry) => entry.id === id);
+				if (off) {
+					json({ ok: false, code: "JOB_INACTIVE", path: view.path, id, reason: off.reason });
+					return fail(`jobs: JOB_INACTIVE: job "${id}" is not usable right now — ${off.reason} (pteam jobs show ${id} --all to read it anyway)`);
+				}
+				const known = [...jobs, ...inactive].map((entry) => entry.id).sort();
+				json({ ok: false, code: "JOB_NOT_FOUND", path: view.path, id, known });
+				return fail(`jobs: JOB_NOT_FOUND: no job "${id}" in ${view.path} (known: ${known.join(", ") || "none"})`);
 			}
 			return json({ ok: true, path: view.path, routeSource: view.routeSource, job });
 		}
+		case "resolve": {
+			// The reload a Lead runs right before a seating: re-reads the route and jobs
+			// files and prints, for each executor that can be used NOW, the exact
+			// create_agent arguments (provider, settings, labels incl. team.job) — or the
+			// CLI command to run. Nothing is chosen for the caller and nothing is
+			// substituted for a step that is off.
+			const [id, ...options] = rest;
+			if (!id || id.startsWith("-")) usageFail("jobs resolve: missing <id>");
+			rejectUnknownFlags(options, []);
+			const { jobs, inactive, ...view } = loadJobsView();
+			const job = jobs.find((entry) => entry.id === id);
+			if (!job) {
+				const off = inactive.find((entry) => entry.id === id);
+				const known = [...jobs, ...inactive].map((entry) => entry.id).sort();
+				if (off) {
+					json({ ok: false, code: "JOB_INACTIVE", path: view.path, id, reason: off.reason });
+					return fail(`jobs: JOB_INACTIVE: job "${id}" is not usable right now — ${off.reason}`);
+				}
+				json({ ok: false, code: "JOB_NOT_FOUND", path: view.path, id, known });
+				return fail(`jobs: JOB_NOT_FOUND: no job "${id}" in ${view.path} (known: ${known.join(", ") || "none"})`);
+			}
+			return json({
+				ok: true,
+				id: job.id,
+				...(job.label !== undefined ? { label: job.label } : {}),
+				run: job.run,
+				resolvedAt: new Date().toISOString(),
+				routeSource: view.routeSource,
+				// One entry per usable option. Entries sharing an `index` with `pickOne: true` are
+				// ALTERNATIVES of one executor (a class offering several tools/models): seat ONE
+				// of them. Nothing is chosen here.
+				seats: job.executors.flatMap((executor) =>
+					(executor.seats ?? []).map((seat) => ({
+						index: executor.index,
+						source: executor.kind,
+						...(executor.pickOne ? { option: seat.option, pickOne: true } : {}),
+						createAgent: seat.createAgent,
+					})),
+				),
+				cli: job.executors
+					.filter((executor) => executor.kind === "cli")
+					.map((executor) => ({ index: executor.index, tool: executor.tool, command: executor.command, args: executor.args })),
+				unseatable: job.executors
+					.filter((executor) => executor.kind !== "cli" && (executor.seats ?? []).length === 0)
+					.map((executor) => ({ index: executor.index, reason: executor.seatProblem ?? "not seatable" })),
+				skipped: job.skipped,
+			});
+		}
 		default:
-			usageFail(`jobs: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected list|show)`);
+			usageFail(`jobs: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected list|show|resolve)`);
 	}
 }
 
@@ -1595,11 +1732,16 @@ usage:
   pteam routing set <CLASS> --provider <role-provider> --model <id> --thinking <level> [--host-id <id>] [--json]
                                            (strict-validated against the live inventory; <file>.bak-<epoch> + atomic write)
   pteam routing unset <CLASS> [--host-id <id>] [--json]
+  pteam routing enable|disable <CLASS> [--option <N>] [--host-id <id>] [--json]   (quick switch: the whole class, or ONE option; a class with no usable option is refused by the gate, never rerouted; live at once)
+  pteam routing add-option <CLASS> --provider <role-provider> --model <id> --thinking <level> [--host-id <id>] [--json]   (one more tool/model for a class; the Lead seats ONE usable option)
+  pteam routing remove-option <CLASS> <N> [--host-id <id>] [--json]   (drop alternate N; the primary is changed with set)
+  pteam routing disable-model|enable-model <family/model> [--host-id <id>] [--json]   (a model is out of credit/down: every class and job executor on it is refused/skipped at once; "pi/Minnyat/*" = whole endpoint; live at once)
                                            (SUPERVISOR_GOVERNANCE | LEAD_RECOVERY only)
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
-  pteam jobs list                          (job presets, each class executor with its current route; read-only)
-  pteam jobs show <id>                     (one job preset, same shape)
+  pteam jobs list [--all]                  (job presets a Lead may use NOW: switched-off jobs/executors/tools are left out and named; --all shows everything)
+  pteam jobs show <id> [--all]             (one job preset, same shape; a switched-off job is JOB_INACTIVE)
+  pteam jobs resolve <id>                  (reload right before seating: the exact create_agent arguments + labels for each executor usable NOW, CLI commands, skipped steps)
   pteam install
   pteam uninstall [--purge]                (remove what install wrote; --purge also deletes the config dir that 'pteam env' resolves)
   pteam update [--check]                    (compare with the latest GitHub release tag)

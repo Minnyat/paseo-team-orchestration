@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import {
+	applySwitch,
+	listSwitches,
 	cleanListItems,
 	clone,
 	deepMerge,
@@ -15,6 +17,7 @@ import {
 	listLengthProblems,
 	moveAt,
 	numberRangeProblems,
+	optionModelOff,
 	optionalEntryProblems,
 	parseLines,
 	pruneEmpty,
@@ -513,4 +516,71 @@ import {
 	assert.equal(optionalEntryProblems(nested, { steps: [{ routes: { LEAD_RECOVERY: { other: 1 } } }] }).length, 1);
 }
 
+// --- quick switches ----------------------------------------------------------
+
+{
+	const routing = { version: 1, hostId: "h", routes: { FAST_READ: { paseoProvider: "pi-peer", model: "a/b", thinking: "low", enabled: false }, REVIEW_HIGH: { paseoProvider: "claude-peer", model: "m", thinking: "high" } } };
+	const [group] = listSwitches("routing", routing);
+	assert.deepEqual(group.items.map((i) => [i.cls, i.on]), [["FAST_READ", false], ["REVIEW_HIGH", true]]);
+	applySwitch("routing", routing, group.items[0], true);
+	assert.equal("enabled" in routing.routes.FAST_READ, false, "on is the absence of the key");
+	applySwitch("routing", routing, group.items[1], false);
+	assert.equal(routing.routes.REVIEW_HIGH.enabled, false);
+	assert.equal(routing.routes.REVIEW_HIGH.model, "m", "the route itself is untouched");
+
+	const jobs = {
+		version: 1,
+		cliTools: { codex: { command: "codex" } },
+		disabledTools: ["codex"],
+		jobs: { j: { run: "sequential", executors: [{ kind: "class", modelClass: "FAST_READ" }, { kind: "cli", tool: "codex", enabled: false }] } },
+	};
+	const groups = listSwitches("jobs", jobs);
+	assert.deepEqual(groups.map((g) => g.id), ["jobs", "tools"]);
+	assert.deepEqual(groups[0].items.map((i) => [i.kind, i.on]), [["job", true], ["executor", true], ["executor", false]]);
+	assert.deepEqual(groups[1].items.map((i) => [i.name, i.on]), [["pi", true], ["claude", true], ["codex", false]]);
+	applySwitch("jobs", jobs, groups[0].items[2], true);
+	assert.equal("enabled" in jobs.jobs.j.executors[1], false);
+	applySwitch("jobs", jobs, groups[0].items[0], false);
+	assert.equal(jobs.jobs.j.enabled, false);
+	applySwitch("jobs", jobs, groups[1].items[2], true);
+	assert.equal("disabledTools" in jobs, false, "an empty disabledTools list is dropped");
+	applySwitch("jobs", jobs, groups[1].items[0], false);
+	assert.deepEqual(jobs.disabledTools, ["pi"]);
+	assert.throws(() => applySwitch("jobs", jobs, { kind: "job", id: "__proto__" }, false), /no job/);
+	// models: one switch per model the routes use, family taken from the role provider
+	const withModels = { version: 1, hostId: "h", routes: { FAST_READ: { paseoProvider: "pi-peer", model: "Mx/a", thinking: "low" }, REVIEW_HIGH: { paseoProvider: "claude-peer", model: "claude-opus-5", thinking: "high" } }, disabledModels: ["pi/Mx/*"] };
+	const modelGroup = listSwitches("routing", withModels).find((g) => g.id === "models");
+	assert.deepEqual(modelGroup.items.map((i) => [i.key, i.on, i.locked]), [["claude/claude-opus-5", true, false], ["pi/Mx/*", false, false], ["pi/Mx/a", false, true]], "a model covered by a pattern is off and locked to its pattern");
+	applySwitch("routing", withModels, modelGroup.items[0], false);
+	assert.deepEqual(withModels.disabledModels, ["pi/Mx/*", "claude/claude-opus-5"]);
+	applySwitch("routing", withModels, modelGroup.items[1], true);
+	applySwitch("routing", withModels, modelGroup.items[0], true);
+	assert.equal("disabledModels" in withModels, false, "an empty list is dropped");
+	// a class with several options: a class switch (all) plus one switch per option
+	const multi = { version: 1, hostId: "h", routes: { CODING_MEDIUM: { paseoProvider: "pi-peer", model: "Mx/a", thinking: "low", alternates: [{ paseoProvider: "claude-peer", model: "claude-opus-5", thinking: "high", enabled: false }] }, FAST_READ: { paseoProvider: "pi-peer", model: "Mx/b", thinking: "low" } } };
+	const routeItems = listSwitches("routing", multi).find((g) => g.id === "routes").items;
+	assert.deepEqual(routeItems.map((i) => [i.kind, i.cls, i.index ?? "-", i.on]), [["route", "CODING_MEDIUM", "-", true], ["option", "CODING_MEDIUM", 0, true], ["option", "CODING_MEDIUM", 1, false], ["route", "FAST_READ", "-", true]], "options are listed only for a class that has several");
+	assert.equal(routeItems[0].detail, "2 options");
+	applySwitch("routing", multi, routeItems[2], true);
+	assert.equal("enabled" in multi.routes.CODING_MEDIUM.alternates[0], false, "one option back on");
+	applySwitch("routing", multi, routeItems[1], false);
+	assert.equal(multi.routes.CODING_MEDIUM.enabled, false);
+	assert.equal(multi.routes.CODING_MEDIUM.alternates[0].enabled, undefined, "only that option");
+	applySwitch("routing", multi, routeItems[0], false);
+	assert.equal(multi.routes.CODING_MEDIUM.alternates[0].enabled, false, "the class switch flips every option");
+	applySwitch("routing", multi, routeItems[0], true);
+	assert.equal("enabled" in multi.routes.CODING_MEDIUM, false);
+	assert.ok(listSwitches("routing", multi).find((g) => g.id === "models").items.some((i) => i.key === "claude/claude-opus-5"), "an alternate's model gets its own model switch");
+	assert.deepEqual(listSwitches("pi-settings", {}), []);
+}
+
 console.log("config-form tests passed");
+
+// optionModelOff: the form says "off" exactly when the gate would refuse the model.
+{
+	const doc = { disabledModels: ["pi/Minnyat/gpt-5.5", "claude/*"] };
+	assert.equal(optionModelOff(doc, { paseoProvider: "pi-peer", model: "Minnyat/gpt-5.5" }), true, "an exact key");
+	assert.equal(optionModelOff(doc, { paseoProvider: "pi-peer", model: "Minnyat/cheap" }), false, "another model of the same tool");
+	assert.equal(optionModelOff(doc, { paseoProvider: "claude-peer", model: "claude-opus-5" }), true, "a /* pattern covers the whole tool");
+	assert.equal(optionModelOff({}, { paseoProvider: "pi-peer", model: "x" }), false, "no list, nothing off");
+}

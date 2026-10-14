@@ -560,6 +560,7 @@ const files = {
 // What the next `models sync` answers, in order; a report with ok:false exits
 // non-zero, as the real CLI does.
 const syncReplies = [];
+let modelCatalog = { status: "ready", byProvider: { endpoint: ["received-model", "<model>"], empty: [], minnyat: ["known-model"] }, detail: { endpoint: { "received-model": { name: "Received", contextWindow: 123000, maxTokens: 45000, reasoning: true, input: ["text", "image"] } }, minnyat: { "known-model": { name: "Known Model", contextWindow: 999000, reasoning: false, input: ["text"] } } } };
 const writes = [];
 const rev = (text) => (text === null ? "absent" : createHash("sha256").update(text).digest("hex"));
 
@@ -573,10 +574,16 @@ async function fakeCli(args, stdin) {
 			rev: rev(text),
 			data: text === null ? null : JSON.parse(text),
 			schema: schemaAsCliSendsIt(section),
+			...(section === "pi-models" ? { catalog: modelCatalog } : {}),
 		};
 		return { exitCode: 0, stdout: JSON.stringify(payload), stderr: "" };
 	}
 	if (command === "config" && verb === "write" && section in files) {
+		// Like the real CLI: --rev refuses a write over a file that changed since it was read.
+		const wanted = args.includes("--rev") ? args[args.indexOf("--rev") + 1] : null;
+		if (wanted !== null && wanted !== rev(files[section])) {
+			return { exitCode: 1, stdout: "", stderr: `CONFIG_CHANGED: /tmp/fake/${section}.local.json was modified after it was read` };
+		}
 		// The exact text too: "unchanged" includes the order of the keys.
 		writes.push({ section, doc: JSON.parse(stdin), text: stdin });
 		files[section] = stdin;
@@ -697,6 +704,49 @@ try {
 	assert.deepEqual(unchanged.doc, ROUTING_DOC);
 	assert.equal(unchanged.text, JSON.stringify(ROUTING_DOC, null, 2), "byte for byte, key order included");
 	assert.equal(routeCards().length, 6, "the rebuilt form still has every card");
+
+	// --- the class cards: grouped by role, and editing one never rebuilds the form ---
+	assert.deepEqual(
+		$("config-form").querySelectorAll(".cfg-keygroup-title").map((node) => node.textContent),
+		["Peer — Lead dựng để làm việc", "Supervisor — giám sát và quản trị", "Lead — khôi phục"],
+		"the classes sit under the role of the seat they build",
+	);
+	{
+		const coding = card("CODING_MEDIUM");
+		const bystander = card("FAST_READ");
+		const rows = () => card("CODING_MEDIUM").querySelectorAll(".route-row").filter((row) => row.dataset.option !== undefined);
+		const before = rows().length;
+		assert.equal(coding.open, false, "a class is collapsed until someone opens it");
+		coding.open = true;
+		coding.dispatchEvent(new Event("toggle"));
+		card("CODING_MEDIUM").querySelector(".route-add").click();
+		assert.equal(rows().length, before + 1, "adding an option adds one line");
+		assert.equal(card("FAST_READ"), bystander, "and nothing else on the page is rebuilt");
+		const added = rows().at(-1);
+		const [roleSel] = added.querySelectorAll(".cfg-roleprovider select");
+		assert.equal(roleSel.value, "peer", "the new option starts on the main option's role");
+		assert.equal($("config-save").classList.contains("dirty"), true, "the Save button notices the structural edit");
+		rows().at(-1).querySelector(".route-remove").click();
+		assert.equal(rows().length, before, "removing it takes the line away again");
+		assert.equal(card("FAST_READ"), bystander, "still the same card");
+		assert.equal($("config-save").classList.contains("dirty"), false, "back to what is on disk");
+		// A half-filled option must not hide behind a closed card: the summary says so,
+		// and a refused Save opens the card the refusal names.
+		card("CODING_MEDIUM").querySelector(".route-add").click();
+		assert.match(card("CODING_MEDIUM").textContent, /Có lựa chọn chưa đủ/, "the collapsed line warns about the empty option");
+		card("CODING_MEDIUM").open = false;
+		card("CODING_MEDIUM").dispatchEvent(new Event("toggle"));
+		const refused = await save();
+		assert.equal(refused, null, "an option with no model is not saved");
+		await until(() => card("CODING_MEDIUM").open === true, "the refused Save opened the card it names");
+		rows().at(-1).querySelector(".route-remove").click();
+		assert.doesNotMatch(card("CODING_MEDIUM").textContent, /Có lựa chọn chưa đủ/, "the warning goes with the option");
+		resetToast();
+		// A full re-render (a save re-reads the file) keeps what the person opened.
+		const saved = await save();
+		assert.ok(saved, "the unchanged file saves");
+		assert.equal(card("CODING_MEDIUM").open, true, "a class the person opened is still open after the form is rebuilt");
+	}
 
 	// --- switching a runtime keeps the stray model VISIBLE ------------------
 	change(runtimeSelect(card("MONITOR_ECONOMY")), "pi");
@@ -851,30 +901,93 @@ try {
 	// models["gpt-5"]["5"]); the server runs validatePiModelsConfig on each save.
 	await openSection("pi-models");
 	assert.equal(errorToast(), "", "the pi-models form opens");
-	const limit = (id, label) => rowByLabel(card(id), label).querySelector("input");
-	assert.equal(limit("gpt-5.5", "Context window").value, "1050000", "gpt-5.5 shows its own value");
-	assert.equal(limit("gpt-5.5", "Max output tokens").value, "128000");
-	assert.equal(limit("gpt-5", "Context window").value, "400000", "gpt-5 shows its own value");
-	assert.equal(limit("gpt-5", "Max output tokens").value, "", "and leaves the unset one empty");
-	assert.equal(limit("poolside/laguna-s-2.1", "Max output tokens").value, "8000", "an id with a slash and dots");
-	assert.equal(limit("poolside/laguna-s-2.1", "Context window").value, "");
+	assert.ok($("config-catalog").textContent.includes("received-model"), "received models appear without running sync");
+	assert.ok($("config-catalog").textContent.includes("<model>"), "model IDs render as text");
+	assert.ok($("config-catalog").textContent.includes("3 model"));
+	assert.ok($("config-catalog").textContent.includes("ctx 123K"), "known current limits appear as compact chips in the list");
+	// Configure on a listed model opens the modal pre-filled with CURRENT data,
+	// even when no override exists yet.
+	{
+		const providerDoc = { version: 1, providers: { endpoint: { baseUrl: "https://example.invalid/v1", keyEnv: "CODING_API_KEY", probe: true } } };
+		files["pi-models"] = JSON.stringify(providerDoc, null, 2);
+		await openSection("pi-models");
+		const listed = [...$("config-catalog").querySelectorAll(".catalog-models button")].find((b) => b.getAttribute("aria-label")?.includes("received-model"));
+		listed.click();
+		assert.ok($("config-catalog").textContent.includes("ctx 123K"), "current metadata shows in the list");
+		const currentText = $("mm-current").textContent;
+		assert.ok(currentText.includes("Đang dùng (models.json)"), "the modal has a current-values block");
+		assert.ok(currentText.includes("Received"), "the current name shows");
+		assert.ok(currentText.replace(/\D/g, "").includes("123000") && currentText.replace(/\D/g, "").includes("45000"), "current limits show (grouped for reading)");
+		assert.ok(currentText.includes("Có"), "current reasoning shows");
+		assert.equal($("mm-id").value, "received-model");
+		assert.equal($("mm-id").disabled, true, "a listed model's ID is locked");
+		assert.ok($("mm-pick-wrap").classList.contains("hidden"), "and then there is no picker to offer");
+		assert.equal($("mm-name").value, "", "the override fields start empty: nothing is overridden yet");
+		assert.equal($("model-modal-title").textContent, "Cấu hình model", "a listed model is configured, not added from nothing");
+		assert.equal($("mm-name").placeholder, "Received", "an empty field shows the value it inherits");
+		assert.equal($("mm-context").placeholder, "123000");
+		assert.ok($("mm-reasoning").children[0].textContent.includes("Có"), "Auto names the current reasoning choice");
+		assert.equal($("mm-apply").disabled, true, "nothing changed: nothing to apply");
+		type($("mm-name"), "Renamed");
+		assert.equal($("mm-apply").disabled, false, "a change enables Apply");
+		$("mm-cancel").click();
+		files["pi-models"] = JSON.stringify(PI_MODELS_DOC, null, 2);
+		await openSection("pi-models");
+	}
+
+	// The ADD modal picks a catalog model instead of demanding a typed ID, and
+	// picking is what surfaces that model's current data.
+	$("config-form").querySelectorAll("button").find((button) => button.textContent === "+ Thêm cấu hình model").click();
+	assert.ok(!$("mm-pick-wrap").classList.contains("hidden"), "a provider with catalog models offers the picker");
+	assert.ok($("mm-pick").textContent.includes("known-model"), "its models are listed");
+	change($("mm-pick"), "known-model");
+	assert.equal($("mm-id").value, "known-model", "picking fills the ID");
+	const pickCurrent = $("mm-current").textContent;
+	assert.ok(pickCurrent.includes("Known Model") && pickCurrent.replace(/\D/g, "").includes("999000"), "and the current block follows the pick");
+	type($("mm-context"), "5000");
+	assert.equal($("mm-apply").disabled, false);
+	$("mm-apply").click();
+	const picked = await save();
+	assert.deepEqual(picked.doc.providers.minnyat.models["known-model"], { contextWindow: 5000 }, "picked-model override saves");
+	files["pi-models"] = JSON.stringify(PI_MODELS_DOC, null, 2);
+	await openSection("pi-models");
+	for (const [status, message] of [["missing", "Chưa có kho model"], ["invalid", "Không đọc được kho model"], ["ready", "Kho hiện chưa có model"]]) {
+		modelCatalog = { status, byProvider: {} };
+		await openSection("pi-models");
+		assert.ok($("config-catalog").textContent.includes(message), status);
+	}
+	modelCatalog = { status: "ready", byProvider: { endpoint: ["received-model"] } };
+	await openSection("pi-models");
+	// --- overrides are a compact table; editing happens in a modal ----------
+	const ovRow = (id) => $("config-form").querySelectorAll(".model-ov-row").find((row) => row.querySelector(".model-ov-id")?.textContent === id);
+	const openEdit = (id) => ovRow(id).querySelector("button").click();
+	const mm = (part) => $(`mm-${part}`);
+	const addOverride = () => $("config-form").querySelectorAll("button").find((button) => button.textContent === "+ Thêm cấu hình model").click();
+	assert.ok(ovRow("gpt-5.5"), "gpt-5.5 has an override row");
+	assert.ok(ovRow("gpt-5.5").textContent.includes("ctx"), "its badges summarise what is overridden");
+	assert.ok(ovRow("poolside/laguna-s-2.1"), "an id with a slash and dots renders");
 
 	const piModelsText = files["pi-models"];
 	const piUntouched = await save();
 	assert.ok(piUntouched, `an unedited pi-models file saves (toast: "${toastText()}")`);
 	assert.equal(piUntouched.text, piModelsText, "opening the form and pressing Lưu changes nothing, byte for byte");
 
-	// What the server refuses, it refuses naming endpoint and model, and the file stays.
-	type(limit("gpt-5.5", "Context window"), "1.5");
-	assert.equal(await save(), null, "1.5 is not a token count");
-	assert.match(errorToast(), /Chưa lưu/);
-	assert.match(errorToast(), /provider "minnyat": models\.gpt-5\.5\.contextWindow must be a positive integer/);
-	type(limit("gpt-5.5", "Context window"), "100000");
-	assert.equal(await save(), null, "a maxTokens above its own contextWindow is refused");
-	assert.match(errorToast(), /provider "minnyat": models\.gpt-5\.5\.maxTokens \(128000\) exceeds its contextWindow \(100000\)/);
-	assert.equal(files["pi-models"], piModelsText, "neither refusal touched the file");
-
-	type(limit("gpt-5.5", "Context window"), "2000000");
+	// The modal validates before anything is written; Apply is disabled meanwhile.
+	openEdit("gpt-5.5");
+	assert.equal(mm("id").value, "gpt-5.5");
+	assert.equal(mm("id").disabled, true, "an existing override's ID is locked");
+	assert.equal(mm("context").value, "1050000", "gpt-5.5 shows its own value");
+	assert.equal(mm("max").value, "128000");
+	type(mm("context"), "1.5");
+	assert.equal(mm("apply").disabled, true, "1.5 is not a token count");
+	assert.match(mm("error").textContent, /số nguyên dương an toàn/);
+	type(mm("context"), "100000");
+	assert.equal(mm("apply").disabled, true, "output above its own contextWindow is refused");
+	assert.match(mm("error").textContent, /không được vượt context/);
+	assert.equal(files["pi-models"], piModelsText, "a blocked Apply touches nothing");
+	type(mm("context"), "2000000");
+	assert.equal(mm("apply").disabled, false);
+	mm("apply").click();
 	const piEdited = await save();
 	assert.ok(piEdited, `a valid override saves (toast: "${toastText()}")`);
 	assert.deepEqual(piEdited.doc.providers.minnyat.models, {
@@ -883,38 +996,42 @@ try {
 		"poolside/laguna-s-2.1": { maxTokens: 8000 },
 	}, "the edit lands on gpt-5.5 only");
 
-	change(card("gpt-5").querySelector(".cfg-card-key"), "cx/gpt-6.astra");
-	await tick();
-	card("poolside/laguna-s-2.1").querySelector(".cfg-card-head .cfg-icon").click();
-	await tick();
-	card("minnyat").querySelectorAll("button").find((button) => button.textContent === "+ Ghi đè giới hạn cho một model").click();
-	await tick();
-	change(card("moi").querySelector(".cfg-card-key"), "tiny.m-1");
-	await tick();
-	type(limit("tiny.m-1", "Context window"), "1000");
+	// Remove one, add one: the table is the whole editing surface.
+	ovRow("poolside/laguna-s-2.1").querySelectorAll("button")[1].click();
+	addOverride();
+	assert.equal(mm("id").disabled, false, "a new override's ID is editable");
+	type(mm("id"), "tiny.m-1");
+	type(mm("context"), "1000");
+	mm("apply").click();
 	const piReshaped = await save();
-	assert.ok(piReshaped, `rename, remove and add save together (toast: "${toastText()}")`);
+	assert.ok(piReshaped, `remove and add save together (toast: "${toastText()}")`);
 	assert.deepEqual(piReshaped.doc.providers.minnyat.models, {
+		"gpt-5": { contextWindow: 400000 },
 		"gpt-5.5": { contextWindow: 2000000, maxTokens: 128000 },
-		"cx/gpt-6.astra": { contextWindow: 400000 },
 		"tiny.m-1": { contextWindow: 1000 },
-	}, "renamed to a key with a slash and a dot, removed exactly one, added one with a small but valid window");
+	}, "removed exactly one, added one with a dotted id");
 
-	// A name Object.prototype also carries is still a free key: `next in {}` is
-	// true for "constructor", and the rename used to be refused as a duplicate.
-	change(card("cx/gpt-6.astra").querySelector(".cfg-card-key"), "constructor");
-	await tick();
-	assert.equal(errorToast(), "", "renaming to constructor is not refused as a duplicate");
-	change(card("tiny.m-1").querySelector(".cfg-card-key"), "toString");
-	await tick();
-	assert.equal(errorToast(), "", "nor to toString");
+	// Model IDs named like prototype members remain own keys (setPath assigns,
+	// never `obj[key] = value`).
+	addOverride();
+	type(mm("id"), "constructor");
+	type(mm("context"), "40000");
+	mm("apply").click();
+	addOverride();
+	type(mm("id"), "toString");
+	type(mm("context"), "20000");
+	mm("apply").click();
+	assert.equal(errorToast(), "", "ids named like prototype members are not refused");
 	const protoNames = await save();
 	assert.ok(protoNames, `keys named like prototype members save (toast: "${toastText()}")`);
 	assert.deepEqual(protoNames.doc.providers.minnyat.models, {
+		"gpt-5": { contextWindow: 400000 },
 		"gpt-5.5": { contextWindow: 2000000, maxTokens: 128000 },
-		constructor: { contextWindow: 400000 },
-		toString: { contextWindow: 1000 },
+		"tiny.m-1": { contextWindow: 1000 },
+		constructor: { contextWindow: 40000 },
+		toString: { contextWindow: 20000 },
 	});
+	assert.equal(Object.getPrototypeOf({}), Object.prototype);
 
 	// An endpoint card with no baseUrl yet is a draft: it saves, the sync complains later.
 	$("config-form").querySelectorAll("button").find((button) => button.textContent === "+ Thêm điểm cuối").click();
@@ -937,6 +1054,185 @@ try {
 	const legacyEdited = await save();
 	assert.ok(legacyEdited);
 	assert.deepEqual(legacyEdited.doc.providers.old, { ...LEGACY.providers.old, keyEnv: "OLD_KEY" }, "an edit elsewhere keeps the endpoint-level limits");
+
+	// --- the language switch re-renders catalog, model UI and buttons -------
+	files["pi-models"] = JSON.stringify(PI_MODELS_DOC, null, 2);
+	await openSection("pi-models");
+	$("lang-en").click();
+	assert.ok($("config-catalog").textContent.includes("Active models"), "the catalog panel follows");
+	assert.ok($("config-form").textContent.includes("+ Add model override"), "the overrides table follows");
+	assert.equal($("config-save").textContent, "Save");
+	openEdit("gpt-5.5");
+	assert.equal(mm("apply").textContent, "Apply", "the modal follows too");
+	mm("cancel").click();
+	$("lang-vi").click();
+	assert.ok($("config-catalog").textContent.includes("Model đang dùng"), "and back to Vietnamese");
+	assert.ok($("config-form").textContent.includes("+ Thêm cấu hình model"));
+
+	// --- config shell: one language at a time, and no stale paint --------------
+	$("lang-en").click();
+	assert.ok($("config-intro").textContent.startsWith("Each card is a source Pi pulls models from"), "the schema intro follows the language");
+	assert.ok($("config-form").textContent.includes("Providers"), "group legends follow the language");
+	assert.ok(!/\/ The variable|\/ Used when/.test($("config-form").textContent), "no combined VI / EN hint is left");
+	assert.ok($("config-form").textContent.includes("The variable name, never the key itself."));
+	// index.html is not parsed here, so the static shell is checked at the source.
+	const indexHtml = (await import("node:fs")).readFileSync(join(PUBLIC_DIR, "index.html"), "utf8");
+	assert.ok(/id="config-mode-form"[^>]*data-i18n="formMode"/.test(indexHtml), "the Form button follows the language switch");
+	assert.ok(indexHtml.indexOf('id="config-bar"') < indexHtml.indexOf('id="config-catalog"'), "the toolbar (section picker, Save) comes before the catalog");
+	$("lang-vi").click();
+	assert.ok($("config-form").textContent.includes("Ghi tên biến, không ghi khoá."));
+	assert.ok(!$("config-form").textContent.includes("The variable name"));
+	// Two quick section changes: the answer that arrives last for the section the
+	// person left must not repaint the page or become the document Save writes.
+	resetToast();
+	$("config-meta").textContent = "";
+	change($("config-section"), "jobs");
+	change($("config-section"), "pi-models");
+	await until(() => $("config-meta").textContent.includes("pi-models.local.json"), "the last chosen section loads");
+	await new Promise((resolve) => realSetTimeout(resolve, 150));
+	assert.ok($("config-meta").textContent.includes("pi-models.local.json"), "a late reply for the earlier section did not repaint");
+	assert.ok(!$("config-catalog").classList.contains("hidden"), "the pi-models catalog stays");
+
+	// --- quick switches: flip one thing on the saved file, live, without Save ---
+	{
+		files.cluster = null; // an earlier cluster case may have left a local host: that would (rightly) lock the panel
+		await openSection("routing");
+		const panel = $("config-quick");
+		assert.ok(!panel.classList.contains("hidden"), "routing shows the quick switches");
+		const box = (label) => panel.querySelectorAll("input").find((input) => input.getAttribute("aria-label") === `Bật/tắt ${label}`);
+		assert.ok(box("CODING_MEDIUM"), "one switch per configured class");
+		assert.equal(box("CODING_MEDIUM").checked, true);
+		const before = writes.length;
+		const original = files.routing;
+		box("CODING_MEDIUM").checked = false;
+		box("CODING_MEDIUM").dispatchEvent(new Event("change", { bubbles: true }));
+		await until(() => writes.length > before, "the switch wrote the file");
+		const flipped = writes.at(-1);
+		assert.equal(flipped.doc.routes.CODING_MEDIUM.enabled, false);
+		assert.deepEqual({ ...flipped.doc.routes.CODING_MEDIUM, enabled: undefined }, { ...JSON.parse(original).routes.CODING_MEDIUM, enabled: undefined }, "model and thinking untouched");
+		assert.deepEqual(Object.keys(flipped.doc.routes), Object.keys(JSON.parse(original).routes), "no other class is touched");
+		await until(() => box("CODING_MEDIUM")?.checked === false && !box("CODING_MEDIUM").disabled, "the panel repaints from the file");
+		assert.ok(toastText().includes("Có hiệu lực ngay"), "the toast says it is live, no restart");
+		// A switch does not need Save, and leaves nothing "unsaved".
+		assert.ok(!$("config-save").classList.contains("dirty"));
+		box("CODING_MEDIUM").checked = true;
+		box("CODING_MEDIUM").dispatchEvent(new Event("change", { bubbles: true }));
+		await until(() => writes.length > before + 1 && !("enabled" in writes.at(-1).doc.routes.CODING_MEDIUM), "switched back on");
+		assert.deepEqual(JSON.parse(files.routing), JSON.parse(original), "off then on restores the file");
+
+		// A class with several tools/models: one switch for the class, one per option.
+		{
+			const original = files.routing;
+			const doc = JSON.parse(original);
+			doc.routes.CODING_MEDIUM.alternates = [{ paseoProvider: "claude-peer", model: "claude-sonnet-5-5", thinking: "low" }];
+			files.routing = JSON.stringify(doc, null, 2);
+			await openSection("routing");
+			await until(() => $("config-quick").textContent.includes("2 options"), "the class shows its options");
+			const optBox = (label) => $("config-quick").querySelectorAll("input").find((input) => input.getAttribute("aria-label") === `Bật/tắt ${label}`);
+			assert.ok(optBox("CODING_MEDIUM #0") && optBox("CODING_MEDIUM #1"), "one switch per option");
+			assert.equal(optBox("CODING_MEDIUM").checked, true, "plus the class switch");
+			await until(() => !optBox("CODING_MEDIUM #1").disabled, "the panel is idle");
+			const w4 = writes.length;
+			optBox("CODING_MEDIUM #1").checked = false;
+			optBox("CODING_MEDIUM #1").dispatchEvent(new Event("change", { bubbles: true }));
+			await until(() => writes.length > w4, "an option switch wrote the file");
+			const written = writes.at(-1).doc.routes.CODING_MEDIUM;
+			assert.equal(written.alternates[0].enabled, false);
+			assert.equal("enabled" in written, false, "only that option");
+			// the form offers more tools/models for the class
+			await until(() => card("CODING_MEDIUM")?.querySelectorAll(".route-row").filter((row) => row.dataset.option !== undefined).length === 2, "the class card lists its main option and the alternate as rows");
+			assert.ok(card("CODING_MEDIUM").textContent.includes("+ Thêm tool/model"), "and offers to add another");
+			assert.ok(card("CODING_MEDIUM").textContent.includes("+1 lựa chọn"), "the collapsed line says there is one more option");
+			files.routing = original;
+			await openSection("routing");
+		}
+
+		// A model out of credit: one switch, keyed "<family>/<model>", no class is edited.
+		{
+			const routes = JSON.parse(files.routing).routes;
+			const first = routes.CODING_MEDIUM;
+			const key = `${first.paseoProvider.split("-")[0]}/${first.model}`;
+			await until(() => box(key) && !box(key).disabled, "the panel is idle again");
+			assert.ok(box(key), "a switch per model the routes use");
+			const w2 = writes.length;
+			box(key).checked = false;
+			box(key).dispatchEvent(new Event("change", { bubbles: true }));
+			await until(() => writes.length > w2, "the model switch wrote the file");
+			assert.deepEqual(writes.at(-1).doc.disabledModels, [key]);
+			assert.deepEqual(writes.at(-1).doc.routes, routes, "no class route is edited");
+			await until(() => box(key)?.checked === false && !box(key).disabled, "the panel repaints");
+			box(key).checked = true;
+			box(key).dispatchEvent(new Event("change", { bubbles: true }));
+			await until(() => writes.length > w2 + 1 && !("disabledModels" in writes.at(-1).doc), "model switched back on");
+		}
+
+		await openSection("jobs");
+		const jobsBox = (name) => $("config-quick").querySelectorAll("input").find((input) => input.getAttribute("aria-label") === `Bật/tắt ${name}`);
+		assert.ok(jobsBox("pi") && jobsBox("claude"), "the built-in tools get a switch");
+		const w = writes.length;
+		jobsBox("pi").checked = false;
+		jobsBox("pi").dispatchEvent(new Event("change", { bubbles: true }));
+		await until(() => writes.length > w, "the tool switch wrote the file");
+		assert.deepEqual(writes.at(-1).doc.disabledTools, ["pi"]);
+		await until(() => jobsBox("pi")?.checked === false && !jobsBox("pi").disabled, "the jobs panel repaints");
+		jobsBox("pi").checked = true;
+		jobsBox("pi").dispatchEvent(new Event("change", { bubbles: true }));
+		await until(() => writes.length > w + 1 && !("disabledTools" in writes.at(-1).doc), "tool switched back on");
+
+		// The gate reads the cluster file when it has a local host: switches here would
+		// edit a file nobody reads, so the panel locks itself and says why.
+		files.cluster = JSON.stringify({ version: 1, hosts: { box: { connection: { type: "local" }, required: true, capabilities: [], routes: JSON.parse(files.routing).routes } } });
+		await openSection("routing");
+		await until(() => $("config-quick").textContent.includes("File cluster"), "the cluster notice appears");
+		assert.ok($("config-quick").querySelectorAll("input").every((input) => input.disabled), "every routing switch is locked");
+		files.cluster = null;
+		await openSection("routing");
+		await new Promise((resolve) => realSetTimeout(resolve, 100));
+		assert.ok($("config-quick").querySelectorAll("input").every((input) => !input.disabled), "no cluster file: switches work");
+
+		// A step is matched by position, so a file edited since the panel was painted
+		// must be refused as a conflict, not flip whichever step now sits there.
+		await openSection("jobs");
+		const stepBox = () => $("config-quick").querySelectorAll("input").find((input) => /^Bật\/tắt .*#1 /.test(input.getAttribute("aria-label")));
+		const jobsBefore = files.jobs;
+		const wBefore = writes.length;
+		const reordered = JSON.parse(jobsBefore);
+		const firstJob = Object.keys(reordered.jobs)[0];
+		reordered.jobs[firstJob].executors.reverse();
+		files.jobs = JSON.stringify(reordered, null, 2);
+		stepBox().checked = false;
+		stepBox().dispatchEvent(new Event("change", { bubbles: true }));
+		await until(() => errorToast() !== "", "a stale panel is refused");
+		assert.match(errorToast(), /đã bị sửa ở nơi khác/, "the friendly conflict message");
+		assert.equal(writes.length, wBefore, "nothing was written");
+		files.jobs = jobsBefore;
+
+		// A fresh machine has no jobs file: the tools (pi, claude) can still be switched, the
+		// first switch creates the file, and the starter jobs are one click away.
+		const savedJobs = files.jobs;
+		files.jobs = null;
+		await openSection("jobs");
+		await until(() => !$("config-quick").classList.contains("hidden"), "tool switches show without a jobs file");
+		const toolBox = (name) => $("config-quick").querySelectorAll("input").find((input) => input.getAttribute("aria-label") === `Bật/tắt ${name}`);
+		assert.ok(toolBox("pi") && toolBox("claude"), "pi and claude are switchable");
+		assert.ok($("config-quick").textContent.includes("Tắt model hết tiền"), "and the model switches' page is one click away");
+		const presetButtons = $("config-presets").querySelectorAll("button");
+		assert.ok(presetButtons.length >= 3, "starter jobs are offered");
+		const w3 = writes.length;
+		toolBox("claude").checked = false;
+		toolBox("claude").dispatchEvent(new Event("change", { bubbles: true }));
+		await until(() => writes.length > w3, "the first switch creates the jobs file");
+		assert.deepEqual(writes.at(-1).doc, { version: 1, disabledTools: ["claude"] });
+		files.jobs = null;
+		await openSection("jobs");
+		$("config-presets").querySelectorAll("button")[0].click();
+		assert.ok(card("two-reviewers"), "one click adds a ready job to the form");
+		assert.equal(card("two-reviewers").querySelectorAll(".cfg-list-item").length, 2, "with its two executors");
+		files.jobs = savedJobs;
+
+		await openSection("pi-settings");
+		assert.ok($("config-quick").classList.contains("hidden"), "other sections have no quick panel");
+	}
 
 	// --- jobs: the real section, from config/jobs.example.json ----------------
 	await openSection("jobs");
@@ -1111,7 +1407,20 @@ try {
 	assert.equal({}.polluted, undefined, "and Object.prototype is untouched");
 	assert.equal(Object.getPrototypeOf({}), Object.prototype);
 
+	// Model metadata is editable in the modal and persists alongside limits.
+	files["pi-models"] = JSON.stringify(PI_MODELS_DOC, null, 2);
+	await openSection("pi-models");
+	ovRow("gpt-5.5").querySelector("button").click();
+	type(mm("name"), "My GPT");
+	change(mm("input"), "text");
+	assert.equal(mm("apply").disabled, false);
+	mm("apply").click();
+	const metadataSaved = await save();
+	assert.equal(metadataSaved.doc.providers.minnyat.models["gpt-5.5"].name, "My GPT");
+	assert.deepEqual(metadataSaved.doc.providers.minnyat.models["gpt-5.5"].input, ["text"]);
+
 	// --- the model sync result says where each limit came from ----------------
+	files["pi-models"] = JSON.stringify(PI_MODELS_DOC, null, 2);
 	await openSection("pi-models");
 	const syncButton = () => $("config-actions").querySelectorAll("button").find((button) => button.textContent === "Cập nhật danh sách model");
 	const output = () => $("config-actions").querySelector(".cfg-actions-out");
@@ -1120,12 +1429,22 @@ try {
 		clear(output());
 		syncButton().click();
 		await until(() => output().querySelector(".cfg-actions-head") && !syncButton().disabled, "the sync result");
+		assert.ok($("config-catalog").textContent.includes("new-after-sync"), "refreshes snapshot after action");
+		assert.equal(files["pi-models"], beforeSyncDocument, "inventory refresh does not write configuration");
+		openEdit("gpt-5.5");
+		assert.equal(mm("max").value, "64001", "inventory refresh preserves unsaved edits");
+		mm("cancel").click();
 		return output();
 	}
 	const clear = (node) => {
 		for (const child of [...node.childNodes]) node.removeChild(child);
 	};
+	modelCatalog = { status: "ready", byProvider: { endpoint: ["new-after-sync"] } };
+	const beforeSyncDocument = files["pi-models"];
 	const fetchedAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+	ovRow("gpt-5.5").querySelector("button").click();
+	type(mm("max"), "64001");
+	mm("apply").click();
 	const okOut = await runSync({
 		ok: true,
 		command: "models sync",

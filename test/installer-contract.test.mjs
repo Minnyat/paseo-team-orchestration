@@ -19,7 +19,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(root, "scripts");
 const installed = mkdtempSync(join(tmpdir(), "paseo-installed-support-"));
 const unrelatedCwd = mkdtempSync(join(tmpdir(), "paseo-unrelated-cwd-"));
-for (const file of ["lib-common.mjs", "remote-paseo.mjs", "model-routing.mjs", "reliability.mjs", "team-communication.mjs", "team-lease.mjs", "lease-ledger.mjs", "watchdog.mjs", "ocr-review.mjs", "ocr-setup.mjs", "team-scripts-path.mjs"]) {
+for (const file of ["lib-common.mjs", "remote-paseo.mjs", "model-routing.mjs", "jobs.mjs", "gate-table.mjs", "reliability.mjs", "team-communication.mjs", "team-lease.mjs", "lease-ledger.mjs", "watchdog.mjs", "ocr-review.mjs", "ocr-setup.mjs", "team-scripts-path.mjs"]) {
   cpSync(join(source, file), join(installed, file));
 }
 
@@ -298,6 +298,10 @@ for (const installer of ["install.sh", "install.ps1"]) {
     // dependencies travel with it, same reasoning as every script above.
     "remote-paseo.mjs",
     "model-routing.mjs",
+    // The gate's table is model-routing.mjs + jobs.mjs, joined by gate-table.mjs;
+    // the Pi adapter runs gate-table.mjs as a subprocess, so all three travel together.
+    "jobs.mjs",
+    "gate-table.mjs",
     "reliability.mjs",
     // team-communication.mjs joined it when the Lead -> Supervisor consult
     // (PR-H) started resolving policy-core to find the Supervisor seat. Same

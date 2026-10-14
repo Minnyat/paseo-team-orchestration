@@ -1,3 +1,327 @@
+# Current task: Language switch (VI/EN) + model modal + UI overhaul
+
+## Original request
+"ý là cho phép người dùng chọn nhiều ngôn ngữ tiếng anh hoặc tiếng việt, chứ không phải cả 2 cùng tồn tại. làm thêm các thành phần như modal đi hoặc làm lại ui cho tốt hơn chứ hiện tại xấu vcl + ux như c!"
+
+## Plan
+- [x] Language switch (VI/EN) in the topbar: one language at a time, persisted, re-renders shell + catalog + model UI + buttons + modal.
+- [x] Model overrides redesigned: compact badge table per provider + native <dialog> modal editor with live validation (Apply disabled), remove, Auto-clears-override semantics.
+- [x] Modal reused from catalog Configure button; ID locked for existing overrides.
+- [x] Regression tests, typecheck and adversarial review.
+
+## Scope
+- Full-app toggle for the static shell (nav, headings, toolbars, config UI, model modal, actions). JS-generated dynamic strings in home/graph/permissions/roles (health messages, agent lists, permit cards) still Vietnamese — noted follow-up.
+- Modal uses native <dialog>, guarded for the mini test DOM.
+
+## Follow-up task: modal shows current model data
+
+### Original request
+"nó cần hiện những dữ liệu hiện tại cho người dùng trong modal chứ? sao đang không có gì thế? hay ở khâu config có vấn đề"
+
+### Root cause
+The modal showed only override values (empty when nothing is overridden); the catalog snapshot sent model IDs only, so current metadata from Pi's models.json never reached the UI.
+
+### Done
+- piCatalogSnapshot now also returns `detail` per provider/model: name, contextWindow, maxTokens, reasoning, input (sanitized; unknown keys like cost dropped; no credentials).
+- Modal gains a read-only "Đang dùng (models.json) / Current (models.json)" block; Configure and table Edit pass current data; Add (manual) shows a "no data yet" note.
+- Catalog list shows metadata chips (ctx / out / reasoning / ảnh) per model.
+
+### Evidence
+- npm test 338/338; typecheck pass; git diff --check clean.
+- Browser with the real models.json: chips "ctx 1000000 out 128000 ảnh"; modal current block shows name, limits, reasoning, input; ID locked; override fields empty (nothing overridden); 390px no overflow; no console errors.
+
+---
+
+## Evidence
+- npm test: 338/338 pass; typecheck pass; git diff --check clean.
+- Browser (real config): VI default → EN switch re-renders nav (Home/Agent team/…), heading, warning, catalog "Active models", "+ Add model override", Save button, html lang attr. Modal opens with EN labels; live validation blocks Apply on 9.5 / whitespace ID / empty ID; cancel closes. Mobile 390px: modal fits (358px), no overflow, zero console errors.
+- Hostile review: legacy unknown values still preserved as "Existing value" options; empty applied override = removal (toast says so); taken-ID check prevents silent overwrite; error prefixes never render ": " with empty id; all old combined "VI / EN" labels removed (tests updated); sync actions carry labelEn/busyEn/hintEn.
+
+---
+
+# Follow-up task: class cards by role / function, and a form that does not jump
+
+## Request
+"chia lại cho hợp lý, theo vai trò, theo chức năng, tối ưu ui-ux vì mỗi lần tạo thêm 1 cái là ui bị đẩy xuống phải load lại".
+
+## Measured first (real browser, temp config)
+Clicking "+ Thêm tool/model" kept scrollY but the button moved 350px down (a whole card was added, seven cards were fully expanded, page 5226px tall) and focus fell to BODY. Every structural edit called renderConfigForm(), which also shut every "advanced options" panel.
+
+## Done
+- Classes grouped by role of the seat they build, then function (Peer: FAST_READ/CODING_MEDIUM/REASONING_HIGH/REVIEW_HIGH; Supervisor: MONITOR_ECONOMY/SUPERVISOR_GOVERNANCE; Lead: LEAD_RECOVERY), each with a one-line "what it is for". Presentation only (`keyGroups`/`keyInfo`/`item.layout:"route"` in config-schema.mjs); stored format, validators and gate untouched. Same grouping in the cluster host forms and in the quick-switch panel.
+- A class is a collapsed line (`runtime · model · thinking`, real role, "+N lựa chọn", "x/y đang bật", warn if unset); opened it is a table, one line per option (main + #1..). Page 2709 -> 1976px with 5 classes.
+- Structural edits (add/remove option, optional class, list/map card, key rename) redraw ONLY their own control; dependents/conditional lists are pruned of detached nodes; new line scrolls into view (nearest) and takes focus. A new option starts on the main option's provider (same role).
+- Full re-renders (Save, preset, modal) keep the view: anchor card + offset, open/closed state of class cards and "advanced options" keyed by document path; a different section starts at the top.
+- EN labels for the option columns and chips.
+
+## Verified
+Browser: add option moves the page by one line (~51px), focus on the new row; Save keeps scroll + open cards; optional class add/remove; EN; Jobs executors add (showIf rows right). npm test, typecheck.
+
+## Limits
+- A job's executor card is still a tall card (kind-dependent fields), so adding one moves the button by a card; it now lands in view with focus.
+- Moving options up/down was dropped from the class table (order has no meaning: the Lead picks).
+
+---
+
+# Follow-up task: one class, several tools + models (class → options), easy switches
+
+## Request
+"Lớp việc → mô hình. Một lớp việc có thể có nhiều tool + mô hình. Có thể bật tắt dễ dàng." Answer to the scoping question: **(a)** the Lead seats ONE usable option per agent; (b) one agent per option stays a job's behaviour.
+
+## Answer to "is it right yet?"
+No: a class had exactly one route, so "one class, several tools/models" did not exist (jobs and the model switch only approximated it). My earlier rejection of a per-class list was about AUTOMATIC fallback; this is a visible list the Lead picks from, which the gate checks — the rule that keeps it consistent with the doctrine: nothing chooses an option on the Lead's behalf.
+
+## Design
+- `alternates: [...]` on a class route; the route's own fields stay option 0, so every old file and reader works. Each option has its own `enabled`; all options of a class seat the same ROLE (tool/family may differ); exact repeats refused; validated like the primary.
+- Gate: any usable option whose family+role fit the seat is accepted (named by provider/model/thinking); a refusal lists the usable ones. Classes with ONE option keep byte-identical wording (the existing tests pin it). Class refused only when no option is usable (ROUTE_CLASS_DISABLED / ROUTE_MODEL_DISABLED); some usable but none for this seat's family => ROUTE_PROVIDER_MISMATCH with the list.
+- Nothing picks for the Lead: team_fork naming no model with >=2 usable options => ROUTE_OPTION_AMBIGUOUS; verify accepts a fork that runs ANY usable option and still deletes a stray model; update_agent may only move to another option of the seat's class (current model = the provider string's tail); a job's class executor lists every usable option (`pickOne`, `option` N) instead of resolving to the first.
+- Switches: `routing enable|disable <CLASS>` = every option, `--option N` = one; `disable-model` drops options on that model. New `add-option` (strict live check, like `set`) / `remove-option`; `set` KEEPS alternates (tested); `show` lists `#N`; `check` and preflight check each option as `route:CLASS#N`.
+- UI: routing class card gets "Tool/model khác của lớp này" (a list of full routes, model/thinking dropdowns from the daemon); quick panel shows a class switch plus one switch per option; model switches include alternates' models; optionalEntryProblems ignores list fields (same trap as `enabled`).
+- Prompts/skill: lead.md invariant 3 says "A class may list several options (`[pick one: …]`): seat ONE usable option, named exactly" (24574/24576, trims elsewhere); supervisor.md "one of those in your Routing now"; the "Routing now" block prints `CLASS=[pick one: a | b: OFF (…) | c]`.
+
+## Found while building (and fixed)
+- team_fork `verify` would have deleted a valid fork of a multi-option class (it asked for "the" route). Now falls back to the fork's actual model/thinking and still deletes a stray one.
+- I destroyed the first half of scripts/jobs.mjs with a bad Python slice mid-task and rebuilt it from HEAD plus the edits of this session; the full suite (358 tests) passes, but that file deserves a read in review.
+
+## Not done / limits
+- The installed copies are STALE (installDrift: 10 files changed, jobs.mjs and gate-table.mjs missing): running agents still use the old gate, so none of the switches/options bind a real Lead until `pteam install` + a new session. NOT run: the user said "if the version was bumped"; package.json is still 3.10.0, so the condition is not met (asked, not assumed).
+- A class option is a Paseo-seatable runtime (pi, claude); CLI tools like codex stay job-only.
+- Other config sections' labels remain Vietnamese-only.
+
+## Evidence
+- npm test 358/358 (+ new: model-routing alternates, route-gate options/switches/update/fork/notice, routing-cli add/remove/--option, team-fork options, jobs class options, config-form, config-schema, webui-app); typecheck; git diff --check.
+- Browser on a temp config: panel shows CODING_MEDIUM with 3 option switches (one off), the form card shows the "Tool/model khác" list with daemon-fed dropdowns.
+
+---
+
+# Follow-up task: "the configuration I described is not in the UI" (screenshot 2026-10-14 09-35-56)
+
+## Finding (real config, real browser)
+The screenshot is the routing FORM. The switches live in a panel above the form and the jobs side was empty: this machine has no `jobs.local.json`, so the Jobs section was a blank form (`+ Thêm công việc`), its quick panel was hidden (it needed an existing file), and nothing offered a way to pick several tools/models for one task or to switch pi/claude off.
+
+## Done
+- Jobs quick panel shows without a jobs file: pi/claude (and cliTools) are switchable; the first switch creates the file (rev `absent`).
+- Three one-click starter jobs in the Jobs form (two independent reviewers on two models; one task on several models; scout then build), class-based so no model has to be typed; EN alternates; each validated against the real validator in a test.
+- The two halves of "turn things off" now point at each other: Routing panel → "Switch tools & jobs", Jobs panel → "Switch off a model that ran out of credit".
+
+## Evidence
+- npm test passes; real config, browser: Jobs page shows 3 presets + panel with pi/claude; Routing page shows class and model switches. Tests: presets validate, jobs panel without a file creates it on the first switch, a preset click adds a 2-executor job.
+- Still Vietnamese-only: the Jobs page intro and the Routing/Jobs form labels (other sections' EN alternates are the earlier follow-up).
+
+---
+
+# Follow-up task: Role-prompt review + article cross-check
+
+## Request
+Put the job/reload sentence in lead.md and supervisor.md; review the prompts thoroughly; follow https://vhlam.com/article/agent-orchestration-multi-agent-slp (Supervisor-Lead-Peer on Paseo).
+
+## Article (read via WebFetch; treated as data)
+It describes the same S-L-P model this pack implements: one owner per changing scope, reviewers on a named version, challenge is a right not an obligation, goal vs binding constraints vs design choice, blockers via the Lead, self-contained reports. Already covered here (MUST HOLD / ALREADY DECIDED, REOPEN, exact-SHA review, one writer per scope). Not covered, now added: green tests are not proof the design is right (regression test that fails on the old code; run modules together) and a measurement must name its conditions. Not adopted: telemetry-driven removal of ceremony (a process change, not a prompt line), per-model prompt tuning.
+
+## Review method
+Extracted every CODE-like token from the three prompts and grepped code/skills/templates: 16 had no hit; 15 are free-form report fields (fine); one was a phantom: `RECIPIENT_OUT_OF_CLUSTER` (lead.md) — removed (the real code is PROMPT_TARGET_OUT_OF_CLUSTER). Then checked claims against the policy tables.
+
+## Findings fixed
+- lead.md told the Lead to route from `cluster-routing.local.json` only; the gate reads model-routing.local.json when no cluster local host exists (this machine). Now: "Routing now" block + `pteam routing show` / `pteam jobs resolve <id>`, plus "a switched-off class/model is refused, never rerouted". Same stale wording removed from two code messages (policy-core Supervisor thinking refusal, team-communication no-Supervisor message).
+- supervisor.md told a terminal-less Supervisor to run `pteam routing show`. Now it reads the "Routing now" block; the notice text for a Supervisor says it has no terminal and to escalate when LEAD_RECOVERY is absent/OFF.
+- Byte budgets: lead.md 24563/24576, supervisor.md 24555/24576 (new text paid for by trims); peer.md +1 bullet; skill 58120/58368 (one acceptance-evidence rule added, one sentence trimmed).
+- **Security gap found and closed:** the `pteam`/`paseo-team` CLI was not guarded for Peers (only `paseo` and two scripts were). A Peer with bash could run `pteam permits allow`, `routing disable-model`, `config write`, `agent send`. Peers may now run only read-only pteam commands; anything else (including unknown subcommands) is refused on both runtimes (`pteamMutationIn`, heuristic like every bash rule). Lead is deliberately not held to it (it needs `routing`, and the gate is the Lead's boundary; a Lead rewriting routes is still the documented known gap).
+
+## Second pass (advisor review of the first pass)
+- A Lead was being TOLD to undo the Human's switch (every refusal/hint said "switch it on again with …"). Reworded in code (gate refusals, jobs inactiveReason, `routing show` warnings): switching back on is the Human's call, do not run it; lead.md invariant 3 says the same. Not blocked in code: whether to also refuse a Lead's `routing enable|enable-model` is left to the Human (`routing set` was designed to be handed to a Lead).
+- lead.md invariant 3 had dropped the remote-host route source: restored (local seat from "Routing now"/`pteam routing show`; a remote host's from its entry in the controller's `cluster-routing.local.json`).
+- Peer `pteam` guard: also refuses `env`/`/usr/bin/env`/`sudo` wrappers, `bash|sh -c "…"`, `xargs pteam …`, a piped heredoc body. Known false positive, accepted and documented in the code: a heredoc body line that STARTS with `pteam routing set …` is refused (it can be fed to a shell).
+- peer.md bullet reworded: a writer adds the regression test inside `OWNED_SCOPE`, a read-only Peer names the scenario in FINDINGS.
+- The installed prompt copies (`~/.pi/agent/extensions/prompts`, Claude side) change only after `pteam install` + a new session; the installer was NOT run.
+
+## Evidence
+- npm test 351/351; typecheck pass; git diff --check clean; instruction-budget test passes (lead.md 24561/24576, supervisor.md 24555/24576).
+- New: policy test for 27 refused and 15 allowed command shapes incl. prose ("grep pteam README.md"); route-gate asserts the Supervisor notice never tells it to run pteam and the "Human's call" wording.
+
+---
+
+# Follow-up task: Job seatings, model-off switch, reload before seating
+
+## Original request
+Pick one or more tools, or the same tool on several models, for one task; switch a model off fast (out of credit); reload the tool config when a Lead starts and before a Lead/Supervisor seats anything — via a CLI, no PC restart.
+
+## Correction to the previous task
+I had said jobs already covered several models per task. They did not for `route` executors: the gate compared every seating to the declared class's ONE route and never looked at jobs, so a job route executor whose model was not some class's route was refused (ROUTE_MODEL_MISMATCH). Pinned by a route-gate test ("the gap this closes").
+
+## Done
+- **Job seatings in the gate (opt-in).** `labels["team.job"]` → the gate accepts provider/model/thinking of an ACTIVE executor of that job (class executor → its route). `team.model-class` still required and still decides the flow. No label = the class gate exactly as before. New codes ROUTE_JOB_UNKNOWN / _INACTIVE / _EXECUTOR_MISMATCH (lists usable executors) / _UNAVAILABLE (jobs file unreadable: only job-labelled seatings refused) / _IMMUTABLE / _SEAT_FIXED (update_agent on a job seat). Route executor needs `thinking` to be seatable; cli executors are never seats; team_fork takes no job yet.
+- **Model switch.** `disabledModels` in the route file the gate reads (per host in a cluster file); key `<family>/<model>`, trailing `/*` (`pi/Minnyat/*`, `pi/*`). Computed in gateRouteTable as `route.modelDisabled` (never written into `enabled`). Gate: ROUTE_MODEL_DISABLED (+ usable-now list). jobs: route/class executors on that model are skipped. CLI: `pteam routing disable-model|enable-model` (same .bak/atomic/CONCURRENT_EDIT path, editTarget picks the right file). show/check mark it; preflight/check = WARN.
+- **Reload.** `pteam jobs resolve <id>`: exact create_agent args + labels per usable executor, CLI commands, skipped with reasons, JOB_INACTIVE when nothing is usable. "Routing now" block for Lead/Supervisor: Pi every turn (system prompt is rebuilt each turn), Claude at session start and whenever its fingerprint changes. Refusals list what is usable.
+- New module scripts/gate-table.mjs (route table + jobs; needed because a module cannot lazily import one that is still evaluating it — first attempt deadlocked). Pi adapter runs it as a subprocess with fallback to `gate-routes`; Claude hook imports it in-process with the same fallback. jobs.mjs and gate-table.mjs added to install.sh/install.ps1 and installer tests.
+- WebUI quick panel: model group on Định tuyến mô hình (a switch per model the routes use + existing entries; a model off only because of a pattern is locked to the pattern's switch); class rows show "model OFF"; schema field `disabledModels`.
+- Lead skill section rewritten (not appended) to fit the budget; README, docs/model-routing.md, example comments updated, including the reversed "a job is a preset only" contract.
+
+## Not done / limits (also in README)
+- Running seats keep their model and will fail; a Lead started by hand and Pi's `defaultModel` are not covered; switching a CLI tool off only hides it; remote-paseo `run` ignores all of it; team_fork has no job; cluster-section panel still absent.
+
+## Evidence
+- npm test 351/351; typecheck pass; git diff --check clean.
+- New tests: route-gate (gap, job seats on both runtimes, model switch live on/off, fail-closed jobs file, update_agent job rules, routing-now notice, Claude hook session-start/changed/live), model-routing (key validation, matching, gate table), jobs (model-off, seats, `jobs resolve` live over files), routing-cli (disable/enable-model incl. cluster host), config-form, webui-app (model switch through the real server).
+- Manual E2E in a temp config dir: resolve → 3 seats + cli; disable-model pi/Minnyat/gpt-5.5 → next resolve skips it, gate-table marks it; enable → back. Browser: model group renders, toggling wrote disabledModels.
+
+---
+
+# Follow-up task: Model routing — multi-model/tool work, quick switches, hot apply
+
+## Original request
+"model routing: 1 task có thể dùng nhiều công cụ hoặc nhiều model … bật tắt nhanh … dùng được luôn mà không cần chạy lại paseo … brainstorm rồi triển khai"
+
+## Findings
+- "Nhiều model/công cụ cho một việc" ALREADY exists as jobs (executors class/route/cli, parallel|sequential, scripts/jobs.mjs) — but no skill told a Lead about it, and nothing could be switched off without deleting it.
+- Hot apply is already true for routes and jobs: Pi adapter spawns `gate-routes` per create_agent, Claude hook is a fresh process per call, `pteam jobs` reads the file each time; no cache in front. Proved by test (file edit → next gate answer) and in the browser (toggle → `pteam jobs list` changes at once).
+- NOT hot: ~/.paseo/config.json (daemon restart), Pi models.json ("Nạp lại cho Paseo"), Pi settings/MCP (next session).
+
+## Brainstorm / decision
+- Per-class fallback list (class → [model A, model B]): rejected — silent fallback, the thing this repo exists to prevent.
+- Jobs for multi-model work: kept as is.
+- Chosen: fail-closed `enabled` switches at four levels — class route (route file), job, executor, CLI tool (`disabledTools`, covers built-ins pi/claude). Off = skipped/refused, never replaced; config kept so on restores it. Switch is "absence of the key" when on.
+- MCP servers NOT given a switch: pi-mcp-adapter's support for a disable flag could not be verified here; Pi `defaultTools` already has `-tool` syntax (per session).
+
+## Done
+- model-routing.mjs: route.enabled validated and carried (single + cluster), `ROUTE_DISABLED` from resolveRoute.
+- policy-core.ts/.js (via build:core): `routeForClass` refuses a disabled class on create_agent, update_agent and team_fork with `ROUTE_CLASS_DISABLED` (+ enable hint), both runtimes.
+- preflight/`routing check`: disabled route = WARN (never FAIL, even --strict). `routing show` marks [OFF]. `routing set` keeps a class off.
+- CLI: `pteam routing enable|disable <CLASS> [--host-id]` (same .bak + atomic + CONCURRENT_EDIT write path). `pteam jobs list|show` show only usable jobs/executors, report `skipped` / `inactive` with reasons, `--all` for everything; JOB_INACTIVE code.
+- jobs.mjs: `enabled` on job/executor, `disabledTools`; an all-off job still validates (Save is never blocked).
+- Schema: `enabled` fields (route, job, executor), `disabledTools`.
+- WebUI: "Công tắc nhanh" panel on Định tuyến mô hình and Công việc — flips one switch on the file as on disk, writes with rev through the normal validator/backup path, no server change; confirm if the form has unsaved edits. Fixed optionalEntryProblems (a field with a default is never "left blank").
+- Lead skill: short "Work that needs several models or tools" section (budget 56→57 KiB, reason in the test). README, docs/model-routing.md (hot-vs-restart table), example comments.
+
+## Review fixes
+- Routing panel locks itself (with a notice) when the gate reads the cluster file instead (a local host there) or that file is invalid — a switch would otherwise edit a file nobody reads and still say "live". Test: cluster file with a local host → every switch disabled.
+- A switch writes the document and rev the panel was painted from, so a file edited since (an executor is matched by position) is refused as a conflict, never a silent wrong flip. Test: reordered executors → refused, nothing written. (The test fake now enforces --rev like the real CLI.)
+- remote-paseo.mjs `run` takes an explicit provider and never resolves a class, so it ignores the route switch like it ignores routes (documented under Known gaps).
+- Behaviour change: a job whose only executor is an unrouted class moved from `jobs list` to `inactive` (`show` → JOB_INACTIVE); `--all` restores the old view.
+
+## Not done
+- Cluster (multi-host) section has no quick-switch panel; `enabled` is accepted there and `routing disable --host-id` works.
+- Other config sections' labels are still Vietnamese-only (see previous task).
+
+## Evidence
+- npm test 342/342; typecheck pass; git diff --check clean.
+- New tests: route-gate (disabled refused on create/update, both runtimes, live on/off with no restart), routing-cli (enable/disable/set/check/show/cluster), model-routing, jobs (switches, activeJobs, CLI list/show/--all and live file edit), config-form (listSwitches/applySwitch), webui-app (panel flips a route and a tool through the real server, restores the file).
+- Browser: jobs panel (job cards with nested steps), toggling codex wrote disabledTools and `pteam jobs list` immediately skipped that step.
+
+---
+
+# Follow-up task: Config tab UX audit
+
+## Original request
+"kiểm tra xem hiện tại ui của phần cấu hình còn nhiều chỗ chưa hợp lý … tối ưu ui và ux"
+
+## Found (real browser, real config)
+- Section picker, Save and warning sat BELOW the catalog + sync actions; forms are 2-2.8k px, so Save was off-screen most of the time. Save looked "armed" even with nothing to save.
+- loadConfig had no stale-response guard: a slow reply for a section already left could repaint the page and become the document Save writes.
+- Combined "VI / EN" hints in the pi-models schema; hardcoded Vietnamese in the config shell (advanced-options summary, number error, save/JSON/preset/seats toasts, key-taken, "×" titles, Form button); schema intro and group legends ignored the language.
+- Chips showed raw "ctx 1000000 out 128000"; model cards wrapped raggedly.
+
+## Done
+- Toolbar (section, Form/JSON, Reload, Apply seats, Save, path) is now right under the heading and sticky below the top bar (`--topbar-h`, desktop only; static on phones); warning shrunk to one line; presets/catalog/actions follow the intro.
+- Save is quiet until dirty, then primary + warn ring.
+- `configLoadSeq` drops stale loadConfig replies.
+- i18n: schemaText() (intro/label/hint En), t() keys for the shell strings, schema hints split into hint/hintEn, "×" buttons carry aria-label, EN catalog count wording.
+- Chips use compactTokens (1M / 128K / 131.1K, exact value in title); catalog is an auto-fill grid.
+
+## Modal pass (from the user's screenshot)
+- Number fields (context window / max output) had no style rule: grey inset browser boxes. `input[type=number]` now shares the text-field look.
+- Empty fields were blank and every select said "Auto — clear override". Placeholders now show the inherited current value; Auto reads "Auto · <current>".
+- A model opened from the catalog is "Configure model … no override yet", not "Add"; the picker is hidden when the ID is locked; current limits are digit-grouped.
+- Apply is disabled until something differs from what the dialog opened with (it was a live-looking no-op).
+- Tests: placeholders, Auto label, title, Apply enable/disable, picker hidden. Browser: panel 767px in an 843px viewport, no inner scroll.
+
+## Not done / follow-up
+- Only the pi-models schema has En alternates; the other seven sections' labels/hints/problem messages (config-form.js) are still Vietnamese-only.
+
+## Evidence
+- npm test 338/338; typecheck pass; git diff --check clean.
+- Browser 1400px VI+EN: bar sticks at 82px under the top bar; dialog (top layer) covers it. 390px (iframe): scrollWidth 373 < 386, no overflow, bar static.
+- New tests: compactTokens, EN schema intro/legends/no combined hints, index.html order, quick section switch ends on the last chosen section.
+
+---
+
+# Previous task: Quản lý cấu hình model và Pi
+
+## Original request
+“đúng rồi nên có những cái đó” — confirms provider/model editing, manual models, persistent overrides, default model/thinking and related Pi settings.
+
+## Plan
+- [x] Inspect Pi docs and existing schema/sync: current overrides accept only token limits; Pi settings already expose defaults/thinking/retries.
+- [x] Add test-first validated model metadata overrides (name/reasoning/input/manual inclusion) and apply them during sync.
+- [x] Add editable controls and catalog-to-edit shortcut; link to Pi default/thinking/tools settings with dirty protection.
+- [x] Verify sync/schema/UI regression tests, typecheck, browser and hostile self-review.
+
+## Evidence / review
+- Red test observed: custom name remained model ID. Green: 8 relevant test files pass; typecheck and whitespace check pass. Added metadata validation/build tests, manual-ID probe and persisted catalog test, UI edit/save metadata regression.
+- Browser: real catalog Configure button creates form controls; 390px no overflow, no errors. No actual config save or sync against user endpoints.
+- Hostile review: preserve false reasoning and omit thinking map; reject invalid metadata/input types; manual IDs enter normal probes; only explicit includes added; no arbitrary override spread into generated credentials. Dirty sync/refresh now asks confirmation before operating on saved config. Existing endpoint probe supports OpenAI-completions only; other protocols intentionally not offered.
+- New fields persist in team config and are applied on explicit sync. Defaults/thinking/retry reuse existing settings form; added tools/model scope/project trust without inventing per-call approval semantics.
+
+## Decisions
+- Persist metadata in team pi-models config so sync cannot overwrite manual choices. Only OpenAI-completions endpoints supported by this sync/probe; do not offer nonfunctional protocols.
+- Manual model flag adds ID to probe candidates, never bypasses health checks. Explicit reasoning override is user assertion, not auto-discovery.
+- No invented per-tool approval setting: Pi defaultTools is selection, not sandbox/permissions.
+
+---
+
+# Previous task: Hiển thị kho model Pi
+
+## Original request (verbatim)
+phần cấu hình trang kho model pi cần phải có hiển thị các model hiện đang nhận được. giúp tôi kiểm tra cải tiến đi.
+
+## Plan / success criteria
+- [x] Trace source: pi-models configuration describes endpoints/overrides, not the received catalog. Existing catalog reader feeds only pi-settings selectors.
+- [x] Test-first: populated/missing/corrupt catalog, safe output, display separate from edits, refresh after sync without losing edits.
+- [x] Add read-only provider/model inventory from Pi models.json; clearly label snapshot, not a fresh connectivity probe.
+- [x] Verify CLI/UI tests, typecheck, responsive browser and adversarial review.
+
+## Verification / review
+- Observed red CLI (catalog absent) and UI (received model not shown), then green: 6 relevant test files passed, typecheck passed, diff whitespace check clean.
+- Browser authenticated read shows 7 models for minnyat; at 390px no document overflow or console errors. No real sync/probe/save performed.
+- Self-review: IDs-only projection avoids credentials; null-prototype provider map handles special keys; malformed provider shape distinguished from empty. Text-node rendering avoids injection. Inventory refresh updates only its read-only panel, not document/revision/dirty state; test checks retained unsaved override and unchanged file. Section guard prevents refresh from painting a different section. No persistence format changes. Existing general config-load request ordering remains outside scope.
+- Temporary browser and preview process closed.
+
+## Decisions / diagnosis
+- Hypotheses: UI hides existing inventory; API omits inventory; models are actually absent. Source confirms API omits it for pi-models and UI only paints the last sync result. Expose a safe IDs-only projection, never API keys; distinguish missing/invalid from an empty inventory.
+- No automatic sync/probes or config writes. Refresh snapshot after explicit actions, preserving unsaved form edits. srcwalk is now installed; guide loaded.
+
+---
+
+# Previous task: Review và cập nhật WebUI
+
+## Original request (verbatim)
+giúp tôi kiểm tra và update lại ui hiện tại cho tôi đi. web ui hiện hay đang khá là xấu giúp tôi review lại và update.
+
+## Success criteria
+- [x] Clear hierarchy, consistent spacing and refined surfaces across all five tabs.
+- [x] Responsive desktop/mobile layout with visible keyboard focus.
+- [x] Existing behavior and API contracts preserved; WebUI tests pass.
+- [x] Browser verification and adversarial self-review complete.
+
+## Constraints & decisions
+- Keep vanilla HTML/CSS/JS and Vietnamese copy; no new runtime dependencies.
+- Retain dark operator-console identity, quieter slate surfaces and restrained teal accent.
+- Existing historical task state below is preserved.
+- srcwalk unavailable; inspect source directly.
+
+## Plan
+- [x] Audit existing UI and capture baseline.
+- [x] Refine shared visual system and page hierarchy without changing business logic.
+- [x] Run tests, browser desktop/mobile checks, and adversarial self-review.
+
+## Log
+- Initial audit: header wraps unpredictably; pages lack titles/context; tiles and panels share equal visual weight; home becomes sparse after setup card hides; cramped forms and no motion preference treatment.
+- Updated index.html/style.css only: page headings, slate/teal tokens, responsive metrics, navigation shortcuts using existing data-goto handlers, spacing, focus, reduced motion and scroll containment. No business logic changed; visual-only work checked against existing tests and browser rather than new logic unit tests.
+- Verification: 5 Node test files passed (WebUI app/DOM/server, humanize, config-form); npm run typecheck passed; git diff --check clean. Browser at 1440px/390px with authenticated local data (31 agents), config/roles/permissions navigation, simple-mode fallback and shortcut navigation checked; no browser errors. No write/approval actions executed.
+- Self-review fixed hidden advanced navigation on mobile by wrapping tabs, empty-state margin override, and long role-path metadata overflowing mobile. Reviewed compatibility/security/error paths: IDs and API/auth/rendering logic unchanged; no new external assets/dependencies. Concurrency/data-format categories exempt (HTML/CSS-only). Existing loading behavior reports unread status/zero counts before data arrives; deferred because changing state semantics is outside this visual pass.
+- Preview used port 4397 because 4321 already runs a different server; initial 4321 capture was not the edited checkout. Temporary preview/browser cleaned up after verification.
+
+---
+
 # Task: Lead bớt tự đọc/làm (giao cho Peer) + task dài thì dựng Supervisor theo loại việc
 
 ## Original request (verbatim)

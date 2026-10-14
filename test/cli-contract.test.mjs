@@ -649,6 +649,7 @@ try {
 		assert.equal(section.status, 0, section.stderr);
 		assert.deepEqual(Object.keys(section.json.data.providers).sort(), ["second", "testprov"]);
 		assert.equal(section.json.schema.label, "Kho model Pi");
+		assert.equal(section.json.schema.labelEn, "Pi model catalog");
 		const map = section.json.schema.groups[0].fields[0];
 		assert.equal(map.type, "map", "the form adds endpoints rather than editing a single hard-coded one");
 		const itemFields = map.item.fields.map((f) => f.path);
@@ -851,7 +852,7 @@ try {
 		assert.deepEqual(none.json.jobs, []);
 		assert.equal(none.json.path, jobsFile, "the jobs file honours PST_TEAM_CONFIG_DIR");
 		assert.match(none.json.hint, /jobs\.example\.json/);
-		const SHAPE = ["cliTools", "exists", "hint", "jobs", "ok", "path", "routeSource"];
+		const SHAPE = ["cliTools", "disabledTools", "exists", "hint", "inactive", "jobs", "ok", "path", "routeSource"];
 		assert.deepEqual(Object.keys(none.json).sort(), SHAPE, "the same keys with or without a file");
 		assert.equal(none.json.routeSource.ok, false);
 		assert.equal(none.json.routeSource.hostId, null);
@@ -931,10 +932,18 @@ try {
 		assert.deepEqual(Object.keys(listed.json).sort(), SHAPE);
 		assert.equal(listed.json.hint, null, "no hint once the file exists");
 		assert.equal(listed.json.routeSource.code, null);
-		assert.deepEqual(listed.json.jobs.map((job) => job.id), ["build", "review"]);
-		assert.equal(listed.json.jobs[0].run, "parallel", "the default run mode is spelled out");
-		assert.equal(listed.json.jobs[0].executors[0].route, null);
-		assert.match(listed.json.jobs[0].executors[0].routeProblem, /LEAD_RECOVERY is not configured/);
+		// `build` has only a class whose route is not configured: nothing a Lead can
+		// use right now, so it is named under `inactive` (with why) rather than offered.
+		assert.deepEqual(listed.json.jobs.map((job) => job.id), ["review"]);
+		assert.deepEqual(listed.json.inactive.map((entry) => entry.id), ["build"]);
+		assert.match(listed.json.inactive[0].reason, /LEAD_RECOVERY is not configured/);
+		const everything = run(["jobs", "list", "--all"], env);
+		assert.equal(everything.status, 0, everything.stderr);
+		assert.deepEqual(everything.json.jobs.map((job) => job.id), ["build", "review"]);
+		assert.equal(everything.json.jobs[0].run, "parallel", "the default run mode is spelled out");
+		assert.equal(everything.json.jobs[0].executors[0].route, null);
+		assert.match(everything.json.jobs[0].executors[0].routeProblem, /LEAD_RECOVERY is not configured/);
+		assert.equal(run(["jobs", "show", "build"], env).json.code, "JOB_INACTIVE");
 
 		const shown = run(["jobs", "show", "review"], env);
 		assert.equal(shown.status, 0, shown.stderr);
@@ -954,7 +963,7 @@ try {
 		assert.deepEqual(missing.json.known, ["build", "review"]);
 		assert.equal(run(["jobs", "show"], env).status, 2, "a missing id is a usage error");
 		assert.equal(run(["jobs", "nonsense"], env).status, 2, "an unknown jobs subcommand is a usage error");
-		assert.notEqual(run(["jobs", "list", "--all"], env).status, 0, "a typo'd flag is never ignored");
+		assert.notEqual(run(["jobs", "list", "--al"], env).status, 0, "a typo'd flag is never ignored");
 
 		// A file edited by hand into an invalid shape is reported, never printed as a preset.
 		writeFileSync(jobsFile, JSON.stringify({ version: 1, jobs: { review: { executors: [] } } }));
@@ -1056,6 +1065,7 @@ try {
 		const models = join(agentDir, "models.json");
 
 		rmSync(models, { force: true });
+		assert.equal(run(["config", "read", "pi-models"]).json.catalog.status, "missing");
 		const plain = run(["config", "read", "pi-settings"]);
 		const plainFields = plain.json.schema.groups.flatMap((group) => group.fields);
 		assert.equal(plainFields.find((f) => f.path === "defaultProvider").type, "string", "no models.json: still a text box");
@@ -1065,11 +1075,21 @@ try {
 			models,
 			JSON.stringify({
 				providers: {
-					Minnyat: { models: [{ id: "gpt-5.4" }, { id: "gpt-5.6-sol" }, "plain-string-id", { name: "no id" }] },
+					Minnyat: { models: [{ id: "gpt-5.4" }, { id: "gpt-5.6-sol", name: "GPT 5.6 Sol", contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 1 } }, "plain-string-id", { name: "no id" }] },
 					ollama: { models: [{ id: "llama3.1:8b" }] },
 					empty: {},
 				},
 			}),
+		);
+		const received = run(["config", "read", "pi-models"]).json.catalog;
+		assert.equal(received.status, "ready");
+		assert.deepEqual(received.byProvider.Minnyat, ["gpt-5.4", "gpt-5.6-sol", "plain-string-id"]);
+		assert.deepEqual(received.byProvider.empty, []);
+		assert.deepEqual(received.detail.Minnyat["gpt-5.4"], {}, "an entry with no metadata stays empty, not malformed");
+		assert.deepEqual(
+			received.detail.Minnyat["gpt-5.6-sol"],
+			{ name: "GPT 5.6 Sol", contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"] },
+			"known metadata travels; unknown keys like cost do not",
 		);
 		const fed = run(["config", "read", "pi-settings"]);
 		const fields = fed.json.schema.groups.flatMap((group) => group.fields);
@@ -1084,6 +1104,7 @@ try {
 
 		// A corrupt models.json is an empty catalog, not a failed read.
 		writeFileSync(models, "{ not json");
+		assert.equal(run(["config", "read", "pi-models"]).json.catalog.status, "invalid");
 		const corrupt = run(["config", "read", "pi-settings"]);
 		assert.equal(corrupt.status, 0, corrupt.stderr);
 		assert.equal(corrupt.json.schema.groups.flatMap((g) => g.fields).find((f) => f.path === "defaultProvider").type, "string");

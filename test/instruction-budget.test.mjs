@@ -39,7 +39,10 @@ const ROLE_PROMPT_BUDGET = 24 * KIB;
  * role prompt per turn, but the Lead procedure is by far the largest single
  * document here and the same one-way ratchet applies.
  */
-const SKILL_BUDGET = 56 * KIB;
+// 57 KiB: one short section, "Work that needs several models or tools", so a Lead
+// actually reads `pteam jobs show` (the jobs feature had no mention in any skill,
+// and a preset nobody is told about is not used).
+const SKILL_BUDGET = 57 * KIB;
 
 /** The brief template is quoted into every Peer prompt the Lead writes. */
 const TEMPLATE_BUDGET = 12 * KIB;

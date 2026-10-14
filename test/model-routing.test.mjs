@@ -1037,4 +1037,140 @@ assert.equal(cmdPercentExpansionRisk("https://app.paseo.sh/#offer=xyz"), false);
 	assert.equal(routing.providerRole("codex-peer"), null);
 }
 
+// --- quick switch: route.enabled ------------------------------------------------
+{
+	const withOff = structuredClone(validConfigData);
+	withOff.routes.CODING_MEDIUM.enabled = false;
+	const parsed = validateRoutingConfig(withOff);
+	assert.equal(parsed.routes.CODING_MEDIUM.enabled, false, "a switched-off required class still validates and keeps its off switch");
+	assert.equal(parsed.routes.CODING_MEDIUM.model, validConfigData.routes.CODING_MEDIUM.model, "model and thinking are kept");
+	const withOn = structuredClone(validConfigData);
+	withOn.routes.CODING_MEDIUM.enabled = true;
+	assert.equal("enabled" in validateRoutingConfig(withOn).routes.CODING_MEDIUM, false, "on is the absence of the key");
+	const bad = structuredClone(validConfigData);
+	bad.routes.CODING_MEDIUM.enabled = "off";
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(bad));
+	// A disabled class is never resolved — and never rerouted to another one.
+	expectRoutingError("ROUTE_DISABLED", () => resolveRoute(parsed, "CODING_MEDIUM", inventory));
+	assert.ok(ERROR_CODES.includes("ROUTE_DISABLED"));
+	assert.ok(resolveRoute(parsed, "FAST_READ", inventory), "the other classes still resolve");
+}
+
+// --- model switch: disabledModels ------------------------------------------------
+{
+	const routing = await import("../scripts/model-routing.mjs");
+	const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const withList = structuredClone(validConfigData);
+	withList.disabledModels = ["pi/Mx/gpt-5.5", "pi/Minnyat/*", "claude/claude-opus-5", "pi/Mx/gpt-5.5"];
+	const parsed = validateRoutingConfig(withList);
+	assert.deepEqual(parsed.disabledModels, ["pi/Mx/gpt-5.5", "pi/Minnyat/*", "claude/claude-opus-5"], "valid, de-duplicated");
+	assert.equal("disabledModels" in validateRoutingConfig(validConfigData), false, "absent stays absent");
+	for (const bad of ["Mx/gpt-5.5", "pi", "pi/", "gpt/x", " pi/x", "pi/a*b", "pi/*/x", 5, ""]) {
+		const doc = structuredClone(validConfigData);
+		doc.disabledModels = [bad];
+		expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(doc));
+	}
+	const notArray = structuredClone(validConfigData);
+	notArray.disabledModels = "pi/x";
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(notArray));
+
+	const d = parsed.disabledModels;
+	assert.equal(routing.isModelDisabled(d, "pi-peer", "Mx/gpt-5.5"), true, "exact, any role of the family");
+	assert.equal(routing.isModelDisabled(d, "pi-lead", "Mx/gpt-5.5"), true);
+	assert.equal(routing.isModelDisabled(d, "pi-peer", "Mx/gpt-5.5-mini"), false, "exact means exact");
+	assert.equal(routing.isModelDisabled(d, "pi-peer", "Minnyat/anything/deep"), true, "a trailing /* covers the endpoint");
+	assert.equal(routing.isModelDisabled(d, "pi-peer", "MinnyatX/y"), false, "…and only that prefix");
+	assert.equal(routing.isModelDisabled(d, "claude-peer", "Minnyat/x"), false, "another family is not covered");
+	assert.equal(routing.isModelDisabled(d, "claude-supervisor", "claude-opus-5"), true);
+	assert.equal(routing.isModelDisabled(["pi/*"], "pi-lead", "any/model"), true, "pi/* is the whole tool");
+	assert.equal(routing.isModelDisabled(["pi/*"], "claude-peer", "claude-opus-5"), false);
+	assert.equal(routing.isModelDisabled([], "pi-peer", "x"), false);
+	assert.equal(routing.modelSwitchKey("claude-peer", "claude-opus-5"), "claude/claude-opus-5");
+
+	// the gate table marks the routes, and leaves the class's own switch alone
+	const dir = mkdtempSync(join(tmpdir(), "pteam-mm-"));
+	try {
+		const file = join(dir, "model-routing.local.json");
+		const doc = structuredClone(validConfigData);
+		doc.disabledModels = [`pi/${doc.routes.CODING_MEDIUM.model.split("/").slice(0, 1)[0]}/*`];
+		writeFileSync(file, JSON.stringify(doc));
+		const table = routing.gateRouteTable({ env: { PST_TEAM_CONFIG_DIR: dir } });
+		assert.equal(table.ok, true);
+		assert.equal(table.routes.CODING_MEDIUM.modelDisabled, true);
+		assert.equal("enabled" in table.routes.CODING_MEDIUM, false, "enabled (the class switch) is a different fact");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+// --- a class with several options (alternates) ---------------------------------------
+{
+	const routing = await import("../scripts/model-routing.mjs");
+	const withAlt = structuredClone(validConfigData);
+	const base = withAlt.routes.CODING_MEDIUM;
+	const claudeAlt = { paseoProvider: "claude-peer", model: "claude-sonnet-5-5", thinking: "high" };
+	withAlt.routes.CODING_MEDIUM = { ...base, alternates: [claudeAlt, { ...claudeAlt, model: "claude-opus-5", enabled: false }] };
+	const parsed = validateRoutingConfig(withAlt);
+	const options = routing.routeOptions(parsed.routes.CODING_MEDIUM);
+	assert.deepEqual(options.map((o) => [o.index, o.paseoProvider, o.model, o.enabled]), [
+		[0, base.paseoProvider, base.model, true],
+		[1, "claude-peer", "claude-sonnet-5-5", true],
+		[2, "claude-peer", "claude-opus-5", false],
+	], "primary first, then alternates in file order; an option's own switch is kept");
+	assert.equal(routing.routeOptions(parsed.routes.FAST_READ).length, 1, "a class without alternates has exactly one option");
+	assert.deepEqual(routing.routeOptions(null), []);
+
+	const bad = (alternates) => {
+		const doc = structuredClone(validConfigData);
+		doc.routes.CODING_MEDIUM = { ...base, alternates };
+		expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(doc));
+	};
+	bad("claude-peer/x");
+	bad([5]);
+	bad([{ ...claudeAlt, paseoProvider: "nope" }]);
+	bad([{ ...claudeAlt, thinking: "minimal" }]); // pi-only level on a claude option
+	bad([{ ...claudeAlt, enabled: "no" }]);
+	bad([{ ...claudeAlt, model: " " }]);
+	bad([base]); // an exact repeat of the primary
+	bad([claudeAlt, claudeAlt]);
+	// every option of a class seats the same ROLE: a supervisor option in a peer class is refused
+	const supervisorAlt = { paseoProvider: "claude-supervisor", model: "claude-opus-5", thinking: "high" };
+	const peerClass = structuredClone(validConfigData);
+	peerClass.routes.FAST_READ = { ...peerClass.routes.FAST_READ, alternates: [supervisorAlt] };
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(peerClass));
+	// a governance class refuses a peer option too
+	const governance = structuredClone(validConfigData);
+	governance.routes.SUPERVISOR_GOVERNANCE = { paseoProvider: "pi-supervisor", model: "Mx/gov", thinking: "high", alternates: [claudeAlt] };
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(governance));
+
+	// resolveRoute resolves ONE option; a switched-off option is ROUTE_DISABLED, never the next one
+	const inv = {
+		providers: [{ provider: "claude-peer", enabled: "Enabled", status: "available" }, ...inventory.providers],
+		models: [...inventory.models, { id: "claude-sonnet-5-5", thinkingOptionIds: ["low", "medium", "high"] }],
+	};
+	const cfg = validateRoutingConfig(withAlt);
+	assert.equal(resolveRoute(cfg, "CODING_MEDIUM", inv, { option: 1 }).createAgentProvider, "claude-peer/claude-sonnet-5-5");
+	expectRoutingError("ROUTE_DISABLED", () => resolveRoute(cfg, "CODING_MEDIUM", inv, { option: 2 }));
+	expectRoutingError("HOST_ROUTE_UNAVAILABLE", () => resolveRoute(cfg, "CODING_MEDIUM", inv, { option: 9 }));
+	assert.equal(resolveRoute(cfg, "CODING_MEDIUM", inv).createAgentProvider.startsWith(base.paseoProvider), true, "default = the primary");
+
+	// the gate table marks the model switch on EACH option
+	const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = mkdtempSync(join(tmpdir(), "pteam-alt-"));
+	try {
+		withAlt.disabledModels = ["claude/claude-sonnet-5-5"];
+		writeFileSync(join(dir, "model-routing.local.json"), JSON.stringify(withAlt));
+		const table = routing.gateRouteTable({ env: { PST_TEAM_CONFIG_DIR: dir } });
+		assert.equal(table.routes.CODING_MEDIUM.alternates[0].modelDisabled, true);
+		assert.equal(table.routes.CODING_MEDIUM.alternates[1].modelDisabled, undefined);
+		assert.equal("modelDisabled" in table.routes.CODING_MEDIUM, false, "the primary's model is not off");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
 console.log("[paseo-team] model-routing tests passed");

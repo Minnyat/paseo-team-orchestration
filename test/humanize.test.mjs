@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
 	agentKindLabel,
 	degradedSentence,
+	compactTokens,
 	formatTokens,
 	humanizeError,
 	limitCell,
@@ -208,6 +209,12 @@ assert.equal(statusLabel("initializing"), "Đang khởi động");
 {
 	assert.equal(formatTokens(1050000), "1.050.000");
 	assert.equal(formatTokens(999), "999");
+	// Chips: a short size, the exact figure lives in the tooltip.
+	assert.equal(compactTokens(1000000), "1M");
+	assert.equal(compactTokens(1048576), "1.05M");
+	assert.equal(compactTokens(128000), "128K");
+	assert.equal(compactTokens(131072), "131.1K");
+	assert.equal(compactTokens(900), "900");
 	assert.equal(formatTokens(128000), "128.000");
 	assert.equal(UNKNOWN_LIMIT, "chưa biết (Pi tự dùng mặc định của nó)");
 	assert.doesNotMatch(UNKNOWN_LIMIT, /\d/, "unknown names no number: the page does not hard-code pi's defaults");

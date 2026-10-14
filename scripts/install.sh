@@ -58,6 +58,8 @@ TEAM_SUPPORT_FILES=(
   ocr-review.mjs
   remote-paseo.mjs
   model-routing.mjs
+  jobs.mjs
+  gate-table.mjs
   team-scripts-path.mjs
   # Claude Code side: the policy hook and the team-tools MCP server. Both are
   # spawned by Claude with an absolute path, so they must live in the durable

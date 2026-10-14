@@ -55,6 +55,7 @@ import {
 	modelsCacheKey,
 	resolveClusterRoute,
 	resolveRoute,
+	routeOptions,
 	validateRemoteEndpoint,
 	cmdPercentExpansionRisk,
 	MODEL_CLASSES,
@@ -657,11 +658,18 @@ function piModelLevelUnreachable(piProvider, modelId, level) {
 
 if (routing && daemonUp && !skipModels) {
 	for (const modelClass of classesToResolve(routing.routes)) {
-		const route = routing.routes[modelClass];
+	// Every option of the class is checked (0 = the primary, `route:CLASS#N` for the others).
+	for (const route of routeOptions(routing.routes[modelClass])) {
+		const optionId = route.index === 0 ? `route:${modelClass}` : `route:${modelClass}#${route.index}`;
+		if (route.enabled === false) {
+			// A deliberate switch-off, not a defect: never a FAIL, not even with --strict.
+			warn(optionId, `switched off (enabled: false) — not offered; pteam routing enable ${modelClass}${route.index === 0 ? "" : ` --option ${route.index}`}`);
+			continue;
+		}
 		const models = listModels(route.paseoProvider);
 		if (models === null) {
 			strictCheck(
-				`route:${modelClass}`,
+				optionId,
 				`could not list models for ${route.paseoProvider} (daemon busy?)${wantStrict ? " — strict: unverifiable is not a pass" : ""}`,
 			);
 			continue;
@@ -676,6 +684,7 @@ if (routing && daemonUp && !skipModels) {
 		try {
 			const resolved = resolveRoute(routing, modelClass, inventory, {
 				strict: wantStrict,
+				option: route.index,
 			});
 			// Per-model thinkingLevelMap guard (Paseo's list does not reflect it).
 			// Only for a family whose model ref carries its own provider segment
@@ -693,20 +702,21 @@ if (routing && daemonUp && !skipModels) {
 				);
 			if (clamped) {
 				strictCheck(
-					`route:${modelClass}`,
+					optionId,
 					`model ${route.model} has thinkingLevelMap.${route.thinking}=null in ${join(cw.agentDir(), "models.json")} — pi will CLAMP the level silently; pick a supported level or another model`,
 				);
 			} else {
 				pass(
-					`route:${modelClass}`,
+					optionId,
 					`${resolved.createAgentProvider} + thinking=${route.thinking}`,
 				);
 			}
 		} catch (error) {
 			if (error instanceof RoutingError)
-				fail(`route:${modelClass}`, error.message);
-			else fail(`route:${modelClass}`, String(error));
+				fail(optionId, error.message);
+			else fail(optionId, String(error));
 		}
+	}
 	}
 } else if (routing && skipModels) {
 	warn("routes", "model inventory checks skipped (--skip-models)");
@@ -955,11 +965,16 @@ function runRemotePreflight(hostId, host, endpointValue) {
 		...remoteProviders.values(),
 	]);
 	for (const modelClass of classesToResolve(host.routes)) {
-		const route = host.routes[modelClass];
+		for (const route of routeOptions(host.routes[modelClass])) {
+		const optionId = route.index === 0 ? `cluster-remote:${hostId}:route:${modelClass}` : `cluster-remote:${hostId}:route:${modelClass}#${route.index}`;
+		if (route.enabled === false) {
+			warn(optionId, `switched off (enabled: false) on host ${hostId}`);
+			continue;
+		}
 		const models = listModelsRemote(hostId, endpointValue, route.paseoProvider);
 		if (models === null) {
 			strictCheck(
-				`cluster-remote:${hostId}:route:${modelClass}`,
+				optionId,
 				`could not list models for ${route.paseoProvider} on remote`,
 			);
 			continue;
@@ -970,18 +985,19 @@ function runRemotePreflight(hostId, host, endpointValue) {
 				hostId,
 				modelClass,
 				{ providers: inventoryProviders, models },
-				{ strict: wantStrict },
+				{ strict: wantStrict, option: route.index },
 			);
 			pass(
-				`cluster-remote:${hostId}:route:${modelClass}`,
+				optionId,
 				resolved.createAgentProvider,
 			);
 		} catch (error) {
 			fail(
-				`cluster-remote:${hostId}:route:${modelClass}`,
+				optionId,
 				error instanceof RoutingError ? error.message : String(error),
 			);
 		}
+	}
 	}
 }
 
@@ -1097,11 +1113,16 @@ if (cluster) {
 		} else if (host.connection.type === "local" && daemonUp && !skipModels) {
 			// Local host: full route resolution against the live daemon, strict.
 			for (const modelClass of classesToResolve(host.routes)) {
-				const route = host.routes[modelClass];
+				for (const route of routeOptions(host.routes[modelClass])) {
+				const optionId = route.index === 0 ? `cluster-route:${verifyHostId}:${modelClass}` : `cluster-route:${verifyHostId}:${modelClass}#${route.index}`;
+				if (route.enabled === false) {
+					warn(optionId, "switched off (enabled: false)");
+					continue;
+				}
 				const models = listModels(route.paseoProvider);
 				if (models === null) {
 					strictCheck(
-						`cluster-route:${verifyHostId}:${modelClass}`,
+						optionId,
 						`could not list models for ${route.paseoProvider}`,
 					);
 					continue;
@@ -1116,19 +1137,20 @@ if (cluster) {
 						verifyHostId,
 						modelClass,
 						inventory,
-						{ strict: wantStrict },
+						{ strict: wantStrict, option: route.index },
 					);
 					pass(
-						`cluster-route:${verifyHostId}:${modelClass}`,
+						optionId,
 						resolved.createAgentProvider,
 					);
 				} catch (error) {
 					fail(
-						`cluster-route:${verifyHostId}:${modelClass}`,
+						optionId,
 						error instanceof RoutingError ? error.message : String(error),
 					);
 				}
 			}
+				}
 		} else if (host.connection.type === "remote") {
 			// Remote host: if the endpoint env is set AND the value passes a
 			// strict shape check, perform a LIVE remote preflight via the Paseo

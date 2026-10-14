@@ -176,7 +176,8 @@ runtime nhận một khối cảnh báo, preflight báo WARN (FAIL với `--stri
 Cổng phủ `create_agent` MCP, `update_agent` MCP và `team_fork`. Nó **không** phủ:
 
 1. **Lệnh `run` của `remote-paseo.mjs`** — tạo agent trên host remote qua Paseo
-   CLI `--host`; không đi qua MCP của daemon local nên hook không thấy nó.
+   CLI `--host`; không đi qua MCP của daemon local nên hook không thấy nó. Vì vậy nó cũng
+   **không** thấy công tắc `enabled` của route (nó nhận provider tường minh, không qua resolver).
 2. **Lead gọi thẳng `paseo` CLI từ bash** (tạo hay đổi agent với `--provider`
    tuỳ ý) — `callsPaseoCli` chỉ áp cho Peer. Có từ trước thay đổi này và nằm
    ngoài phạm vi của nó.
@@ -194,6 +195,7 @@ pteam routing show [--json]      # route hiệu lực theo lớp; đánh dấu l
 pteam routing check [--json]     # phần routing của preflight: schema + resolve strict với daemon
 pteam routing set <CLASS> --provider <role-provider> --model <id> --thinking <level> [--host-id <id>]
 pteam routing unset <CLASS> [--host-id <id>]   # chỉ SUPERVISOR_GOVERNANCE / LEAD_RECOVERY
+pteam routing enable|disable <CLASS> [--host-id <id>]   # công tắc nhanh, xem mục dưới
 ```
 
 `set` kiểm route mới bằng `resolveRoute` ở chế độ **strict** với inventory sống
@@ -205,6 +207,92 @@ cổng đọc. `--host-id <id>`: sửa host đó trong `cluster-routing.local.js
 host đó, hoặc sửa file rồi `pteam preflight --strict --host-id <id>`. Thư mục
 cấu hình theo cùng biến ghi đè với các lệnh khác (`PST_TEAM_CONFIG_DIR` /
 `PASEO_TEAM_HOME`).
+
+## Công tắc nhanh — tắt/bật một lớp, có hiệu lực ngay
+
+```bash
+pteam routing disable <CLASS> [--host-id <id>]   # route.enabled = false
+pteam routing enable  <CLASS> [--host-id <id>]   # bỏ khoá enabled
+```
+
+Hoặc bật/tắt trong WebUI → Cấu hình → Định tuyến mô hình → "Công tắc nhanh" (cùng
+đường ghi, cùng validator, cùng bản sao lưu với nút Lưu).
+
+- Route tắt **vẫn giữ nguyên model và thinking** (bật lại là trở về đúng như cũ) và
+  file vẫn hợp lệ — kể cả lớp bắt buộc.
+- Cổng từ chối **mọi** lần dựng theo lớp đó — `create_agent`, `update_agent` đổi
+  model/thinking, `team_fork` — bằng `BLOCKED: ROUTE_CLASS_DISABLED`, kèm lệnh
+  `pteam routing enable <CLASS>`. **Không có fallback**: không sang lớp khác, không sang
+  model khác (đúng nguyên tắc cả repo này tồn tại để giữ).
+- `resolveRoute` ném `ROUTE_DISABLED`; preflight / `routing check` báo **WARN** (không
+  FAIL, kể cả `--strict`: tắt là chủ ý, không phải lỗi). `routing set` đổi model của một
+  lớp đang tắt vẫn giữ nó tắt.
+- Agent **đang chạy** giữ nguyên model của nó; công tắc chỉ chặn lần dựng/đổi kế tiếp.
+
+### Nhiều model cho một việc, tắt model hết tiền, nạp lại trước khi dựng
+
+- **Job seating.** `create_agent` kèm `labels["team.job"]="<id>"` → cổng chấp nhận
+  provider/model/thinking của **một executor đang bật của job đó** thay vì route duy
+  nhất của lớp. Nhãn `team.model-class` vẫn bắt buộc và vẫn quyết định luồng (Peer
+  không mượn lớp governance). Mã: `ROUTE_JOB_UNKNOWN`, `ROUTE_JOB_INACTIVE`,
+  `ROUTE_JOB_EXECUTOR_MISMATCH` (kèm danh sách executor dùng được), `ROUTE_JOB_UNAVAILABLE`
+  (file jobs hỏng — chỉ chặn seating có nhãn job), `ROUTE_JOB_IMMUTABLE`,
+  `ROUTE_JOB_SEAT_FIXED` (update_agent đổi model của ghế job). `team_fork` chưa nhận job.
+  Executor kiểu route phải có `thinking` mới dựng được; executor `cli` không phải ghế.
+- **Tắt model.** `pteam routing disable-model|enable-model <họ>/<model>` — `disabledModels` trong
+  file route mà cổng đọc (theo từng host trong file cluster). Lớp route trên model đó:
+  `ROUTE_MODEL_DISABLED`; executor job trên model đó bị bỏ qua. Không đổi sang model khác.
+  `*` ở cuối khoá: `pi/Minnyat/*` (cả endpoint), `pi/*` (cả công cụ).
+- **Nạp lại.** `pteam jobs resolve <id>` in đúng tham số `create_agent` cho từng executor
+  dùng được ngay lúc này. Lead/Supervisor nhận khối "Routing now" (Pi: mỗi lượt; Claude: lúc
+  bắt đầu phiên và mỗi khi file đổi), và mọi lời từ chối của cổng kèm danh sách còn dùng được.
+- **Không phủ:** ghế đang chạy giữ model cũ (sẽ lỗi — dựng ghế thay thế); Lead do Human tự
+  khởi động và `defaultModel` của Pi; tắt công cụ CLI chỉ ẩn khỏi job; `remote-paseo.mjs run`.
+
+### Cái gì có hiệu lực ngay, cái gì không
+
+| Thay đổi | Khi nào có hiệu lực |
+|---|---|
+| Route (`model-routing` / `cluster-routing`), công tắc `enabled` và `disabledModels` | **Ngay.** Adapter Pi chạy `gate-routes` mỗi lần `create_agent`, hook Claude là một tiến trình mới mỗi lời gọi; không có cache. |
+| Job, executor, `disabledTools` trong `jobs.local.json` | **Ngay.** `pteam jobs list/show` đọc file mỗi lần. |
+| `~/.paseo/config.json` (provider Paseo) | Cần `paseo daemon restart`. |
+| `~/.pi/agent/models.json` | Cần "Nạp lại cho Paseo" (`pteam models refresh`). |
+| Pi `settings.json` (tools mặc định, retry…), MCP | Từ phiên agent kế tiếp. |
+
+Một lớp việc có thể có **nhiều tool + model** (`alternates`, xem mục dưới); một *việc*
+dùng nhiều model/công cụ cùng lúc thì dùng **job** (README → "Job presets"). Không có
+danh sách "thử cái kế khi cái trước hỏng": đó là silent fallback — Lead tự chọn.
+
+### Một lớp, nhiều tool + model (`alternates`)
+
+```json
+"CODING_MEDIUM": {
+  "paseoProvider": "pi-peer", "model": "Minnyat/gpt-5.6-terra", "thinking": "medium",
+  "alternates": [
+    { "paseoProvider": "claude-peer", "model": "claude-sonnet-5-5", "thinking": "medium" },
+    { "paseoProvider": "pi-peer", "model": "Minnyat/deepseek-v4.1", "thinking": "high", "enabled": false }
+  ]
+}
+```
+
+- Các trường ở cấp route là lựa chọn **0** (chính); `alternates` là các lựa chọn khác của
+  **cùng một lớp** — cùng **vai trò** (Peer vẫn là Peer), khác tool (pi/claude) hoặc khác
+  model, mỗi cái có `enabled` riêng. Trùng hệt một lựa chọn đã có bị từ chối. File cũ (không
+  có `alternates`) giữ nguyên nghĩa.
+- **Lead chọn MỘT lựa chọn đang bật** cho mỗi agent và ghi đúng provider/model/thinking của
+  nó; cổng chỉ kiểm lựa chọn đó có nằm trong danh sách đang bật (cùng họ + vai trò với ghế).
+  Không có gì tự chọn thay Lead: `team_fork` không nêu model mà có ≥2 lựa chọn dùng được →
+  `ROUTE_OPTION_AMBIGUOUS`; `update_agent` chỉ được chuyển sang lựa chọn khác của lớp.
+- **Công tắc:** `pteam routing disable|enable <CLASS>` đổi cả lớp (mọi lựa chọn);
+  `--option N` đổi một lựa chọn (0 = chính). `disable-model` tắt mọi lựa chọn dùng model đó.
+  Lớp chỉ bị từ chối (`ROUTE_CLASS_DISABLED` / `ROUTE_MODEL_DISABLED`) khi **không còn lựa
+  chọn nào** dùng được; còn lựa chọn thì lời từ chối của lựa chọn kia liệt kê những cái còn lại.
+- **Sửa:** `pteam routing add-option <CLASS> --provider … --model … --thinking …` (kiểm tra
+  với daemon thật như `set`), `remove-option <CLASS> <N>`; `set` đổi lựa chọn chính và **giữ**
+  các lựa chọn khác. `routing show` liệt kê từng lựa chọn (`#N`), `routing check` / preflight
+  kiểm từng cái (`route:CLASS#N`).
+- Job: một executor kiểu `class` cho **mọi** lựa chọn đang bật của lớp đó là các ghế khả dĩ
+  (`pteam jobs resolve` ghi `pickOne` — chọn MỘT).
 
 ## Chu trình bắt buộc của Lead (13 bước)
 
@@ -283,6 +371,7 @@ THINKING_OPTION_UNAVAILABLE    thinking level model không offer, HOẶC model
 STARTUP_IDENTITY_UNAVAILABLE   runtimeInfo chưa xuất hiện trong startup timeout
 MODEL_RESOLUTION_MISMATCH      observed runtime identity ≠ requested
 HOST_ROUTE_UNAVAILABLE         class không có route trên host này
+ROUTE_DISABLED                 route của class đang bị tắt (resolveRoute; preflight chỉ WARN)
 ```
 
 Mã từ chối của cổng `create_agent` (tiền tố `BLOCKED:`):
@@ -294,6 +383,7 @@ ROUTE_CLASS_WRONG_FLOW         lớp không thuộc vai trò ghế (vd. Lead d�
 ROUTE_CLASS_IMMUTABLE          update_agent định đổi nhãn team.model-class của một ghế
 ROUTE_TARGET_UNREADABLE        không đọc được state của agent mà update_agent nhắm tới
 ROUTE_CLASS_UNCONFIGURED       lớp (thường là lớp tuỳ chọn) chưa có route trên host
+ROUTE_CLASS_DISABLED           route của lớp đang bị tắt (enabled: false) — `pteam routing enable`
 ROUTE_TABLE_UNAVAILABLE        route file thiếu / sai / mơ hồ — fail-closed
 ROUTE_UNVERIFIABLE             không nạp được route table
 ROUTE_PROVIDER_UNKNOWN         provider không phải role provider

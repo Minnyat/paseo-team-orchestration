@@ -4,89 +4,109 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Bảng điều khiển nhóm agent</title>
-			<link rel="stylesheet" href="/style.css" />
+		<meta name="color-scheme" content="dark" />
+		<meta name="description" content="Theo dõi nhóm agent, duyệt yêu cầu và quản lý cấu hình Paseo Team." />
+		<link rel="stylesheet" href="/style.css" />
 	</head>
 	<body>
+		<a class="skip-link" href="#main-content" data-i18n="skipToContent">Đến nội dung chính</a>
 		<header class="topbar">
-			<div class="brand">Paseo Team</div>
-			<nav id="tabs" aria-label="Điều hướng chính">
-				<button data-tab="home" class="active">Trang chủ</button>
-				<button data-tab="graph">Nhóm agent</button>
+			<div class="brand"><span class="brand-mark" aria-hidden="true">p.</span><span>Paseo Team<span class="brand-caption" data-i18n="brandCaption">Không gian điều phối</span></span></div>
+			<nav id="tabs" aria-label="Điều hướng chính" data-i18n-aria="navAria">
+				<button data-tab="home" class="active" data-i18n="navHome">Trang chủ</button>
+				<button data-tab="graph" data-i18n="navGraph">Nhóm agent</button>
 				<button data-tab="permissions">
-					Chờ duyệt<span id="permit-badge" class="badge hidden">0</span>
+					<span data-i18n="navPermits">Chờ duyệt</span><span id="permit-badge" class="badge hidden">0</span>
 				</button>
-				<button data-tab="roles" data-advanced>Vai trò</button>
-				<button data-tab="config" data-advanced>Cấu hình</button>
+				<button data-tab="roles" data-advanced data-i18n="navRoles">Vai trò</button>
+				<button data-tab="config" data-advanced data-i18n="navConfig">Cấu hình</button>
 			</nav>
 			<div class="status">
-				<label class="switch" title="Chế độ nâng cao hiện thêm phần chỉnh cấu hình và mô tả vai trò">
+				<div class="lang-switch" role="group" aria-label="Ngôn ngữ / Language">
+					<button id="lang-vi" type="button" class="active" aria-pressed="true" title="Tiếng Việt">VI</button>
+					<button id="lang-en" type="button" aria-pressed="false" title="English">EN</button>
+				</div>
+				<label class="switch" title="Chế độ nâng cao hiện thêm phần chỉnh cấu hình và mô tả vai trò" data-i18n-title="advancedTitle">
 					<input type="checkbox" id="advanced-toggle" />
-					<span>Chế độ nâng cao</span>
+					<span data-i18n="advanced">Chế độ nâng cao</span>
 				</label>
 				<span id="conn" class="conn">đang kết nối…</span>
 			</div>
 		</header>
 
-		<main>
+		<main id="main-content" tabindex="-1">
 			<!-- ------------------------------------------------------------ -->
-			<section id="tab-home" class="tab active">
+			<section id="tab-home" class="tab active" aria-labelledby="home-title">
+				<div class="page-heading"><div><h1 id="home-title" data-i18n="homeTitle">Tổng quan</h1><p data-i18n="homeSub">Nắm tình hình nhóm. Tập trung vào việc cần bạn quyết định.</p></div><span class="workspace-label" data-i18n="workspaceLabel">Paseo / Không gian làm việc</span></div>
 				<div id="health" class="health">
 					<div class="health-icon" id="health-icon">…</div>
 					<div class="health-text">
-						<h1 id="health-headline">Đang kiểm tra hệ thống…</h1>
+						<h2 id="health-headline">Đang kiểm tra hệ thống…</h2>
 						<p id="health-detail">Việc này mất khoảng vài giây.</p>
 					</div>
 					<div class="health-actions" id="health-actions"></div>
 				</div>
 
 				<div class="grid">
-					<button type="button" class="card stat" data-goto="graph" title="Agent đang thực sự chạy ngay lúc này. Bấm để xem.">
-						<h2>Đang làm việc</h2>
+					<button type="button" class="card stat" data-goto="graph" title="Agent đang thực sự chạy ngay lúc này. Bấm để xem." data-i18n-title="statRunningTitle">
+						<h2 data-i18n="statRunning">Đang làm việc</h2>
 						<div class="stat-value" id="stat-running">–</div>
+						<span class="stat-caption"><span class="stat-dot running" aria-hidden="true"></span><span data-i18n="statRunningCaption">Agent đang thực hiện công việc</span></span>
 					</button>
-					<button type="button" class="card stat" data-goto="graph" title="Agent dừng giữa chừng, cần xem lại. Bấm để xem.">
-						<h2>Gặp lỗi</h2>
+					<button type="button" class="card stat" data-goto="graph" title="Agent dừng giữa chừng, cần xem lại. Bấm để xem." data-i18n-title="statErrorsTitle">
+						<h2 data-i18n="statErrors">Gặp lỗi</h2>
 						<div class="stat-value" id="stat-errors">–</div>
+						<span class="stat-caption"><span class="stat-dot error" aria-hidden="true"></span><span data-i18n="statErrorsCaption">Cần kiểm tra và xử lý</span></span>
 					</button>
-					<button type="button" class="card stat" data-goto="graph" title="Gồm cả agent đang rảnh. Bấm để xem.">
-						<h2>Tổng số agent</h2>
+					<button type="button" class="card stat" data-goto="graph" title="Gồm cả agent đang rảnh. Bấm để xem." data-i18n-title="statTotalTitle">
+						<h2 data-i18n="statTotal">Tổng số agent</h2>
 						<div class="stat-value" id="stat-total">–</div>
+						<span class="stat-caption" data-i18n="statTotalCaption">Xem toàn bộ nhóm agent</span>
 					</button>
 				</div>
 
+				<div class="overview-guide">
+					<div><h2 data-i18n="guideTitle">Điều phối, không cần theo sát từng bước.</h2><p data-i18n="guideSub">Xem ai đang làm gì trong nhóm và phản hồi khi agent cần quyền thực hiện hành động.</p></div>
+					<div class="overview-links">
+						<button type="button" data-goto="graph"><span data-i18n="guideGraph">Xem nhóm agent</span><span aria-hidden="true">↗</span></button>
+						<button type="button" data-goto="permissions"><span data-i18n="guidePermits">Kiểm tra yêu cầu chờ duyệt</span><span aria-hidden="true">↗</span></button>
+					</div>
+				</div>
+
 				<article class="card" id="setup-card">
-					<h2>Tình trạng cài đặt</h2>
-					<div id="setup-body" class="body">Đang kiểm tra…</div>
+					<h2 data-i18n="setupTitle">Tình trạng cài đặt</h2>
+					<div id="setup-body" class="body" data-i18n="checking">Đang kiểm tra…</div>
 				</article>
 
 				<details class="tech" data-advanced>
-					<summary>Kiểm tra kỹ thuật (preflight)</summary>
+					<summary data-i18n="preflightTitle">Kiểm tra kỹ thuật (preflight)</summary>
 					<div class="toolbar">
-						<button id="preflight-run">Chạy kiểm tra</button>
-						<span class="meta">Mất khoảng 30 giây vì phải hỏi từng nhà cung cấp mô hình.</span>
+						<button id="preflight-run" data-i18n="preflightRun">Chạy kiểm tra</button>
+						<span class="meta" data-i18n="preflightMeta">Mất khoảng 30 giây vì phải hỏi từng nhà cung cấp mô hình.</span>
 					</div>
-					<div id="preflight-body" class="body">Chưa chạy lần nào.</div>
+					<div id="preflight-body" class="body" data-i18n="preflightIdle">Chưa chạy lần nào.</div>
 				</details>
 			</section>
 
 			<!-- ------------------------------------------------------------ -->
-			<section id="tab-graph" class="tab">
+			<section id="tab-graph" class="tab" aria-labelledby="graph-title">
+				<div class="page-heading"><div><h1 id="graph-title" data-i18n="graphTitle">Nhóm agent</h1><p data-i18n="graphSub">Theo dõi phân công, tiến độ và mối liên hệ trong nhóm.</p></div></div>
 				<div class="toolbar">
-					<div class="segmented" role="group" aria-label="Kiểu hiển thị">
-						<button id="view-diagram" class="active">Sơ đồ</button>
-						<button id="view-list">Danh sách</button>
+					<div class="segmented" role="group" aria-label="Kiểu hiển thị" data-i18n-aria="viewTypeAria">
+						<button id="view-diagram" class="active" data-i18n="viewDiagram">Sơ đồ</button>
+						<button id="view-list" data-i18n="viewList">Danh sách</button>
 					</div>
-					<button id="graph-refresh">Cập nhật</button>
+					<button id="graph-refresh" data-i18n="refresh">Cập nhật</button>
 					<label class="check" data-advanced>
-						<input type="checkbox" id="graph-all" /> Hiện cả agent đã lưu trữ
+						<input type="checkbox" id="graph-all" /> <span data-i18n="graphShowArchived">Hiện cả agent đã lưu trữ</span>
 					</label>
 					<label class="check hidden" id="graph-project-wrap">
-						Dự án
-						<select id="graph-project"><option value="">tất cả</option></select>
+						<span data-i18n="project">Dự án</span>
+						<select id="graph-project"><option value="" data-i18n="all">tất cả</option></select>
 					</label>
 					<label class="check" data-advanced>
-						Phạm vi quản (domain)
-						<select id="graph-domain"><option value="">tất cả</option></select>
+						<span data-i18n="domain">Phạm vi quản (domain)</span>
+						<select id="graph-domain"><option value="" data-i18n="all">tất cả</option></select>
 					</label>
 					<span id="graph-meta" class="meta"></span>
 				</div>
@@ -94,9 +114,9 @@
 				<p class="lead-in" id="graph-hint"></p>
 
 				<div class="graph-wrap" id="diagram-wrap">
-					<svg id="graph" role="img" aria-label="Sơ đồ ai giao việc cho ai"></svg>
-					<aside id="node-drawer" class="drawer hidden" aria-label="Chi tiết agent">
-						<button id="drawer-close" class="close" aria-label="Đóng">×</button>
+					<svg id="graph" role="img" aria-label="Sơ đồ ai giao việc cho ai" data-i18n-aria="graphAria"></svg>
+					<aside id="node-drawer" class="drawer hidden" aria-label="Chi tiết agent" data-i18n-aria="agentDetailAria">
+						<button id="drawer-close" class="close" aria-label="Đóng" data-i18n-aria="close">×</button>
 						<div id="drawer-body"></div>
 					</aside>
 				</div>
@@ -120,34 +140,36 @@
 			</section>
 
 			<!-- ------------------------------------------------------------ -->
-			<section id="tab-permissions" class="tab">
+			<section id="tab-permissions" class="tab" aria-labelledby="permissions-title">
+				<div class="page-heading"><div><h1 id="permissions-title" data-i18n="permitsTitle">Yêu cầu chờ duyệt</h1><p data-i18n="permitsSub">Bạn quyết định hành động nào được tiếp tục. Kiểm tra nội dung trước khi cấp quyền.</p></div></div>
 				<div class="toolbar">
-					<button id="permits-refresh">Cập nhật</button>
-					<span class="meta">Mỗi thẻ là một agent đang dừng lại chờ bạn trả lời.</span>
+					<button id="permits-refresh" data-i18n="refresh">Cập nhật</button>
+					<span class="meta" data-i18n="permitsMeta">Mỗi thẻ là một agent đang dừng lại chờ bạn trả lời.</span>
 				</div>
-				<div id="permits-body" class="body">Đang tải…</div>
-				<p class="footnote" data-advanced>
+				<div id="permits-body" class="body" data-i18n="loading">Đang tải…</div>
+				<p class="footnote" data-advanced data-i18n="permitsFootnote">
 					Đây là quyền cho <em>một hành động cụ thể, ngay lúc này</em>. Quyền chung
 					của từng vai trò nằm ở tab “Vai trò”.
 				</p>
 			</section>
 
 			<!-- ------------------------------------------------------------ -->
-			<section id="tab-roles" class="tab">
+			<section id="tab-roles" class="tab" aria-labelledby="roles-title">
+				<div class="page-heading"><div><h1 id="roles-title" data-i18n="rolesTitle">Vai trò & trách nhiệm</h1><p data-i18n="rolesSub">Định nghĩa cách mỗi agent làm việc và phối hợp với nhóm.</p></div></div>
 				<div class="toolbar">
-					<select id="role-select" aria-label="Chọn vai trò">
-						<option value="supervisor">Giám sát</option>
-						<option value="lead">Trưởng nhóm</option>
-						<option value="peer">Thành viên</option>
+					<select id="role-select" aria-label="Chọn vai trò" data-i18n-aria="roleSelectAria">
+						<option value="supervisor" data-i18n="roleSupervisor">Giám sát</option>
+						<option value="lead" data-i18n="roleLead">Trưởng nhóm</option>
+						<option value="peer" data-i18n="rolePeer">Thành viên</option>
 					</select>
-					<button id="prompt-load">Tải lại</button>
-					<button id="prompt-save" class="primary">Lưu</button>
+					<button id="prompt-load" data-i18n="reload">Tải lại</button>
+					<button id="prompt-save" class="primary" data-i18n="save">Lưu</button>
 					<span id="prompt-meta" class="meta"></span>
 				</div>
 				<p class="lead-in" id="role-hint"></p>
-				<textarea id="prompt-editor" spellcheck="false" aria-label="Mô tả vai trò"></textarea>
+				<textarea id="prompt-editor" spellcheck="false" aria-label="Mô tả vai trò" data-i18n-aria="roleEditorAria"></textarea>
 				<details class="card" id="env-card">
-					<summary>Quyền chung của vai trò (chỉ xem)</summary>
+					<summary data-i18n="envCardTitle">Quyền chung của vai trò (chỉ xem)</summary>
 					<div class="body">
 						<p class="hint">
 							Đây là những gì một vai trò được phép làm nói chung. Nó do file
@@ -160,40 +182,78 @@
 			</section>
 
 			<!-- ------------------------------------------------------------ -->
-			<section id="tab-config" class="tab">
-				<div class="notice warn">
-					Phần này sửa trực tiếp file cấu hình. Mỗi lần lưu đều tạo bản sao lưu
-					kèm thời gian, nhưng nếu không chắc thì đừng sửa.
-				</div>
-				<div class="toolbar">
-					<select id="config-section" aria-label="Chọn nhóm cấu hình">
-						<option value="pi-settings">Pi — cấu hình chính</option>
-						<option value="mcp">Pi — công cụ MCP</option>
-						<option value="providers">Paseo — nhà cung cấp</option>
-						<option value="routing">Định tuyến mô hình</option>
-						<option value="cluster">Nhiều máy (cluster)</option>
-						<option value="pi-models">Kho model Pi</option>
-						<option value="seats">Ghế tuỳ biến</option>
-						<option value="jobs">Công việc</option>
-					</select>
-					<div class="segmented" role="group" aria-label="Kiểu chỉnh">
-						<button id="config-mode-form" class="active" type="button">Form</button>
-						<button id="config-mode-raw" type="button">JSON thô</button>
+				<section id="tab-config" class="tab" aria-labelledby="config-title">
+					<div class="page-heading"><div><h1 id="config-title" data-i18n="configTitle">Cấu hình không gian làm việc</h1><p data-i18n="configSub">Quản lý mô hình, công cụ và cách công việc được phân phối.</p></div></div>
+					<div class="toolbar cfg-bar" id="config-bar">
+						<select id="config-section" aria-label="Chọn nhóm cấu hình" data-i18n-aria="sectionSelectAria">
+							<option value="pi-settings" data-i18n="secPiSettings">Pi — cấu hình chính</option>
+							<option value="mcp" data-i18n="secMcp">Pi — công cụ MCP</option>
+							<option value="providers" data-i18n="secProviders">Paseo — nhà cung cấp</option>
+							<option value="routing" data-i18n="secRouting">Định tuyến mô hình</option>
+							<option value="cluster" data-i18n="secCluster">Nhiều máy (cluster)</option>
+							<option value="pi-models" data-i18n="secPiModels">Kho model Pi</option>
+							<option value="seats" data-i18n="secSeats">Ghế tuỳ biến</option>
+							<option value="jobs" data-i18n="secJobs">Công việc</option>
+						</select>
+						<div class="segmented" role="group" aria-label="Kiểu chỉnh" data-i18n-aria="editModeAria">
+							<button id="config-mode-form" class="active" type="button" data-i18n="formMode">Form</button>
+							<button id="config-mode-raw" type="button" data-i18n="rawJson">JSON thô</button>
+						</div>
+						<button id="config-load" data-i18n="reload">Tải lại</button>
+						<button id="seats-apply" class="hidden" title="Sinh provider Paseo từ danh sách ghế đã lưu" data-i18n-title="seatsApplyTitle" data-i18n="seatsApply">Áp dụng ghế</button>
+						<button id="config-save" class="primary cfg-save" data-i18n="save">Lưu</button>
+						<span id="config-meta" class="meta cfg-path"></span>
 					</div>
-					<button id="config-load">Tải lại</button>
-					<button id="config-save" class="primary">Lưu</button>
-					<button id="seats-apply" class="hidden" title="Sinh provider Paseo từ danh sách ghế đã lưu">Áp dụng ghế</button>
-					<span id="config-meta" class="meta"></span>
-				</div>
-				<p class="lead-in" id="config-intro"></p>
-				<div id="config-presets" class="presets"></div>
-				<div id="config-actions" class="cfg-actions hidden"></div>
-				<div id="config-form" aria-live="polite"></div>
-				<div id="config-raw" class="hidden">
-					<textarea id="config-editor" spellcheck="false" aria-label="Nội dung cấu hình"></textarea>
-				</div>
-			</section>
+					<p class="notice warn cfg-warn" data-i18n="configWarn">
+						Phần này sửa trực tiếp file cấu hình. Mỗi lần lưu đều tạo bản sao lưu
+						kèm thời gian, nhưng nếu không chắc thì đừng sửa.
+					</p>
+					<p class="lead-in" id="config-intro"></p>
+					<div id="config-presets" class="presets"></div>
+					<section id="config-quick" class="quick hidden" aria-live="polite"></section>
+					<section id="config-catalog" class="model-catalog hidden" aria-label="Model đang dùng" data-i18n-aria="catalogAria" aria-live="polite"></section>
+					<div id="config-actions" class="cfg-actions hidden"></div>
+					<div id="config-form" aria-live="polite"></div>
+					<div id="config-raw" class="hidden">
+						<textarea id="config-editor" spellcheck="false" aria-label="Nội dung cấu hình" data-i18n-aria="configEditorAria"></textarea>
+					</div>
+				</section>
 		</main>
+
+		<dialog id="model-modal" class="modal" aria-labelledby="model-modal-title">
+			<div class="modal-panel">
+				<div class="modal-head">
+					<div>
+						<h2 id="model-modal-title"></h2>
+						<p class="modal-sub" id="model-modal-sub"></p>
+					</div>
+					<button type="button" class="close" id="model-modal-close" aria-label="Đóng" data-i18n-aria="close">×</button>
+				</div>
+				<div class="modal-body">
+					<div class="modal-field" id="mm-pick-wrap"><span data-i18n="pickModel">Chọn model có sẵn</span><select id="mm-pick"></select></div>
+					<div class="modal-current" id="mm-current"></div>
+					<label class="modal-field" id="mm-id-wrap"><span data-i18n="modelId">Model ID</span><input id="mm-id" type="text" autocomplete="off" spellcheck="false" /></label>
+					<label class="modal-field"><span data-i18n="displayName">Tên hiển thị</span><input id="mm-name" type="text" autocomplete="off" /></label>
+					<div class="modal-grid">
+						<label class="modal-field"><span data-i18n="contextWindow">Cửa sổ ngữ cảnh</span><input id="mm-context" type="number" min="1" step="1" /></label>
+						<label class="modal-field"><span data-i18n="maxTokens">Token đầu ra tối đa</span><input id="mm-max" type="number" min="1" step="1" /></label>
+					</div>
+					<div class="modal-grid">
+						<label class="modal-field"><span data-i18n="reasoning">Suy luận</span><select id="mm-reasoning"></select></label>
+						<label class="modal-field"><span data-i18n="inputModalities">Đầu vào</span><select id="mm-input"></select></label>
+					</div>
+					<label class="modal-field"><span data-i18n="discovery">Nguồn model</span><select id="mm-include"></select></label>
+					<p class="modal-hint" data-i18n="modalHint">Các lựa chọn “Tự động” bỏ ghi đè và quay về mặc định.</p>
+					<p class="modal-error" id="mm-error" role="alert"></p>
+				</div>
+				<div class="modal-foot">
+					<button type="button" id="mm-remove" class="danger hidden" data-i18n="removeOverride">Xoá cấu hình này</button>
+					<span class="spacer"></span>
+					<button type="button" id="mm-cancel" data-i18n="cancel">Hủy</button>
+					<button type="button" id="mm-apply" class="primary" data-i18n="apply">Áp dụng</button>
+				</div>
+			</div>
+		</dialog>
 
 		<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 		<script type="module" src="/app.js"></script>
