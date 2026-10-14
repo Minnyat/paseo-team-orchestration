@@ -84,7 +84,7 @@ No: a class had exactly one route, so "one class, several tools/models" did not 
 - I destroyed the first half of scripts/jobs.mjs with a bad Python slice mid-task and rebuilt it from HEAD plus the edits of this session; the full suite (358 tests) passes, but that file deserves a read in review.
 
 ## Not done / limits
-- The installed copies are STALE (installDrift: 10 files changed, jobs.mjs and gate-table.mjs missing): running agents still use the old gate, so none of the switches/options bind a real Lead until `pteam install` + a new session. NOT run: the user said "if the version was bumped"; package.json is still 3.10.0, so the condition is not met (asked, not assumed).
+- The installed copies are STALE (installDrift: 10 files changed, jobs.mjs and gate-table.mjs missing): running agents still use the old gate, so none of the switches/options bind a real Lead until `pteam install` + a new session. NOT run: the user said "if the version was bumped"; bumped to 3.11.0 afterwards and installed on the user's request.
 - A class option is a Paseo-seatable runtime (pi, claude); CLI tools like codex stay job-only.
 - Other config sections' labels remain Vietnamese-only.
 
