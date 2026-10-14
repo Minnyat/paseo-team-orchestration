@@ -91,8 +91,36 @@ export function normalizeConfig(doc) {
 		: (source.providers && typeof source.providers === "object" ? source.providers : {});
 	const entries = Object.entries(raw)
 		.filter(([name, value]) => typeof name === "string" && name.trim() !== "" && value && typeof value === "object")
-		.map(([name, value]) => ({ ...DEFAULT_CONFIG, ...value, name: name.trim() }));
+		.map(([name, value]) => {
+			const models = normalizeCompatFlags(value.models);
+			return { ...DEFAULT_CONFIG, ...value, name: name.trim(), ...(models !== undefined ? { models } : {}) };
+		});
 	return { entries, legacy };
+}
+
+/**
+ * The WebUI edits a per-model `compat` as a kv control, whose values are
+ * strings — but pi's compat flags are booleans ("supportsDeveloperRole"), so a
+ * "false" that stayed a string would be truthy at the far end and flip the
+ * flag the wrong way round. Coerce exactly "true"/"false" here, where every
+ * reader (sync, CLI, WebUI validator) funnels through normalizeConfig; any
+ * other string ("deepseek" for thinkingFormat) passes through verbatim.
+ */
+function normalizeCompatFlags(models) {
+	if (!models || typeof models !== "object" || Array.isArray(models)) return models;
+	const next = {};
+	for (const [id, override] of Object.entries(models)) {
+		const compat = override && typeof override === "object" && !Array.isArray(override) && override.compat && typeof override.compat === "object" && !Array.isArray(override.compat)
+			? Object.fromEntries(
+					Object.entries(override.compat).map(([key, flag]) => [
+						key,
+						flag === "true" ? true : flag === "false" ? false : flag,
+					]),
+				)
+			: undefined;
+		next[id] = compat ? { ...override, compat } : override;
+	}
+	return next;
 }
 
 /** A host whose traffic never leaves the machine. */
@@ -299,6 +327,9 @@ async function pool(items, limit, fn) {
  */
 export function buildModelEntry(id, reasoning, limits = {}, override = {}) {
 	reasoning = typeof override.reasoning === "boolean" ? override.reasoning : reasoning;
+	const compat = override.compat && typeof override.compat === "object" && !Array.isArray(override.compat) && Object.keys(override.compat).length > 0
+		? { ...override.compat }
+		: undefined;
 	return {
 		id,
 		name: override.name ?? id,
@@ -308,6 +339,14 @@ export function buildModelEntry(id, reasoning, limits = {}, override = {}) {
 		input: override.input ?? ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		...(reasoning ? { thinkingLevelMap: { ...THINKING_LEVEL_MAP } } : {}),
+		// Written only when the sync config asks for it: compat flags pi merges
+		// over what it auto-detects from the baseUrl. The case that earned this:
+		// a reasoning model behind a generic OpenAI proxy gets
+		// supportsDeveloperRole=true, so the system prompt goes out as role
+		// "developer" and a vLLM-style backend rejects the whole request with a
+		// 422. Without this key the flag lives only in a hand-edited models.json
+		// that the next sync rebuilds away.
+		...(compat ? { compat } : {}),
 	};
 }
 
