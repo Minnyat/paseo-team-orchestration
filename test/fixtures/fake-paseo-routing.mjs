@@ -7,9 +7,20 @@
 // A missing file or provider answers the way the real CLI does when the daemon
 // is down or the provider is unknown, so the refusal paths are exercised too.
 
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 const argv = process.argv.slice(2).filter((part) => part !== "--json");
+
+// When FAKE_PASEO_LOG names a file, every invocation appends one JSON line,
+// so a test can assert HOW MANY times the daemon was asked (and for which
+// provider) — the contract `pteam routing check` deduplication is pinned by.
+if (process.env.FAKE_PASEO_LOG) {
+	try {
+		appendFileSync(process.env.FAKE_PASEO_LOG, `${JSON.stringify({ argv })}\n`);
+	} catch {
+		/* a test that cannot log its calls still gets its answers */
+	}
+}
 const fail = (message) => {
 	process.stderr.write(`${message}\n`);
 	process.exit(1);

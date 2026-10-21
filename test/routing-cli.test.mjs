@@ -170,6 +170,65 @@ test("check: resolves every configured class strictly against the live inventory
 	assert.match(bad.stdout, /routing: FAILED/);
 });
 
+test("check: one inventory read per DISTINCT provider, not one per option", () => {
+	// Seven enabled options across three providers (CODING_MEDIUM carries two
+	// alternates). The old behavior paid two paseo spawns PER OPTION and ran
+	// them one after another — ~38s on the reference host; the contract pinned
+	// here is one `provider ls` plus one `provider models` per distinct
+	// provider, with the answers, the check rows and their order unchanged.
+	const routing = {
+		version: 1,
+		hostId: "dedup",
+		routes: {
+			...BASE_ROUTES,
+			CODING_MEDIUM: {
+				...BASE_ROUTES.CODING_MEDIUM,
+				alternates: [
+					{ paseoProvider: "pi-peer", model: "Mx/cheap", thinking: "low" },
+					{ paseoProvider: "claude-peer", model: "claude-opus-5", thinking: "high" },
+				],
+			},
+		},
+	};
+	const h = host({ routing });
+	const logPath = join(h.dir, "paseo-calls.log");
+	const result = h.run(["check", "--json"], { FAKE_PASEO_LOG: logPath });
+	assert.equal(result.status, 0, result.stderr);
+	const calls = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line).argv);
+	const ls = calls.filter((argv) => argv[0] === "provider" && argv[1] === "ls");
+	assert.equal(ls.length, 1, `provider ls is asked once, not once per option (${calls.map((a) => a.join(" ")).join(" | ")})`);
+	for (const provider of ["pi-supervisor", "pi-peer", "claude-peer"]) {
+		const asks = calls.filter((argv) => argv[0] === "provider" && argv[1] === "models" && argv[2] === provider);
+		assert.equal(asks.length, 1, `${provider} is asked once, however many options sit on it`);
+	}
+	const byId = Object.fromEntries(result.json.checks.map((check) => [check.id, check]));
+	for (const id of ["route:MONITOR_ECONOMY", "route:FAST_READ", "route:CODING_MEDIUM", "route:CODING_MEDIUM#1", "route:CODING_MEDIUM#2", "route:REASONING_HIGH", "route:REVIEW_HIGH"]) {
+		assert.equal(byId[id].status, "pass", `${id} still resolves — dedup must not change the verdict`);
+	}
+	// A switched-off option must not buy its provider a daemon round-trip:
+	// the cache is paid for by options that are actually checked. Disable the
+	// only class on pi-supervisor; nothing else sits on that provider.
+	const offRouting = {
+		version: 1,
+		hostId: "dedup-off",
+		routes: {
+			...BASE_ROUTES,
+			MONITOR_ECONOMY: { ...BASE_ROUTES.MONITOR_ECONOMY, enabled: false },
+		},
+	};
+	const off = host({ routing: offRouting });
+	const offLog = join(off.dir, "paseo-calls.log");
+	const offResult = off.run(["check", "--json"], { FAKE_PASEO_LOG: offLog });
+	assert.equal(offResult.status, 0, offResult.stderr);
+	const offCalls = readFileSync(offLog, "utf8").trim().split("\n").map((line) => JSON.parse(line).argv);
+	assert.ok(
+		!offCalls.some((argv) => argv[0] === "provider" && argv[1] === "models" && argv[2] === "pi-supervisor"),
+		"a disabled class never reaches the daemon for its inventory",
+	);
+	const offById = Object.fromEntries(offResult.json.checks.map((check) => [check.id, check]));
+	assert.equal(offById["route:MONITOR_ECONOMY"].status, "warn");
+});
+
 // --- set -----------------------------------------------------------------------
 
 test("set: a routable value is written atomically, with a .bak-<epoch> of the previous file", () => {
