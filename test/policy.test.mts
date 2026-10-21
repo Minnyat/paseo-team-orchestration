@@ -2976,7 +2976,36 @@ console.log("[paseo-team] skill admission tests passed");
 	// F-C — a # comment can hide a quote opener; the lines in between still run
 	bad(/R5/, ["mgrep #'\ncat /mnt/data/x\n#' lib", "mgrep -rn foo #'\ncat /mnt/data/x\n#' lib"]);
 	bad(/R1/, ["echo #'\nmread a | head\n#'"]);
-	good(["echo a#b | wc -c", "echo ${#PATH} | wc -c", "mread f 1,2 # trailing note"]);
+	good(["echo a#b | wc -c", "echo ${#PATH} | wc -c", "mread f 1,2 # trailing note", "mread f 1,2\t# tab-led note"]);
+	// G1 — only an UNESCAPED space/tab/newline or ; | & ( ) ` opens a comment (bash, not JS \s)
+	bad(/R1/, [
+		"true a\\ #x; mread f | head",
+		"true\r#x; mread f | head",
+		"true\v#x; mread f | head",
+		"true\f#x; mread f | head",
+		"true #x; mread f | head",
+		// G2 — ) opens a comment too
+		"(true)#'\nmread a | head\n#'",
+	]);
+	bad(/R2/, ["true a\\ #x; git show HEAD:x | sha256sum", "true\r#x; git show HEAD:x | sha256sum"]);
+	// G3 — value-taking wrapper options must eat their value, or the tool name becomes the "value"
+	bad(/R5/, [
+		"env -iu mgrep /mnt/data/x",
+		"env -C mgrep /mnt/data/x",
+		"env --unset mgrep /mnt/data/x",
+		"sudo -Eu mgrep /mnt/data/x",
+		"sudo -D mgrep /mnt/data/x",
+		"sudo --user mgrep /mnt/data/x",
+		"xargs -I mgrep /mnt/data/x",
+		"xargs -a mgrep /mnt/data/x",
+	]);
+	good([
+		"env -iu HOME mgrep -rn '/mnt/data' lib/",
+		"sudo -Eu root mgrep -rn '/mnt/data' lib/",
+		"xargs -I{} mgrep -rn '/mnt/data' lib/",
+		"xargs -n 1 mgrep -rn '/mnt/data' lib/",
+		"env -C /tmp mgrep -rn '/mnt/data' lib/",
+	]);
 	// not exploitable, left as is: an abbreviated long option (--fil) passes the hook, but the real mgrep dies on it
 	// N4 / N6 — known-miss (documented, not fixed): these pass today
 	good([

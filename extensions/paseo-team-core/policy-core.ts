@@ -1177,9 +1177,17 @@ interface ShellStage {
 const SHELL_CODE_CONTEXT_RE =
 	/(?:\b(?:ba|da|z|k)?sh\s+(?:-[A-Za-z-]+\s+)*-[A-Za-z]*c\s+|\beval\s+)$/;
 
-/** `#` starts a comment when it opens a word. */
+/**
+ * `#` starts a comment when it opens a word: it follows a space, tab, newline or
+ * one of ; | & ( ) ` that is not backslash-escaped (JS `\s` would also take \r, \v, NBSP).
+ */
 function isCommentStart(text: string, i: number): boolean {
-	return text[i] === "#" && (i === 0 || /[\s;|&(`]/.test(text[i - 1] ?? ""));
+	if (text[i] !== "#") return false;
+	if (i === 0) return true;
+	if (!" \t\n;|&()`".includes(text[i - 1] ?? "x")) return false;
+	let slashes = 0;
+	for (let j = i - 2; j >= 0 && text[j] === "\\"; j--) slashes++;
+	return slashes % 2 === 0;
 }
 
 /**
@@ -1317,9 +1325,21 @@ function markPipedGroups(stages: ShellStage[]): void {
 	}
 }
 
+/**
+ * Option run of a wrapper command. A short option cluster ENDING in one of `shortValue`, or a
+ * long option in `longValue`, takes the next word as its value (`env -iu HOME`, `sudo -Eu root`);
+ * every other option is a bare flag. The bare branch excludes exactly what the value branch takes,
+ * so the two never overlap and the run cannot backtrack exponentially.
+ */
+function wrapperOptions(shortValue: string, longValue: string): string {
+	const takes = `-[A-Za-z]*[${shortValue}]`;
+	const longTakes = `--(?:${longValue})`;
+	return `(?:\\s+(?:${takes}\\s+\\S+|${longTakes}\\s+\\S+)|\\s+-(?!${takes.slice(1)}(?:\\s|$))(?!-(?:${longValue})(?:\\s|$))\\S+)*`;
+}
+
 const STAGE_PREFIX =
 	String.raw`^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
-		String.raw`(?:(?:env(?:\s+-u\s+\S+|\s+-(?!u(?:\s|$))\S+)*|stdbuf(?:\s+-[ioe]\s+\S+|\s+-(?![ioe](?:\s|$))\S+)*|sudo(?:\s+-[ugCphrt]\s+\S+|\s+-(?![ugCphrt](?:\s|$))\S+)*|timeout(?:\s+(?:-[ks]\s+\S+|--(?:kill-after|signal)\s+\S+|-(?![ks](?:\s|$))(?!-(?:kill-after|signal)(?:\s|$))\S+))*\s+\d\S*|(?:time|exec|nohup|command|nice|xargs|bash|sh|zsh|node)(?:\s+-\S+(?:\s+\d+)?)*)\s+(?:[A-Za-z_]\w*=\S*\s+)*)*` +
+		`(?:(?:env${wrapperOptions("uCS", "unset|chdir|split-string")}|stdbuf${wrapperOptions("ioe", "input|output|error")}|sudo${wrapperOptions("ugCphrtDRTU", "user|group|chdir|chroot|host|prompt|role|type|command-timeout|other-user")}|xargs${wrapperOptions("IaEdLnPs", "arg-file|delimiter|max-args|max-procs|max-lines|max-chars")}|timeout${wrapperOptions("ks", "kill-after|signal")}\\s+\\d\\S*|(?:time|exec|nohup|command|nice|bash|sh|zsh|node)(?:\\s+-\\S+(?:\\s+\\d+)?)*)\\s+(?:[A-Za-z_]\\w*=\\S*\\s+)*)*` +
 	String.raw`(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
 const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
 const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
