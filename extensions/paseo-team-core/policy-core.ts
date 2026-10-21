@@ -28,7 +28,8 @@ import {
 	readAgentStates,
 	readAllAgentStates,
 } from "./agent-directory.ts";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1170,8 @@ interface ShellStage {
 	sub: boolean;
 	/** What ended the stage: "|", "|&", ";", "&&", "||", "&", "\n", "(", ")", "$(", "<(", ">(", "`" or "". */
 	sep: string;
+	/** The stage sits in a ( … ), { … } or loop group whose whole output is piped on. */
+	pipedOut?: boolean;
 }
 
 const SHELL_CODE_CONTEXT_RE =
@@ -1267,21 +1270,56 @@ function splitShellStages(outer: string): ShellStage[] {
 		start = i;
 	}
 	cut(outer.length, "");
+	markPipedGroups(stages);
 	return stages;
+}
+
+const PIPE_SEPS = ["|", "|&", ">("];
+
+/**
+ * A group's output is piped on when its closer is followed by a pipe:
+ * `( mread f ) | head`, `{ mread f; } | head`, `for …; do mread $f; done | head`.
+ * Every stage inside is marked, since all of the group's stdout flows to it.
+ */
+function markPipedGroups(stages: ShellStage[]): void {
+	const parens: number[] = [];
+	const blocks: number[] = [];
+	const markFrom = (from: number, to: number): void => {
+		for (let m = from; m <= to; m++) (stages[m] as ShellStage).pipedOut = true;
+	};
+	for (let k = 0; k < stages.length; k++) {
+		const stage = stages[k] as ShellStage;
+		if (/^\s*(?:for|while|until|select|if|case|\{)(?=\s|$)/.test(stage.text)) blocks.push(k);
+		if (/^\s*(?:done|fi|esac|\})(?=\s|$)/.test(stage.text)) {
+			const from = blocks.pop();
+			const following = stage.sep;
+			if (from !== undefined && PIPE_SEPS.includes(following)) markFrom(from, k);
+		}
+		if (stage.sep === "(" || stage.sep === "$(" || stage.sep === "<(" || stage.sep === ">(") parens.push(k + 1);
+		else if (stage.sep === ")") {
+			const from = parens.pop();
+			const after = stages[k + 1];
+			if (from !== undefined && after !== undefined && after.text.trim() === "" && PIPE_SEPS.includes(after.sep)) {
+				markFrom(from, k);
+			}
+		}
+	}
 }
 
 const STAGE_PREFIX =
 	String.raw`^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
-	String.raw`(?:(?:env|time|exec|nohup|command|sudo|nice|xargs|bash|sh|zsh|node)\s+(?:-\S+\s+)*(?:[A-Za-z_]\w*=\S*\s+)*)*` +
+	String.raw`(?:(?:(?:env|time|exec|nohup|command|sudo|nice|stdbuf|xargs|bash|sh|zsh|node)|timeout(?:\s+-\S+)*\s+\d\S*)\s+(?:-\S+\s+(?:\d+\s+)?)*(?:[A-Za-z_]\w*=\S*\s+)*)*` +
 	String.raw`(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
 const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
 const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
 const PATCH_ID_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git\\s+patch-id\\b`);
 const MASK_ONLY_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?mask(?=\\s|$)`);
 
-const GIT_SAFE_FLAG_RE = /^--(?:stat|numstat|shortstat|name-only|name-status|quiet|exit-code)(?:=|$)/;
-const GIT_PATCH_FLAG_RE = /^(?:-[a-z]*[pu][a-z]*|-U\d*|--patch(?:-with-\w+)?|--cc)$/;
-const GIT_SHOW_QUIET_RE = /^(?:--stat|--numstat|--shortstat|--name-only|--name-status|--format|--no-patch|-s)(?:=|$)/;
+// `--exit-code` is not here: git still prints the patch with it; only --quiet silences.
+const GIT_SAFE_FLAG_RE = /^--(?:stat|numstat|shortstat|name-only|name-status|quiet)(?:=|$)/;
+// A patch flag wins over a safe flag: `--stat -p` prints both.
+const GIT_PATCH_FLAG_RE = /^(?:-[a-z]*[pu][a-z]*|-[Uc]\d*|-L.*|--unified(?:=.*)?|--patch(?:-with-\w+)?|--cc)$/;
+const GIT_SHOW_QUIET_RE = /^(?:--stat|--numstat|--shortstat|--name-only|--name-status|--no-patch|-s)(?:=|$)/;
 
 /** Whether `git <args>` prints file content or a patch (the R2 recommendation level). */
 function gitPrintsContent(args: string): boolean {
@@ -1295,19 +1333,30 @@ function gitPrintsContent(args: string): boolean {
 	const flags = rest.filter((w) => w.startsWith("-"));
 	const operands = rest.filter((w) => !w.startsWith("-"));
 	const safe = flags.some((f) => GIT_SAFE_FLAG_RE.test(f));
+	const patch = flags.some((f) => GIT_PATCH_FLAG_RE.test(f));
 	switch (sub) {
 		case "show":
-			if (operands.some((w) => w.includes(":"))) return true;
+			if (patch || operands.some((w) => w.includes(":"))) return true;
+			// --format only decorates the header; the patch still prints unless -s/--no-patch.
 			return !flags.some((f) => GIT_SHOW_QUIET_RE.test(f));
 		case "diff":
 		case "format-patch":
-			return !safe;
+			return patch || !safe;
 		case "diff-tree":
 		case "log":
-			return flags.some((f) => GIT_PATCH_FLAG_RE.test(f)) && !safe;
+		case "diff-index":
+		case "diff-files":
+		case "whatchanged":
+		case "reflog":
+			return patch;
+		case "stash":
+			return operands[0] === "show" && patch;
 		case "archive":
 		case "grep":
 		case "blame":
+		case "annotate":
+		case "range-diff":
+		case "fast-export":
 			return true;
 		case "cat-file":
 			return (
@@ -1328,29 +1377,87 @@ const MECHANICAL_R3 =
 const MECHANICAL_R5 =
 	"R5: Peer must not touch /mnt/data (not even ls, test -e or stat). The only mention allowed is inside an `mgrep` search pattern: `mgrep -rn '/mnt/data' lib/`.";
 
-/** The command with the quoted arguments of every `mgrep` segment blanked (its patterns may name /mnt/data). */
+const MGREP_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?mgrep(?=\\s|$)`);
+
+/**
+ * The command with the search PATTERN operand of every `mgrep` call blanked
+ * (the pattern may name /mnt/data or .claude/projects; path operands and
+ * everything after a `$(`, `(`, pipe or `;` stay visible).
+ */
 function withoutMgrepPatterns(command: string): string {
 	let out = "";
+	let i = 0;
 	let atStart = true;
 	let inMgrep = false;
-	let i = 0;
+	let patternPending = false;
+	let skipNext = false;
 	while (i < command.length) {
 		const ch = command[i] ?? "";
-		if (atStart && ch !== " " && ch !== "\t") {
-			inMgrep = /^(?:\S*\/)?mgrep(?=\s|$)/.test(command.slice(i));
-			atStart = false;
+		if (ch === " " || ch === "\t") {
+			out += ch;
+			i++;
+			continue;
 		}
-		if (ch === "'" || ch === '"') {
-			const j = command.indexOf(ch, i + 1);
-			if (j > 0) {
-				out += inMgrep ? "Q" : command.slice(i, j + 1);
-				i = j + 1;
+		const sepWidth =
+			command.startsWith("$(", i) || command.startsWith("<(", i) || command.startsWith(">(", i)
+				? 2
+				: /[|;&\n()`]/.test(ch)
+					? 1
+					: 0;
+		if (sepWidth > 0) {
+			out += command.slice(i, i + sepWidth);
+			i += sepWidth;
+			atStart = true;
+			inMgrep = false;
+			patternPending = false;
+			skipNext = false;
+			continue;
+		}
+		if (atStart) {
+			atStart = false;
+			const call = MGREP_CALL_RE.exec(command.slice(i));
+			if (call) {
+				inMgrep = true;
+				patternPending = true;
+				out += call[0];
+				i += call[0].length;
 				continue;
 			}
 		}
-		if (ch === "|" || ch === ";" || ch === "&" || ch === "\n") atStart = true;
-		out += ch;
-		i++;
+		let j = i;
+		while (j < command.length) {
+			const c = command[j] ?? "";
+			if (c === "'" || c === '"') {
+				const close = command.indexOf(c, j + 1);
+				if (close > 0) {
+					j = close + 1;
+					continue;
+				}
+			}
+			if (/[\s|;&()`<>]/.test(c) || command.startsWith("$(", j)) break;
+			j++;
+		}
+		if (j === i) {
+			out += ch;
+			i++;
+			continue;
+		}
+		const word = command.slice(i, j);
+		i = j;
+		if (!inMgrep) {
+			out += word;
+		} else if (skipNext) {
+			skipNext = false;
+			out += word;
+		} else if (word.startsWith("-")) {
+			if (/^-[ABCm]$/.test(word)) skipNext = true;
+			out += word;
+		} else if (patternPending) {
+			patternPending = false;
+			out += "Q";
+		} else {
+			out += word;
+		}
 	}
 	return out;
 }
@@ -1361,7 +1468,7 @@ function mechanicalShellViolation(command: string, depth: number): string | null
 	for (let k = 0; k < stages.length; k++) {
 		const stage = stages[k] as ShellStage;
 		const next = stages[k + 1];
-		const piped = stage.sep === "|" || stage.sep === "|&";
+		const piped = stage.sep === "|" || stage.sep === "|&" || stage.sep === ">(" || stage.pipedOut === true;
 		const tool = MASKED_TOOL_RE.exec(stage.text);
 		if (tool) {
 			const rest = stage.text.slice(tool[0].length);
@@ -1391,8 +1498,11 @@ function mechanicalShellViolation(command: string, depth: number): string | null
  */
 export function mechanicalBashBlockReason(role: TeamRole, command: string): string | null {
 	if (role !== "peer" || typeof command !== "string" || command.trim() === "") return null;
-	if (/\.claude\/projects\//.test(command) || /\/\.claude(?![\w.-])/.test(command)) return MECHANICAL_R3;
-	if (/\/mnt\/data(?![\w.-])/.test(withoutMgrepPatterns(command))) return MECHANICAL_R5;
+	// A quoted mention in echo / a commit message is blocked on purpose (fail-closed
+	// for secret paths); only an mgrep search PATTERN may name these strings.
+	const visible = withoutMgrepPatterns(command);
+	if (/\.claude\/projects\//.test(visible) || /\/\.claude(?![\w.-])/.test(visible)) return MECHANICAL_R3;
+	if (/\/mnt\/data(?![\w.-])/.test(visible)) return MECHANICAL_R5;
 	return mechanicalShellViolation(command, 0);
 }
 
@@ -1402,12 +1512,20 @@ export function mechanicalBashBlockReason(role: TeamRole, command: string): stri
  */
 export function mechanicalPathBlockReason(role: TeamRole, paths: readonly string[]): string | null {
 	if (role !== "peer") return null;
-	for (const raw of paths) {
-		if (typeof raw !== "string" || raw === "") continue;
+	for (const given of paths) {
+		if (typeof given !== "string" || given === "") continue;
+		// `..`, `//` and `./` must not hide the target.
+		let raw = posix.normalize(given);
+		if (raw.length > 1 && raw.endsWith("/")) raw = raw.slice(0, -1);
 		if (/\/mnt\/data(?![\w.-])/.test(raw)) return MECHANICAL_R5;
 		if (
 			/(?:^|\/)\.claude\/projects\/[^/]+\/memory(?:\/|$)/.test(raw) ||
-			/(?:^|\/)\.claude\/projects(?:\/[^/]*)?\/?$/.test(raw)
+			// a glob segment right under .claude can reach projects/*/memory
+			/(?:^|\/)\.claude\/[^/]*[*?[{][^/]*(?:\/|$)/.test(raw) ||
+			// a search root that CONTAINS .claude/projects (Grep path + glob filter, Glob path)
+			/(?:^|\/)\.claude(?:\/projects(?:\/[^/]*)?)?$/.test(raw) ||
+			raw === "~" ||
+			raw === homedir()
 		) {
 			return MECHANICAL_R3;
 		}

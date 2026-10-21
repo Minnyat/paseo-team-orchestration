@@ -732,7 +732,11 @@ export default function (pi: ExtensionAPI) {
 			const args = event.input as Record<string, unknown>;
 			const pathBlock = mechanicalPathBlockReason(
 				r,
-				["path", "file_path", "glob"].map((k) => String(args[k] ?? "")),
+				[
+					...["path", "file_path", "glob"].map((k) => String(args[k] ?? "")),
+					// pi's find takes a glob `pattern` (its grep `pattern` is a content regex).
+					...(event.toolName === "find" || event.toolName === "glob" ? [String(args.pattern ?? "")] : []),
+				],
 			);
 			if (pathBlock) return { block: true, reason: pathBlock };
 		}

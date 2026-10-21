@@ -2798,11 +2798,10 @@ console.log("[paseo-team] skill admission tests passed");
 		"git diff --name-only a b",
 		"git diff --numstat a b",
 		"git diff --quiet a b",
-		"git diff --exit-code",
 		"git show --stat HEAD",
 		"git show --name-only HEAD",
 		"git show --name-status HEAD",
-		"git show --format= HEAD",
+		"git show -s --format=%H HEAD",
 		"git show -s HEAD",
 		"git show --no-patch HEAD",
 		"git diff a b | rok/bin/mask",
@@ -2825,6 +2824,104 @@ console.log("[paseo-team] skill admission tests passed");
 	// R5 — /mnt/data
 	bad(/R5/, ["ls /mnt/data", "test -e /mnt/data/x", "stat /mnt/data", "cat /mnt/data/a.txt", "bash -c 'ls /mnt/data'", "mgrep foo /mnt/data/x"]);
 	good(["ls /mnt/database2x", "mgrep -rn '/mnt/data' lib/", 'mgrep -rn "/mnt/data" lib/ rok/']);
+
+	// correction: review findings F1-F10
+	// F1/F2/F3 — --format and --exit-code do not silence a patch; a patch flag beats a safe flag
+	bad(/R2/, [
+		"git show --format=%H HEAD",
+		"git show --format= HEAD",
+		"git show --format=tformat:x HEAD",
+		"git show --stat -p HEAD",
+		"git show --name-only --patch HEAD",
+		"git diff --stat -p a b",
+		"git log -p --stat",
+		"git log --unified=1 -1",
+		"git log -L1,3:file",
+		"git diff --exit-code",
+		"git diff --exit-code a b",
+		// F6 — spec examples
+		"git diff e7713b2 HEAD > /tmp/d.txt",
+		"git cat-file blob abc | awk '{print length}'",
+		"bash -c 'git diff a..b | git patch-id'",
+		// F9 — same class of content printers
+		"git annotate lib/x.ts",
+		"git diff-index -p HEAD",
+		"git diff-files -p",
+		"git stash show -p",
+		"git whatchanged -p -1",
+		"git reflog -p",
+		"git range-diff a...b",
+		"git fast-export HEAD",
+	]);
+	good([
+		"git diff --quiet a b",
+		"git show -s --format=%H HEAD",
+		"git show --no-patch HEAD",
+		"git stash show",
+		"git diff-index --name-only HEAD",
+		"git whatchanged --oneline -1",
+		"git reflog",
+	]);
+
+	// F5 — group / wrapper / process-substitution forms of R1
+	bad(/R1/, [
+		"timeout 5 mread f 1,2 | head",
+		"stdbuf -oL mgrep -n x lib/ | head",
+		"nice -n 5 mread f 1,2 | head",
+		"mread f 1,2 > >(cat)",
+		"( mread f 1,2 ) | head",
+		"{ mread f 1,2; } | head",
+		"for f in a b; do mread $f 1,2; done | head",
+		"( mgit show a:f ) |& head",
+	]);
+	good(["( mread f 1,2 )", "{ mread f 1,2; }", "for f in a b; do mread $f 1,2; done", "( echo hi ) | head"]);
+	// known-miss (documented, not fixed): these pass today
+	good([
+		"bash -c 'mread x' | head",
+		"bash <<EOF\necho don't\nmread f 1,2 | head\necho it's\nEOF",
+	]);
+
+	// F7 — R5 exemption is the mgrep PATTERN operand only
+	bad(/R5/, [
+		"mgrep -rn secret '/mnt/data/'",
+		"mgrep -rn x lib $(cat '/mnt/data/f')",
+		"mgrep -rn x '/mnt/data/'",
+		"mgrep -A 3 foo '/mnt/data/x'",
+		"mgrep -rn foo lib; cat '/mnt/data/x'",
+	]);
+	good([
+		"flock -w 5 /tmp/x.lock mgrep -rn '/mnt/data' lib/",
+		"mgrep -A 3 '/mnt/data' lib/",
+		"mgrep -rn -e '/mnt/data' lib/",
+	]);
+
+	// F8 — R3 shares the mgrep pattern exemption; a quoted mention elsewhere stays blocked on purpose
+	good([
+		"mgrep -rn '.claude/projects' lib/",
+		"mgrep -rn '.claude/projects/' lib/",
+		"mgrep -rn '~/.claude' lib/",
+		"flock -w 5 /tmp/x.lock mgrep -rn '/.claude/projects/' lib/",
+	]);
+	bad(/R3/, [
+		"mgrep -rn foo '.claude/projects/'",
+		'echo "see ~/.claude/projects/x"',
+		"git commit -m 'read .claude/projects/x'",
+	]);
+
+	// F4 — path normalisation and search roots above .claude/projects
+	for (const path of [
+		"/home/minnyat/.claude/projects/foo/../p/memory/MEMORY.md",
+		"/home/minnyat/.claude/projects/-home-x//memory/MEMORY.md",
+		"/home/minnyat/.claude/./projects/p/memory/a.md",
+		"~/.claude",
+		"/home/minnyat/.claude/",
+		"/home/minnyat/.claude/projects",
+		"/home/minnyat/.claude/*/p/memory/a.md",
+	]) {
+		assert.match(String(mechanicalPathBlockReason("peer", [path])), /R3/, path);
+	}
+	assert.match(String(mechanicalPathBlockReason("peer", ["**/memory/*.md", "/home/minnyat/.claude"])), /R3/, "Glob pattern with a .claude search root");
+	assert.match(String(mechanicalPathBlockReason("peer", ["/mnt//data/x"])), /R5/, "// is collapsed before matching");
 
 	// tool side: Read / Grep / Glob / pi read
 	for (const path of [
@@ -2858,6 +2955,9 @@ console.log("[paseo-team] skill admission tests passed");
 	assert.match(String((await run("bash", { command: "git show HEAD:lib/x.ts | sha256sum" }))?.reason), /R2/);
 	assert.match(String((await run("read", { path: "/home/u/.claude/projects/p/memory/MEMORY.md" }))?.reason), /R3/);
 	assert.match(String((await run("read", { path: "/mnt/data/a" }))?.reason), /R5/);
+	assert.match(String((await run("find", { pattern: "/mnt/data/**/*.md" }))?.reason), /R5/, "pi find has a glob pattern");
+	assert.match(String((await run("grep", { pattern: "x", path: "~/.claude", glob: "**/memory/*.md" }))?.reason), /R3/);
+	assert.equal((await run("grep", { pattern: "/mnt/data", path: "lib" }))?.block, undefined, "a grep regex is not a path");
 	assert.equal((await run("bash", { command: "mread f 1,2" }))?.block, undefined);
 	assert.equal((await run("read", { path: "/home/u/.pi/agent/x" }))?.block, undefined);
 	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
