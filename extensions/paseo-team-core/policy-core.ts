@@ -1308,7 +1308,7 @@ function markPipedGroups(stages: ShellStage[]): void {
 
 const STAGE_PREFIX =
 	String.raw`^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
-	String.raw`(?:(?:(?:env|time|exec|nohup|command|sudo|nice|stdbuf|xargs|bash|sh|zsh|node)|timeout(?:\s+-\S+)*\s+\d\S*)\s+(?:-\S+\s+(?:\d+\s+)?)*(?:[A-Za-z_]\w*=\S*\s+)*)*` +
+		String.raw`(?:(?:env(?:\s+-u\s+\S+|\s+-\S+)*|stdbuf(?:\s+-[ioe]\s+\S+|\s+-\S+)*|timeout(?:\s+(?:-[ks]\s+\S+|--(?:kill-after|signal)\s+\S+|-\S+))*\s+\d\S*|(?:time|exec|nohup|command|sudo|nice|xargs|bash|sh|zsh|node)(?:\s+-\S+(?:\s+\d+)?)*)\s+(?:[A-Za-z_]\w*=\S*\s+)*)*` +
 	String.raw`(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
 const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
 const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
@@ -1318,7 +1318,7 @@ const MASK_ONLY_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?mask(?=\\s|$)`);
 // `--exit-code` is not here: git still prints the patch with it; only --quiet silences.
 const GIT_SAFE_FLAG_RE = /^--(?:stat|numstat|shortstat|name-only|name-status|quiet)(?:=|$)/;
 // A patch flag wins over a safe flag: `--stat -p` prints both.
-const GIT_PATCH_FLAG_RE = /^(?:-[a-z]*[pu][a-z]*|-[Uc]\d*|-L.*|--unified(?:=.*)?|--patch(?:-with-\w+)?|--cc)$/;
+const GIT_PATCH_FLAG_RE = /^(?:-[a-z]*[pu][a-z]*|-[Uc]\d*|-L.*|--unified(?:=.*)?|--patch(?:-with-\w+)?|--cc|--binary|--remerge-diff|--dd|--diff-merges=(?!(?:off|none)$).*)$/;
 const GIT_SHOW_QUIET_RE = /^(?:--stat|--numstat|--shortstat|--name-only|--name-status|--no-patch|-s)(?:=|$)/;
 
 /** Whether `git <args>` prints file content or a patch (the R2 recommendation level). */
@@ -1334,6 +1334,9 @@ function gitPrintsContent(args: string): boolean {
 	const operands = rest.filter((w) => !w.startsWith("-"));
 	const safe = flags.some((f) => GIT_SAFE_FLAG_RE.test(f));
 	const patch = flags.some((f) => GIT_PATCH_FLAG_RE.test(f));
+	// -c is a combined-diff request, not a patch, for the raw-diff plumbing; -u also means "untracked" for stash show.
+	const plumbingPatch = flags.some((f) => f !== "-c" && GIT_PATCH_FLAG_RE.test(f));
+	const stashPatch = flags.some((f) => f !== "-c" && f !== "-u" && GIT_PATCH_FLAG_RE.test(f));
 	switch (sub) {
 		case "show":
 			if (patch || operands.some((w) => w.includes(":"))) return true;
@@ -1344,13 +1347,14 @@ function gitPrintsContent(args: string): boolean {
 			return patch || !safe;
 		case "diff-tree":
 		case "log":
+			return patch;
 		case "diff-index":
 		case "diff-files":
 		case "whatchanged":
 		case "reflog":
-			return patch;
+			return plumbingPatch;
 		case "stash":
-			return operands[0] === "show" && patch;
+			return operands[0] === "show" && stashPatch;
 		case "archive":
 		case "grep":
 		case "blame":
@@ -1379,85 +1383,173 @@ const MECHANICAL_R5 =
 
 const MGREP_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?mgrep(?=\\s|$)`);
 
+/** Width of the shell separator starting at `i` (`$(`, `<(`, `>(` or one of | ; & newline ( ) backtick), else 0. */
+function shellSepWidth(text: string, i: number): number {
+	const two = text.slice(i, i + 2);
+	if (two === "$(" || two === "<(" || two === ">(") return 2;
+	return /[|;&\n()`]/.test(text[i] ?? "") ? 1 : 0;
+}
+
+/** End of the quoted string opened at `i` (index after its closing quote), or -1 when unterminated. */
+function quotedEnd(text: string, i: number): number {
+	const quote = text[i];
+	let j = i + 1;
+	while (j < text.length) {
+		if (quote === '"' && text[j] === "\\") j += 2;
+		else if (text[j] === quote) return j + 1;
+		else j++;
+	}
+	return -1;
+}
+
+/** Index of the first unquoted separator at or after `from`, or the end of the text. */
+function segmentEnd(text: string, from: number): number {
+	let i = from;
+	while (i < text.length) {
+		const ch = text[i] ?? "";
+		if (ch === "\\") {
+			i += 2;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			const end = quotedEnd(text, i);
+			if (end > 0) {
+				i = end;
+				continue;
+			}
+		}
+		if (shellSepWidth(text, i) > 0) return i;
+		i++;
+	}
+	return text.length;
+}
+
+interface MgrepWord {
+	start: number;
+	end: number;
+	text: string;
+	/** Holds an expansion ($, backtick) or an unterminated quote: never blanked. */
+	unsafe: boolean;
+	/** The target of a redirection, or an fd number in front of one: not an operand. */
+	redirect: boolean;
+}
+
+/** Splits the arguments of one mgrep call into words; `<` and `>` runs are redirections. */
+function mgrepWords(text: string): MgrepWord[] {
+	const words: MgrepWord[] = [];
+	let i = 0;
+	let afterRedirect = false;
+	while (i < text.length) {
+		const ch = text[i] ?? "";
+		if (/\s/.test(ch)) {
+			i++;
+			continue;
+		}
+		if (ch === "<" || ch === ">") {
+			while (text[i] === "<" || text[i] === ">") i++;
+			afterRedirect = true;
+			continue;
+		}
+		const start = i;
+		let unsafe = false;
+		while (i < text.length) {
+			const c = text[i] ?? "";
+			if (c === "\\") {
+				i += 2;
+			} else if (c === "'" || c === '"') {
+				const end = quotedEnd(text, i);
+				if (end < 0) {
+					unsafe = true;
+					i = text.length;
+				} else {
+					if (c === '"' && /[$`]/.test(text.slice(i, end))) unsafe = true;
+					i = end;
+				}
+			} else if (/[\s<>]/.test(c)) {
+				break;
+			} else {
+				if (c === "$" || c === "`") unsafe = true;
+				i++;
+			}
+		}
+		const raw = text.slice(start, Math.min(i, text.length));
+		const fdBeforeRedirect = /^\d+$/.test(raw) && (text[i] === "<" || text[i] === ">");
+		words.push({ start, end: Math.min(i, text.length), text: raw, unsafe, redirect: afterRedirect || fdBeforeRedirect });
+		afterRedirect = false;
+	}
+	return words;
+}
+
+// Options mgrep (GNU grep) takes a value for; see rok/bin/mgrep LONG_ARG and the [ABCDdefm] cluster case.
+const MGREP_LONG_VALUE = new Set([
+	"after-context", "before-context", "context", "regexp", "file", "max-count", "label",
+	"binary-files", "devices", "directories", "exclude", "exclude-from", "exclude-dir", "include", "group-separator",
+]);
+
+/** `[start, end)` ranges inside `segment` that are mgrep search PATTERNS (every -e / --regexp value, else the first operand). */
+function mgrepPatternRanges(segment: string): Array<[number, number]> {
+	const call = MGREP_CALL_RE.exec(segment);
+	if (!call) return [];
+	const base = call[0].length;
+	const words = mgrepWords(segment.slice(base));
+	const patterns: Array<[number, number, boolean]> = [];
+	const operands: MgrepWord[] = [];
+	let patternGiven = false;
+	let optionsEnded = false;
+	const take = (word: MgrepWord | undefined, from: number, isPattern: boolean): void => {
+		if (isPattern && word) patterns.push([word.start + from, word.end, word.unsafe]);
+	};
+	for (let w = 0; w < words.length; w++) {
+		const word = words[w] as MgrepWord;
+		if (word.redirect) continue;
+		const text = word.text;
+		if (optionsEnded || text === "-" || !text.startsWith("-")) {
+			operands.push(word);
+		} else if (text === "--") {
+			optionsEnded = true;
+		} else if (text.startsWith("--")) {
+			const eq = text.indexOf("=");
+			const name = text.slice(2, eq > 0 ? eq : undefined);
+			if (!MGREP_LONG_VALUE.has(name)) continue;
+			if (name === "regexp" || name === "file") patternGiven = true;
+			if (eq > 0) take(word, eq + 1, name === "regexp");
+			else take(words[++w], 0, name === "regexp");
+		} else {
+			for (let j = 1; j < text.length; j++) {
+				const c = text[j] ?? "";
+				if (!"ABCDdefm".includes(c)) continue;
+				if (c === "e" || c === "f") patternGiven = true;
+				if (j + 1 < text.length) take(word, j + 1, c === "e");
+				else take(words[++w], 0, c === "e");
+				break;
+			}
+		}
+	}
+	if (!patternGiven) take(operands[0], 0, true);
+	return patterns.filter(([, , unsafe]) => !unsafe).map(([s, e]) => [base + s, base + e]);
+}
+
 /**
- * The command with the search PATTERN operand of every `mgrep` call blanked
- * (the pattern may name /mnt/data or .claude/projects; path operands and
- * everything after a `$(`, `(`, pipe or `;` stay visible).
+ * The command with the search PATTERN operand(s) of every `mgrep` call blanked
+ * (a pattern may name /mnt/data). Path operands, option values such as -f FILE,
+ * redirection targets and anything holding an expansion stay visible.
  */
 function withoutMgrepPatterns(command: string): string {
 	let out = "";
 	let i = 0;
-	let atStart = true;
-	let inMgrep = false;
-	let patternPending = false;
-	let skipNext = false;
 	while (i < command.length) {
-		const ch = command[i] ?? "";
-		if (ch === " " || ch === "\t") {
-			out += ch;
-			i++;
-			continue;
+		const end = segmentEnd(command, i);
+		const segment = command.slice(i, end);
+		let last = 0;
+		for (const [from, to] of mgrepPatternRanges(segment)) {
+			out += segment.slice(last, from) + "Q";
+			last = to;
 		}
-		const sepWidth =
-			command.startsWith("$(", i) || command.startsWith("<(", i) || command.startsWith(">(", i)
-				? 2
-				: /[|;&\n()`]/.test(ch)
-					? 1
-					: 0;
-		if (sepWidth > 0) {
-			out += command.slice(i, i + sepWidth);
-			i += sepWidth;
-			atStart = true;
-			inMgrep = false;
-			patternPending = false;
-			skipNext = false;
-			continue;
-		}
-		if (atStart) {
-			atStart = false;
-			const call = MGREP_CALL_RE.exec(command.slice(i));
-			if (call) {
-				inMgrep = true;
-				patternPending = true;
-				out += call[0];
-				i += call[0].length;
-				continue;
-			}
-		}
-		let j = i;
-		while (j < command.length) {
-			const c = command[j] ?? "";
-			if (c === "'" || c === '"') {
-				const close = command.indexOf(c, j + 1);
-				if (close > 0) {
-					j = close + 1;
-					continue;
-				}
-			}
-			if (/[\s|;&()`<>]/.test(c) || command.startsWith("$(", j)) break;
-			j++;
-		}
-		if (j === i) {
-			out += ch;
-			i++;
-			continue;
-		}
-		const word = command.slice(i, j);
-		i = j;
-		if (!inMgrep) {
-			out += word;
-		} else if (skipNext) {
-			skipNext = false;
-			out += word;
-		} else if (word.startsWith("-")) {
-			if (/^-[ABCm]$/.test(word)) skipNext = true;
-			out += word;
-		} else if (patternPending) {
-			patternPending = false;
-			out += "Q";
-		} else {
-			out += word;
-		}
+		out += segment.slice(last);
+		if (end >= command.length) break;
+		const width = Math.max(shellSepWidth(command, end), 1);
+		out += command.slice(end, end + width);
+		i = end + width;
 	}
 	return out;
 }
@@ -1498,11 +1590,10 @@ function mechanicalShellViolation(command: string, depth: number): string | null
  */
 export function mechanicalBashBlockReason(role: TeamRole, command: string): string | null {
 	if (role !== "peer" || typeof command !== "string" || command.trim() === "") return null;
-	// A quoted mention in echo / a commit message is blocked on purpose (fail-closed
-	// for secret paths); only an mgrep search PATTERN may name these strings.
-	const visible = withoutMgrepPatterns(command);
-	if (/\.claude\/projects\//.test(visible) || /\/\.claude(?![\w.-])/.test(visible)) return MECHANICAL_R3;
-	if (/\/mnt\/data(?![\w.-])/.test(visible)) return MECHANICAL_R5;
+	// R3 has no exemption: a quoted mention (echo, commit message, mgrep pattern) is
+	// blocked on purpose, fail-closed for secret paths. Only R5 spares an mgrep pattern.
+	if (/\.claude\/projects(?![\w.-])/.test(command) || /\/\.claude(?![\w.-])/.test(command)) return MECHANICAL_R3;
+	if (/\/mnt\/data(?![\w.-])/.test(withoutMgrepPatterns(command))) return MECHANICAL_R5;
 	return mechanicalShellViolation(command, 0);
 }
 

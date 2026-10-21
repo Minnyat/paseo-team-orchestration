@@ -2895,18 +2895,77 @@ console.log("[paseo-team] skill admission tests passed");
 		"mgrep -rn -e '/mnt/data' lib/",
 	]);
 
-	// F8 — R3 shares the mgrep pattern exemption; a quoted mention elsewhere stays blocked on purpose
-	good([
+	// R3 has NO mgrep exemption (Lead decision, round 2): any mention is blocked, quoted or not
+	bad(/R3/, [
 		"mgrep -rn '.claude/projects' lib/",
 		"mgrep -rn '.claude/projects/' lib/",
 		"mgrep -rn '~/.claude' lib/",
 		"flock -w 5 /tmp/x.lock mgrep -rn '/.claude/projects/' lib/",
-	]);
-	bad(/R3/, [
+		"mgrep -rnf ~/.claude/projects/p/memory/MEMORY.md lib",
+		"X=|cat mgrep ~/.claude/projects/p/memory/MEMORY.md",
 		"mgrep -rn foo '.claude/projects/'",
 		'echo "see ~/.claude/projects/x"',
 		"git commit -m 'read .claude/projects/x'",
 	]);
+
+	// N1 — the wrapper prefix must not swallow a separator and hide a later command
+	bad(/R5/, [
+		"X=;cat mgrep /mnt/data/x",
+		"nice -x;cat mgrep /mnt/data/x",
+		"timeout 5;cat mgrep /mnt/data/x",
+		"X=|cat mgrep /mnt/data/x",
+	]);
+	// N2 — option values, --, redirections and repeated -e: only PATTERN operands are exempt
+	bad(/R5/, [
+		"mgrep -rn -f /mnt/data/patterns lib",
+		"mgrep -rn --file /mnt/data/patterns lib",
+		"mgrep -rn --exclude-from /mnt/data/x foo lib",
+		"mgrep -rn -- -x /mnt/data/secret",
+		"mgrep -rn -efoo /mnt/data/x",
+		"mgrep --regexp=foo /mnt/data/x",
+		"mgrep < /mnt/data/secret foo",
+		"mgrep > /mnt/data/out foo lib",
+		"mgrep 2> /mnt/data/err foo lib",
+		"mgrep -e a -e b /mnt/data/x",
+	]);
+	good([
+		"mgrep -e '/mnt/data' -e '/mnt/data/x' lib/",
+		"mgrep --regexp='/mnt/data' lib/",
+		"mgrep -rn -- '/mnt/data' lib",
+		"mgrep -rn foo lib 2>&1",
+		"timeout -k 5 10 mgrep -rn '/mnt/data' lib/",
+		"stdbuf -o L mgrep -rn '/mnt/data' lib/",
+		"env -u HOME mgrep -rn '/mnt/data' lib/",
+	]);
+	// N3 — an expansion inside the pattern word is code, not a pattern
+	bad(/R5/, [
+		'mgrep -rn "$(cat /mnt/data/x)" lib',
+		"mgrep -rn \"`cat /mnt/data/x`\" lib",
+		"mgrep -rn x$(cat /mnt/data/x) lib",
+		"mgrep -rn 'x'$(cat /mnt/data/x) lib",
+		"mgrep -rn 'a\\' /mnt/data/x '",
+	]);
+	// N5 — more patch flags (measured with git 2.43: all print a patch)
+	bad(/R2/, [
+		"git log -1 --binary",
+		"git log --remerge-diff",
+		"git log --diff-merges=first-parent",
+		"git log --dd",
+		"git show -s --binary HEAD",
+		"git diff --stat --binary a b",
+		"git diff-tree -r --binary",
+	]);
+	// N8 — blank every -e operand; -c / -u are not patches for these
+	good(["git diff-index -c", "git stash show -u", "git log --diff-merges=off -1"]);
+	// N4 / N6 — known-miss (documented, not fixed): these pass today
+	good([
+		"for a in 1; do for b in 2; do mread f 1,2; done; done | head",
+		"if true; then if true; then mread f 1,2; fi; fi | head",
+		"time for f in a; do mread $f 1,2; done | head",
+	]);
+	for (const path of ["/home/minnyat/.claude/projects/**/*.md", "~/**/memory/*.md"]) {
+		assert.equal(mechanicalPathBlockReason("peer", [path]), null, `known-miss (glob past the root): ${path}`);
+	}
 
 	// F4 — path normalisation and search roots above .claude/projects
 	for (const path of [
