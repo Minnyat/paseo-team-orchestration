@@ -936,4 +936,71 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 	assert.equal(claudeSkillName("paseo-team-lead"), "");
 }
 
+// --- mechanical peer rules R1 / R2 / R3 / R5 on the Claude adapter ------------
+// Applies to every Peer, with or without a brief.
+for (const [command, rule] of [
+	["rok/bin/mread lib/x.ts 1,80 | tail -5", /R1/],
+	["n=$(mgrep -c foo lib/a.ts)", /R1/],
+	["diff <(mgit show a:f) <(mgit show b:f)", /R1/],
+	["bash -c 'mgit show abc:lib/a.ts | grep bar'", /R1/],
+	["bash <<EOF\nmgrep -n foo lib/ | head\nEOF", /R1/],
+	["flock -w 5 /tmp/x.lock bash -c \"mread lib/x.ts 1,9 | head\"", /R1/],
+	["git show HEAD:lib/x.ts | sha256sum", /R2/],
+	["git archive HEAD | tar -x", /R2/],
+	["git diff a b", /R2/],
+	["git log -p -3", /R2/],
+	["git cat-file -p HEAD:f", /R2/],
+	["bash -c 'git show HEAD:lib/x.ts'", /R2/],
+	["flock -w 5 /tmp/x.lock bash -c \"git blame lib/x.ts\"", /R2/],
+	["cat ~/.claude/projects/-home-x/memory/MEMORY.md", /R3/],
+	["ls /home/minnyat/.claude/projects/", /R3/],
+	["ls /mnt/data", /R5/],
+	["test -e /mnt/data/x", /R5/],
+]) {
+	for (const b of [null, writeBrief]) {
+		assert.match(decide("peer", "Bash", { command }, b) ?? "", rule, `${command} (brief=${b !== null})`);
+	}
+	assert.equal(decide("lead", "Bash", { command }), null, `the Lead is not held to the Peer rule: ${command}`);
+}
+for (const command of [
+	"rok/bin/mread lib/x.ts 1,80",
+	"mgrep -n foo lib/",
+	"mgit diff --stat a..b",
+	"git diff a b | rok/bin/mask",
+	'echo "mread is masked" | wc -c',
+	"echo 'git show HEAD:lib/x.ts'",
+	"git rev-parse HEAD:lib/x.ts",
+	"git cat-file -s HEAD:lib/x.ts",
+	"git diff --stat a b",
+	"git log --format=%H -5",
+	"mgit diff a..b | git patch-id",
+	"ls /home/minnyat/.pi/agent/skills",
+	"mgrep -rn '/mnt/data' lib/",
+]) {
+	assert.equal(decide("peer", "Bash", { command }, writeBrief), null, `passes: ${command}`);
+}
+// The reason names the rule and the lawful replacement.
+assert.match(decide("peer", "Bash", { command: "mread f 1,2 | head" }, null) ?? "", /mread <file> <start>,<end>.*mgrep -c/s);
+assert.match(decide("peer", "Bash", { command: "git show HEAD:f" }, null) ?? "", /mgit show.*git rev-parse <sha>:<path>.*cat-file -s/s);
+
+// File tools: R3 / R5 on Read, Grep and Glob.
+for (const [tool, input, rule] of [
+	["Read", { file_path: "/home/minnyat/.claude/projects/-home-x/memory/MEMORY.md" }, /R3/],
+	["Grep", { pattern: "x", path: "/home/minnyat/.claude/projects/-home-x/memory" }, /R3/],
+	["Glob", { pattern: "/home/minnyat/.claude/projects/*/memory/**" }, /R3/],
+	["Read", { file_path: "/mnt/data/a.csv" }, /R5/],
+	["Grep", { pattern: "x", path: "/mnt/data" }, /R5/],
+	["Glob", { pattern: "/mnt/data/**/*.md" }, /R5/],
+]) {
+	assert.match(decide("peer", tool, input, writeBrief) ?? "", rule, `${tool} ${JSON.stringify(input)}`);
+	assert.equal(decide("lead", tool, input), null, `the Lead is not held to the Peer rule: ${tool}`);
+}
+for (const [tool, input] of [
+	["Read", { file_path: "/home/minnyat/.pi/agent/skills/x/SKILL.md" }],
+	["Grep", { pattern: "/mnt/data", path: "lib" }],
+	["Glob", { pattern: "lib/**/*.ts" }],
+]) {
+	assert.equal(decide("peer", tool, input, writeBrief), null, `passes: ${tool} ${JSON.stringify(input)}`);
+}
+
 console.log("claude policy tests passed");

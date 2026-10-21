@@ -11,6 +11,8 @@ import {
 	callsTeamSupportScript,
 	pteamMutationIn,
 	supportScriptBlockReason,
+	mechanicalBashBlockReason,
+	mechanicalPathBlockReason,
 	classifyMcpInput,
 	createAgentModeArgsBlockReason,
 	CLAUDE_DEFAULT_SEAT_MODE,
@@ -2706,6 +2708,160 @@ console.log("[paseo-team] skill admission tests passed");
 		if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
 		else process.env.PASEO_PI_ROLE = prevRole;
 	}
+}
+
+// --- mechanical peer rules R1 / R2 / R3 / R5 -----------------------------------
+// The four violations peers repeat most. Whole-command scan, so wrapped
+// commands (bash -c, heredoc, flock … bash -c) are covered by the same vectors.
+{
+	const bad = (rule: RegExp, commands: string[]): void => {
+		for (const command of commands) {
+			assert.match(String(mechanicalBashBlockReason("peer", command)), rule, `blocked: ${command}`);
+			assert.equal(mechanicalBashBlockReason("lead", command), null, `the rule is Peer-only: ${command}`);
+		}
+	};
+	const good = (commands: string[]): void => {
+		for (const command of commands) {
+			assert.equal(mechanicalBashBlockReason("peer", command), null, `passes: ${command}`);
+		}
+	};
+
+	// R1 — masked tool output piped / captured
+	bad(/R1.*mread <file> <start>,<end>.*mgrep -c/s, [
+		"rok/bin/mread lib/x.ts 1,80 | tail -5",
+		"mgrep -n foo lib/ | head",
+		"/abs/rok/bin/mgrep -n foo lib/ |& head",
+		"bash -c 'mgit show abc:lib/a.ts | grep bar'",
+		"n=$(mgrep -c foo lib/a.ts)",
+		"echo `mread lib/a.ts 1,5`",
+		"diff <(mgit show a:f) <(mgit show b:f)",
+		"mask < f | head",
+		"bash <<EOF\nmread lib/x.ts 1,80 | head\nEOF",
+		"flock -w 5 /tmp/x.lock bash -c \"mgrep -n foo lib/ | head\"",
+		"cd rok && mread lib/x.ts 1,9 | cat",
+		"echo \"$(mgrep -c foo lib/a.ts)\"",
+		"for f in a b; do mread $f 1,2 | wc -l; done",
+	]);
+	good([
+		"rok/bin/mread lib/x.ts 1,80",
+		"mgrep -n foo lib/",
+		"mgit diff --stat a..b",
+		"git diff a b | rok/bin/mask",
+		'echo "mread is masked" | wc -c',
+		"echo 'mread x | tail' | wc -c",
+		"grep mread docs/notes.md | head",
+		"cat docs/mread.md | head",
+		"mgit diff a..b | git patch-id",
+		"flock -w 5 /tmp/x.lock bash -c \"mgrep -n foo lib/\"",
+		"mgrep -rn '/mnt/data' lib/",
+	]);
+	// the carve-out is mgit diff -> git patch-id only
+	bad(/R1/, ["mgit show a:f | git patch-id", "mread f 1,2 | git patch-id"]);
+
+	// R2 — raw git content
+	bad(/R2.*mgit show.*rev-parse <sha>:<path>.*cat-file -s/s, [
+		"git show HEAD:lib/x.ts",
+		"git show HEAD:lib/x.ts | sha256sum",
+		'git show "HEAD:lib/x.ts"',
+		"git show abc123",
+		"git show --format=%H:%s abc123:f",
+		"git diff a b",
+		"git -C .worktrees/T-1 diff a..b",
+		"git diff-tree -p abc",
+		"git log -p -3",
+		"git format-patch -1 HEAD",
+		"git archive HEAD | tar -x",
+		"git cat-file -p HEAD:f",
+		"git cat-file blob abc123",
+		"git grep -n foo",
+		"git blame lib/x.ts",
+		"bash -c 'git show HEAD:lib/x.ts'",
+		"bash <<EOF\ngit diff a b\nEOF",
+		"flock -w 5 /tmp/x.lock bash -c \"git blame lib/x.ts\"",
+		"git diff a b | head",
+		"cd x && git show HEAD",
+	]);
+	good([
+		"git rev-parse HEAD:lib/x.ts",
+		"git cat-file -s HEAD:lib/x.ts",
+		"git cat-file -t HEAD",
+		"git cat-file -e HEAD:f",
+		"git ls-files",
+		"git ls-tree HEAD lib",
+		"git log --format=%H -5",
+		"git log --oneline",
+		"git status",
+		"git merge-tree --write-tree a b",
+		"git worktree add -b x .worktrees/x HEAD",
+		"git branch",
+		"git diff --stat a b",
+		"git diff --name-only a b",
+		"git diff --numstat a b",
+		"git diff --quiet a b",
+		"git diff --exit-code",
+		"git show --stat HEAD",
+		"git show --name-only HEAD",
+		"git show --name-status HEAD",
+		"git show --format= HEAD",
+		"git show -s HEAD",
+		"git show --no-patch HEAD",
+		"git diff a b | rok/bin/mask",
+		"echo 'git show HEAD:lib/x.ts'",
+		'echo "git diff a b is raw"',
+		'git commit -m "never git show HEAD:x"',
+	]);
+
+	// R3 — memory directory
+	bad(/R3/, [
+		"cat ~/.claude/projects/-home-x/memory/MEMORY.md",
+		"ls /home/minnyat/.claude/projects/",
+		"find ~/.claude -name '*.md'",
+		"grep -r foo /home/minnyat/.claude/projects/x/memory",
+		"python3 -c \"print(open('/home/u/.claude/projects/p/memory/a.md').read())\"",
+		"bash -c 'cat ~/.claude/projects/x/memory/a.md'",
+	]);
+	good(["ls /home/minnyat/.pi/agent/", "cat /home/minnyat/.pi/agent/skills/x/SKILL.md", "ls .claudex"]);
+
+	// R5 — /mnt/data
+	bad(/R5/, ["ls /mnt/data", "test -e /mnt/data/x", "stat /mnt/data", "cat /mnt/data/a.txt", "bash -c 'ls /mnt/data'", "mgrep foo /mnt/data/x"]);
+	good(["ls /mnt/database2x", "mgrep -rn '/mnt/data' lib/", 'mgrep -rn "/mnt/data" lib/ rok/']);
+
+	// tool side: Read / Grep / Glob / pi read
+	for (const path of [
+		"/home/minnyat/.claude/projects/-home-x/memory/MEMORY.md",
+		"~/.claude/projects/p/memory",
+		"/home/minnyat/.claude/projects/p/memory/**",
+		"/home/minnyat/.claude/projects/p",
+	]) {
+		assert.match(String(mechanicalPathBlockReason("peer", [path])), /R3/, path);
+		assert.equal(mechanicalPathBlockReason("lead", [path]), null);
+	}
+	for (const path of ["/mnt/data", "/mnt/data/x.csv", "/mnt/data/**/*.md"]) {
+		assert.match(String(mechanicalPathBlockReason("peer", [path])), /R5/, path);
+	}
+	for (const path of ["/home/minnyat/.pi/agent/skills/x/SKILL.md", "lib/x.ts", "", "/home/minnyat/.claude/projects/p/s1/tool-results/a.txt"]) {
+		assert.equal(mechanicalPathBlockReason("peer", [path]), null, path);
+	}
+}
+
+// pi adapter: the bash leg and the read leg both reach the rules.
+{
+	const { piStub, handlers } = makePiStub(["read", "bash"]);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	process.env.PASEO_PI_ROLE = "peer";
+	const createExtension = await loadFreshExtension("lifecycle=mechanical-rules");
+	createExtension(piStub);
+	const toolCall = requireHandler(handlers, "tool_call");
+	const run = async (toolName: string, input: Record<string, string>) =>
+		(await toolCall({ toolName, input })) as { block?: boolean; reason?: string } | undefined;
+	assert.match(String((await run("bash", { command: "mread f 1,2 | head" }))?.reason), /R1/);
+	assert.match(String((await run("bash", { command: "git show HEAD:lib/x.ts | sha256sum" }))?.reason), /R2/);
+	assert.match(String((await run("read", { path: "/home/u/.claude/projects/p/memory/MEMORY.md" }))?.reason), /R3/);
+	assert.match(String((await run("read", { path: "/mnt/data/a" }))?.reason), /R5/);
+	assert.equal((await run("bash", { command: "mread f 1,2" }))?.block, undefined);
+	assert.equal((await run("read", { path: "/home/u/.pi/agent/x" }))?.block, undefined);
+	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+	else process.env.PASEO_PI_ROLE = prevRole;
 }
 
 console.log("[paseo-team] pi adapter wiring tests passed");

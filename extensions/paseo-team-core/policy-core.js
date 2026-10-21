@@ -979,6 +979,249 @@ export function supportScriptBlockReason(role, command) {
         return null;
     return "Peer cannot run this Paseo team support script from bash — it would grant coordination or remote-host authority the Peer role does not have. Use peer_ask_lead to raise a DEPENDENCY_REQUEST instead.";
 }
+const SHELL_CODE_CONTEXT_RE = /(?:\b(?:ba|da|z|k)?sh\s+(?:-[A-Za-z-]+\s+)*-[A-Za-z]*c\s+|\beval\s+)$/;
+/**
+ * Splits a command into its unquoted surface plus the quoted strings that are
+ * code (the argument of `sh -c` / `eval`). Other quoted strings are data: they
+ * collapse to a placeholder (keeping a ":" marker for `rev:path`), except for
+ * `$(…)` / backtick bodies inside double quotes, which the shell runs.
+ */
+function shellSurface(command) {
+    let outer = "";
+    const code = [];
+    const extras = [];
+    let i = 0;
+    while (i < command.length) {
+        const ch = command[i] ?? "";
+        if (ch === "\\") {
+            outer += command.slice(i, i + 2);
+            i += 2;
+            continue;
+        }
+        if (ch !== "'" && ch !== '"') {
+            outer += ch;
+            i++;
+            continue;
+        }
+        let j = i + 1;
+        while (j < command.length && command[j] !== ch) {
+            j += ch === '"' && command[j] === "\\" ? 2 : 1;
+        }
+        if (j >= command.length) {
+            outer += ch; // unbalanced: an ordinary character
+            i++;
+            continue;
+        }
+        const content = command.slice(i + 1, j);
+        if (SHELL_CODE_CONTEXT_RE.test(outer)) {
+            code.push(ch === '"' ? content.replace(/\\(["\\$`])/g, "$1") : content);
+        }
+        else if (ch === '"') {
+            for (const m of content.matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) {
+                extras.push(`$(${m[1] ?? m[2] ?? ""})`);
+            }
+        }
+        outer += content.includes(":") ? "Q:Q" : "Q";
+        i = j + 1;
+    }
+    for (const extra of extras)
+        outer += `;${extra}`;
+    return { outer, code };
+}
+function splitShellStages(outer) {
+    const stages = [];
+    const stack = [];
+    let start = 0;
+    const cut = (end, sep) => {
+        stages.push({
+            text: outer.slice(start, end),
+            sub: stack.some((kind) => kind !== "("),
+            sep,
+        });
+    };
+    let i = 0;
+    while (i < outer.length) {
+        const two = outer.slice(i, i + 2);
+        const ch = outer[i] ?? "";
+        let sep = "";
+        let width = 1;
+        if (ch === "\\") {
+            i += 2;
+            continue;
+        }
+        if (two === "$(" || two === "<(" || two === ">(") {
+            sep = two;
+            width = 2;
+        }
+        else if (two === "||" || two === "&&" || two === "|&") {
+            sep = two;
+            width = 2;
+        }
+        else if (ch === "|" || ch === ";" || ch === "\n" || ch === "(" || ch === ")" || ch === "`") {
+            sep = ch;
+        }
+        else if (ch === "&" && !/[<>]/.test(outer[i - 1] ?? "") && outer[i + 1] !== ">") {
+            sep = ch;
+        }
+        else {
+            i++;
+            continue;
+        }
+        cut(i, sep);
+        if (sep === "$(" || sep === "<(" || sep === ">(" || sep === "(")
+            stack.push(sep);
+        else if (sep === ")")
+            stack.pop();
+        else if (sep === "`") {
+            if (stack[stack.length - 1] === "`")
+                stack.pop();
+            else
+                stack.push("`");
+        }
+        i += width;
+        start = i;
+    }
+    cut(outer.length, "");
+    return stages;
+}
+const STAGE_PREFIX = String.raw `^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
+    String.raw `(?:(?:env|time|exec|nohup|command|sudo|nice|xargs|bash|sh|zsh|node)\s+(?:-\S+\s+)*(?:[A-Za-z_]\w*=\S*\s+)*)*` +
+    String.raw `(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
+const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
+const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
+const PATCH_ID_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git\\s+patch-id\\b`);
+const MASK_ONLY_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?mask(?=\\s|$)`);
+const GIT_SAFE_FLAG_RE = /^--(?:stat|numstat|shortstat|name-only|name-status|quiet|exit-code)(?:=|$)/;
+const GIT_PATCH_FLAG_RE = /^(?:-[a-z]*[pu][a-z]*|-U\d*|--patch(?:-with-\w+)?|--cc)$/;
+const GIT_SHOW_QUIET_RE = /^(?:--stat|--numstat|--shortstat|--name-only|--name-status|--format|--no-patch|-s)(?:=|$)/;
+/** Whether `git <args>` prints file content or a patch (the R2 recommendation level). */
+function gitPrintsContent(args) {
+    const words = args.trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < words.length && (words[i] ?? "").startsWith("-")) {
+        i += /^(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env)$/.test(words[i] ?? "") ? 2 : 1;
+    }
+    const sub = words[i] ?? "";
+    const rest = words.slice(i + 1);
+    const flags = rest.filter((w) => w.startsWith("-"));
+    const operands = rest.filter((w) => !w.startsWith("-"));
+    const safe = flags.some((f) => GIT_SAFE_FLAG_RE.test(f));
+    switch (sub) {
+        case "show":
+            if (operands.some((w) => w.includes(":")))
+                return true;
+            return !flags.some((f) => GIT_SHOW_QUIET_RE.test(f));
+        case "diff":
+        case "format-patch":
+            return !safe;
+        case "diff-tree":
+        case "log":
+            return flags.some((f) => GIT_PATCH_FLAG_RE.test(f)) && !safe;
+        case "archive":
+        case "grep":
+        case "blame":
+            return true;
+        case "cat-file":
+            return (flags.some((f) => f === "-p" || f === "--batch" || f.startsWith("--batch=") || f === "--textconv" || f === "--filters") ||
+                operands[0] === "blob");
+        default:
+            return false;
+    }
+}
+const MECHANICAL_R1 = "R1: Peer cannot pipe or capture the output of a masked read tool (mread/mgrep/mgit/mask) — a pipe, $(…), backticks or <(…) hand the content to another process and defeat the masking. Read a slice with `mread <file> <start>,<end>`, count with `mgrep -c <pattern> <file>`, and run the tool as the whole command (`mask` may END a pipe: `git diff a b | mask`; `mgit diff … | git patch-id` is allowed).";
+const MECHANICAL_R2 = "R2: Peer does not read raw git content (git show/diff/log -p/format-patch/archive/cat-file -p|blob/grep/blame). Use `mgit show` / `mgit diff`, or `git rev-parse <sha>:<path>` or `git cat-file -s` for a hash or size; `--stat`, `--name-only` and `--numstat` forms are fine.";
+const MECHANICAL_R3 = "R3: Peer must not read the memory directory (~/.claude/projects/*/memory, or anything under .claude/projects or /.claude/). Ask the Lead for the context you need with peer_ask_lead.";
+const MECHANICAL_R5 = "R5: Peer must not touch /mnt/data (not even ls, test -e or stat). The only mention allowed is inside an `mgrep` search pattern: `mgrep -rn '/mnt/data' lib/`.";
+/** The command with the quoted arguments of every `mgrep` segment blanked (its patterns may name /mnt/data). */
+function withoutMgrepPatterns(command) {
+    let out = "";
+    let atStart = true;
+    let inMgrep = false;
+    let i = 0;
+    while (i < command.length) {
+        const ch = command[i] ?? "";
+        if (atStart && ch !== " " && ch !== "\t") {
+            inMgrep = /^(?:\S*\/)?mgrep(?=\s|$)/.test(command.slice(i));
+            atStart = false;
+        }
+        if (ch === "'" || ch === '"') {
+            const j = command.indexOf(ch, i + 1);
+            if (j > 0) {
+                out += inMgrep ? "Q" : command.slice(i, j + 1);
+                i = j + 1;
+                continue;
+            }
+        }
+        if (ch === "|" || ch === ";" || ch === "&" || ch === "\n")
+            atStart = true;
+        out += ch;
+        i++;
+    }
+    return out;
+}
+function mechanicalShellViolation(command, depth) {
+    const { outer, code } = shellSurface(command);
+    const stages = splitShellStages(outer);
+    for (let k = 0; k < stages.length; k++) {
+        const stage = stages[k];
+        const next = stages[k + 1];
+        const piped = stage.sep === "|" || stage.sep === "|&";
+        const tool = MASKED_TOOL_RE.exec(stage.text);
+        if (tool) {
+            const rest = stage.text.slice(tool[0].length);
+            const patchId = tool[1] === "mgit" && stage.sep === "|" && /^\s*diff\b/.test(rest) && next !== undefined && PATCH_ID_RE.test(next.text);
+            if (!patchId && (stage.sub || piped))
+                return MECHANICAL_R1;
+        }
+        const git = GIT_CALL_RE.exec(stage.text);
+        if (git && gitPrintsContent(stage.text.slice(git[0].length))) {
+            const toMask = stage.sep === "|" && next !== undefined && MASK_ONLY_RE.test(next.text);
+            if (!toMask)
+                return MECHANICAL_R2;
+        }
+    }
+    if (depth < 4) {
+        for (const inner of code) {
+            const reason = mechanicalShellViolation(inner, depth + 1);
+            if (reason)
+                return reason;
+        }
+    }
+    return null;
+}
+/**
+ * Deny reason for a Peer bash command that breaks R1 (masked tool output piped
+ * or captured), R2 (raw git content), R3 (memory directory) or R5 (/mnt/data);
+ * null otherwise. Applies to every Peer, briefed or not.
+ */
+export function mechanicalBashBlockReason(role, command) {
+    if (role !== "peer" || typeof command !== "string" || command.trim() === "")
+        return null;
+    if (/\.claude\/projects\//.test(command) || /\/\.claude(?![\w.-])/.test(command))
+        return MECHANICAL_R3;
+    if (/\/mnt\/data(?![\w.-])/.test(withoutMgrepPatterns(command)))
+        return MECHANICAL_R5;
+    return mechanicalShellViolation(command, 0);
+}
+/**
+ * Deny reason for a Peer file-tool call (Read/Grep/Glob, or pi's read) whose
+ * path-like arguments reach the memory directory (R3) or /mnt/data (R5).
+ */
+export function mechanicalPathBlockReason(role, paths) {
+    if (role !== "peer")
+        return null;
+    for (const raw of paths) {
+        if (typeof raw !== "string" || raw === "")
+            continue;
+        if (/\/mnt\/data(?![\w.-])/.test(raw))
+            return MECHANICAL_R5;
+        if (/(?:^|\/)\.claude\/projects\/[^/]+\/memory(?:\/|$)/.test(raw) ||
+            /(?:^|\/)\.claude\/projects(?:\/[^/]*)?\/?$/.test(raw)) {
+            return MECHANICAL_R3;
+        }
+    }
+    return null;
+}
 /**
  * The text the runtime adapters put on the team_lease tool.
  *
