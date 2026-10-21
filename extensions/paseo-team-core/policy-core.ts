@@ -1177,6 +1177,11 @@ interface ShellStage {
 const SHELL_CODE_CONTEXT_RE =
 	/(?:\b(?:ba|da|z|k)?sh\s+(?:-[A-Za-z-]+\s+)*-[A-Za-z]*c\s+|\beval\s+)$/;
 
+/** `#` starts a comment when it opens a word. */
+function isCommentStart(text: string, i: number): boolean {
+	return text[i] === "#" && (i === 0 || /[\s;|&(`]/.test(text[i - 1] ?? ""));
+}
+
 /**
  * Splits a command into its unquoted surface plus the quoted strings that are
  * code (the argument of `sh -c` / `eval`). Other quoted strings are data: they
@@ -1190,6 +1195,12 @@ function shellSurface(command: string): { outer: string; code: string[] } {
 	let i = 0;
 	while (i < command.length) {
 		const ch = command[i] ?? "";
+		if (isCommentStart(command, i)) {
+			// the rest of the line is not run; a quote opened in it must not hide the lines after
+			const eol = command.indexOf("\n", i);
+			i = eol < 0 ? command.length : eol;
+			continue;
+		}
 		if (ch === "\\") {
 			outer += command.slice(i, i + 2);
 			i += 2;
@@ -1308,7 +1319,7 @@ function markPipedGroups(stages: ShellStage[]): void {
 
 const STAGE_PREFIX =
 	String.raw`^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
-		String.raw`(?:(?:env(?:\s+-u\s+\S+|\s+-\S+)*|stdbuf(?:\s+-[ioe]\s+\S+|\s+-\S+)*|timeout(?:\s+(?:-[ks]\s+\S+|--(?:kill-after|signal)\s+\S+|-\S+))*\s+\d\S*|(?:time|exec|nohup|command|sudo|nice|xargs|bash|sh|zsh|node)(?:\s+-\S+(?:\s+\d+)?)*)\s+(?:[A-Za-z_]\w*=\S*\s+)*)*` +
+		String.raw`(?:(?:env(?:\s+-u\s+\S+|\s+-(?!u(?:\s|$))\S+)*|stdbuf(?:\s+-[ioe]\s+\S+|\s+-(?![ioe](?:\s|$))\S+)*|sudo(?:\s+-[ugCphrt]\s+\S+|\s+-(?![ugCphrt](?:\s|$))\S+)*|timeout(?:\s+(?:-[ks]\s+\S+|--(?:kill-after|signal)\s+\S+|-(?![ks](?:\s|$))(?!-(?:kill-after|signal)(?:\s|$))\S+))*\s+\d\S*|(?:time|exec|nohup|command|nice|xargs|bash|sh|zsh|node)(?:\s+-\S+(?:\s+\d+)?)*)\s+(?:[A-Za-z_]\w*=\S*\s+)*)*` +
 	String.raw`(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
 const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
 const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
@@ -1334,9 +1345,8 @@ function gitPrintsContent(args: string): boolean {
 	const operands = rest.filter((w) => !w.startsWith("-"));
 	const safe = flags.some((f) => GIT_SAFE_FLAG_RE.test(f));
 	const patch = flags.some((f) => GIT_PATCH_FLAG_RE.test(f));
-	// -c is a combined-diff request, not a patch, for the raw-diff plumbing; -u also means "untracked" for stash show.
-	const plumbingPatch = flags.some((f) => f !== "-c" && GIT_PATCH_FLAG_RE.test(f));
-	const stashPatch = flags.some((f) => f !== "-c" && f !== "-u" && GIT_PATCH_FLAG_RE.test(f));
+	// git stash show: -u means --include-untracked there, not a patch (-c does print one everywhere).
+	const stashPatch = flags.some((f) => f !== "-u" && GIT_PATCH_FLAG_RE.test(f));
 	switch (sub) {
 		case "show":
 			if (patch || operands.some((w) => w.includes(":"))) return true;
@@ -1352,7 +1362,7 @@ function gitPrintsContent(args: string): boolean {
 		case "diff-files":
 		case "whatchanged":
 		case "reflog":
-			return plumbingPatch;
+			return patch;
 		case "stash":
 			return operands[0] === "show" && stashPatch;
 		case "archive":
@@ -1407,6 +1417,11 @@ function segmentEnd(text: string, from: number): number {
 	let i = from;
 	while (i < text.length) {
 		const ch = text[i] ?? "";
+		if (isCommentStart(text, i)) {
+			const eol = text.indexOf("\n", i);
+			i = eol < 0 ? text.length : eol;
+			continue;
+		}
 		if (ch === "\\") {
 			i += 2;
 			continue;
@@ -1450,6 +1465,7 @@ function mgrepWords(text: string): MgrepWord[] {
 			afterRedirect = true;
 			continue;
 		}
+		if (ch === "#") break; // a comment ends the arguments
 		const start = i;
 		let unsafe = false;
 		while (i < text.length) {
@@ -1473,6 +1489,7 @@ function mgrepWords(text: string): MgrepWord[] {
 			}
 		}
 		const raw = text.slice(start, Math.min(i, text.length));
+		if (raw.includes("\n")) unsafe = true;
 		const fdBeforeRedirect = /^\d+$/.test(raw) && (text[i] === "<" || text[i] === ">");
 		words.push({ start, end: Math.min(i, text.length), text: raw, unsafe, redirect: afterRedirect || fdBeforeRedirect });
 		afterRedirect = false;

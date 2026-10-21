@@ -2956,7 +2956,28 @@ console.log("[paseo-team] skill admission tests passed");
 		"git diff-tree -r --binary",
 	]);
 	// N8 — blank every -e operand; -c / -u are not patches for these
-	good(["git diff-index -c", "git stash show -u", "git log --diff-merges=off -1"]);
+	// -c prints a full patch on every one of these (measured, git 2.43); only stash show -u is not a patch
+	bad(/R2/, ["git diff-index -c HEAD", "git diff-files -c", "git whatchanged -c -1", "git reflog -c"]);
+	good(["git stash show -u", "git log --diff-merges=off -1"]);
+
+	// F-A — the wrapper prefix must neither backtrack exponentially nor treat -u as a bare flag
+	bad(/R5/, ["env -u mgrep /mnt/data/x", "sudo -u mgrep /mnt/data/x", "env -u -u -u mgrep /mnt/data/x"]);
+	good(["env -u HOME mgrep -rn '/mnt/data' lib/", "sudo -u nobody mgrep -rn '/mnt/data' lib/"]);
+	{
+		const started = Date.now();
+		for (const wrapper of ["env ", "stdbuf ", "timeout ", "sudo "]) {
+			const flag = wrapper === "env " ? "-u " : wrapper === "stdbuf " ? "-o " : wrapper === "timeout " ? "-k " : "-u ";
+			mechanicalBashBlockReason("peer", wrapper + flag.repeat(34) + "x");
+		}
+		mechanicalBashBlockReason("peer", "env " + "-u ".repeat(120) + "x");
+		assert.ok(Date.now() - started < 2000, "pathological wrapper chains finish in milliseconds, not minutes");
+	}
+
+	// F-C — a # comment can hide a quote opener; the lines in between still run
+	bad(/R5/, ["mgrep #'\ncat /mnt/data/x\n#' lib", "mgrep -rn foo #'\ncat /mnt/data/x\n#' lib"]);
+	bad(/R1/, ["echo #'\nmread a | head\n#'"]);
+	good(["echo a#b | wc -c", "echo ${#PATH} | wc -c", "mread f 1,2 # trailing note"]);
+	// not exploitable, left as is: an abbreviated long option (--fil) passes the hook, but the real mgrep dies on it
 	// N4 / N6 — known-miss (documented, not fixed): these pass today
 	good([
 		"for a in 1; do for b in 2; do mread f 1,2; done; done | head",
