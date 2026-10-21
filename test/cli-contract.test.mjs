@@ -856,7 +856,14 @@ try {
 		// Its own config dir: the routing block above leaves a deliberately
 		// incomplete route file in the shared one.
 		const teamDir = join(sandbox, "team-jobs");
-		const env = { PST_TEAM_CONFIG_DIR: teamDir };
+		// The fake client keeps every pi-models save hermetic: once `config
+		// write pi-models` resets the daemon's catalog cache (asserted below),
+		// a save made without it would try the developer's REAL SDK and daemon.
+		const env = {
+			PST_TEAM_CONFIG_DIR: teamDir,
+			PASEO_TEAM_PASEO_CLIENT: join(HERE, "fixtures", "fake-paseo-client.mjs"),
+			PST_FAKE_CLIENT_LOG: join(sandbox, "team-jobs-client.log"),
+		};
 		const jobsFile = join(teamDir, "jobs.local.json");
 
 		const none = run(["jobs", "list"], env);
@@ -1014,8 +1021,47 @@ try {
 		const fine = run(["config", "write", "pi-models"], { ...env, __stdin: overrides({ "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } }) });
 		assert.equal(fine.status, 0, fine.stderr);
 		const legacy = JSON.stringify({ version: 1, providers: { Minnyat: { baseUrl: "https://example.test/v1", contextWindow: 200000, maxTokens: 32000 } } });
-		assert.equal(run(["config", "write", "pi-models"], { ...env, __stdin: legacy }).status, 0, "legacy endpoint-level limits are a sync warning, not a save error");
-		assert.equal(run(["config", "write", "pi-models"], { ...env, __stdin: '{"version":1,"providers":{}}' }).status, 0, "an empty catalog file (the form seed) saves");
+		assert.equal(run(["config", "write", "pi-models", "--no-refresh"], { ...env, __stdin: legacy }).status, 0, "legacy endpoint-level limits are a sync warning, not a save error");
+		assert.equal(run(["config", "write", "pi-models", "--no-refresh"], { ...env, __stdin: '{"version":1,"providers":{}}' }).status, 0, "an empty catalog file (the form seed) saves");
+
+		// A pi-models save resets the daemon's catalog cache. Paseo answers model
+		// questions from a snapshot it keeps for its whole process lifetime; a
+		// config the UI just saved is a config the daemon has not heard about, so
+		// the next session is seated from a stale list until someone remembers
+		// `pteam models refresh`. The save now does it itself: refresh on by
+		// default, `--no-refresh` to skip, a failed refresh never un-writes the
+		// file but never reads as done either.
+		const logPath = join(sandbox, "config-write-refresh.log");
+		const clientRun = (args, extraEnv = {}) => {
+			rmSync(logPath, { force: true });
+			const result = run(args, { ...env, PST_FAKE_CLIENT_LOG: logPath, ...extraEnv });
+			const calls = existsSync(logPath)
+				? readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+				: [];
+			return { ...result, calls };
+		};
+		const saved = clientRun(["config", "write", "pi-models"], { __stdin: overrides({ "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } }) });
+		assert.equal(saved.status, 0, saved.stderr);
+		assert.equal(saved.json.refresh.ok, true, "a pi-models save tells the daemon to re-read its catalog");
+		assert.deepEqual(saved.calls.find((c) => c.event === "refresh").payload, {}, "everything is refreshed: any provider may have changed");
+		assert.ok(saved.calls.some((c) => c.event === "close"), "the socket is closed, not leaked");
+
+		const skipped = clientRun(["config", "write", "pi-models", "--no-refresh"], { __stdin: overrides({ "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } }) });
+		assert.equal(skipped.status, 0, skipped.stderr);
+		assert.equal(skipped.json.refresh.skipped, true, "--no-refresh says it skipped instead of pretending");
+		assert.equal(skipped.calls.length, 0, "--no-refresh never opens a connection");
+
+		const down = clientRun(["config", "write", "pi-models"], { __stdin: overrides({ "gpt-5.5": { contextWindow: 400000, maxTokens: 128000 } }), PST_FAKE_CLIENT_MODE: "unreachable" });
+		assert.equal(down.status, 0, down.stderr);
+		assert.equal(down.json.ok, true, "the file on disk is correct whether or not the daemon listened");
+		assert.equal(down.json.refresh.ok, false);
+		assert.match(down.json.refresh.hint, /restart the daemon/, "the hint names what actually finishes the job");
+
+		// Only the pi-models section feeds that catalog; no other save pays for it.
+		const other = clientRun(["config", "write", "pi-settings"], { __stdin: JSON.stringify({ theme: "dark" }) });
+		assert.equal(other.status, 0, other.stderr);
+		assert.equal(other.calls.length, 0, "a non-model section never opens a connection");
+		assert.equal(other.json.refresh, undefined, "and its answer carries no refresh section at all");
 
 		const help = run(["--help"]);
 		assert.match(help.stdout, /pteam jobs list/);

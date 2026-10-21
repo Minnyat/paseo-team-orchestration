@@ -586,8 +586,8 @@ async function cmdConfigRead(section, rest = []) {
 	json({ exists: true, path, rev, data, ...extras });
 }
 
-function cmdConfigWrite(section, rest = []) {
-	rejectUnknownFlags(rest, ["--rev"]);
+async function cmdConfigWrite(section, rest = []) {
+	rejectUnknownFlags(rest, ["--rev", "--no-refresh"]);
 	const path = resolveSection(section);
 	const rev = flagValue(rest, "--rev");
 	const content = readStdin();
@@ -619,7 +619,30 @@ function cmdConfigWrite(section, rest = []) {
 	} catch (e) {
 		fail(`invalid JSON or write failed for ${path}: ${e.message}`);
 	}
-	json({ ok: true, wrote: true, path, rev: fileRev(path) });
+	// The pi-models section is the one whose edits change the catalog the daemon
+	// caches for its whole process lifetime. A save that does not tell the daemon
+	// leaves every later session seated from a stale model list until someone
+	// remembers `pteam models refresh` — so the save does it itself. Only that
+	// section pays: nothing else here feeds the catalog. A failed refresh never
+	// un-writes the file, but it never reads as done either (same rule as
+	// `models sync`).
+	if (section !== "pi-models") {
+		json({ ok: true, wrote: true, path, rev: fileRev(path) });
+		return;
+	}
+	let refresh = { skipped: true, reason: "--no-refresh" };
+	if (!rest.includes("--no-refresh")) {
+		const refreshed = await refreshProviderSnapshot([], { timeoutMs: 20000 });
+		refresh = refreshed.ok
+			? { ok: true }
+			: {
+					ok: false,
+					code: refreshed.code,
+					message: refreshed.message,
+					hint: "the file is written; restart the daemon to make it visible (systemctl --user restart paseo)",
+				};
+	}
+	json({ ok: true, wrote: true, path, rev: fileRev(path), refresh });
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,7 +1742,7 @@ usage:
   pteam claude-setup [--install|--apply|--verify|--uninstall|--print-providers] [--json] [--force]
                                            (--apply writes the claude-* providers; it does NOT reload)
   pteam config read  <section> [--no-discovery]
-  pteam config write <section> [--rev <rev>]  (JSON body on stdin; --rev refuses the write if the file changed since config read gave that rev)
+  pteam config write <section> [--rev <rev>] [--no-refresh]  (JSON body on stdin; --rev refuses the write if the file changed since config read gave that rev; a pi-models save also tells the daemon to re-read its model catalog unless --no-refresh)
   pteam prompts read <role>                (supervisor|lead|peer)
   pteam prompts write <role>               (markdown body on stdin)
   pteam skills list

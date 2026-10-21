@@ -157,7 +157,15 @@ export function routingShow({ env = process.env } = {}) {
  * The live inventory for one role provider on the LOCAL daemon: the same two
  * reads preflight makes (`provider ls`, `provider models <rp>`). An `{ error }`
  * body or a non-array answer is a failure, never "zero models".
+ *
+ * `provider ls` answers the same question for every caller — it names the
+ * daemon's providers and nothing about one of them in particular — so one
+ * process asks it once and every later call reuses the answer. A routing
+ * check over N distinct providers would otherwise pay N identical `provider
+ * ls` spawns; only a successful read is remembered, so a daemon that was down
+ * stays down rather than caching its failure.
  */
+let providersListPromise = null;
 export async function liveInventory(paseoProvider, { timeoutMs = 20_000 } = {}) {
 	const read = async (args) => {
 		try {
@@ -175,8 +183,14 @@ export async function liveInventory(paseoProvider, { timeoutMs = 20_000 } = {}) 
 			return { ok: false, message: `paseo ${args.join(" ")} failed (${code}): ${String(error?.message ?? error)}` };
 		}
 	};
-	const providers = await read(["provider", "ls"]);
-	if (!providers.ok) return providers;
+	// Memoizing the PROMISE (not the result) keeps parallel callers from each
+	// spawning their own `provider ls` before the first answer lands.
+	providersListPromise ??= read(["provider", "ls"]);
+	const providers = await providersListPromise;
+	if (!providers.ok) {
+		providersListPromise = null; // a failed read is not remembered — retry next call
+		return providers;
+	}
 	const models = await read(["provider", "models", paseoProvider]);
 	if (!models.ok) return models;
 	return { ok: true, inventory: { providers: providers.value, models: models.value } };
@@ -571,6 +585,28 @@ export async function routingCheck({ env = process.env, inventoryFor = liveInven
 		add("route-gate", "fail", `${table.code}: ${table.message}`);
 	} else {
 		add("route-gate", "pass", `create_agent is checked against ${table.path} (host "${table.hostId}")`);
+		// One inventory read per DISTINCT provider behind an option that will be
+		// checked, fetched in parallel — not one read per option. A route file
+		// commonly seats many classes and alternates on the same handful of role
+		// providers; paying two paseo spawns per option made `routing check` take
+		// ~38s on the reference host where ~2s of work existed. The per-option
+		// loop below answers from this map, so the check rows and their order are
+		// exactly what the per-option fetches used to produce.
+		const needsInventory = (option) =>
+			option.enabled && !isModelDisabled(table.disabledModels, option.paseoProvider, option.model);
+		const providers = new Set();
+		for (const modelClass of ALL_MODEL_CLASSES) {
+			const route = table.routes[modelClass];
+			if (!route) continue;
+			for (const option of routeOptions(route)) {
+				if (needsInventory(option)) providers.add(option.paseoProvider);
+			}
+		}
+		const inventories = new Map(
+			await Promise.all(
+				[...providers].map(async (provider) => [provider, await inventoryFor(provider, { env })]),
+			),
+		);
 		for (const modelClass of ALL_MODEL_CLASSES) {
 			const route = table.routes[modelClass];
 			if (!route) {
@@ -580,17 +616,17 @@ export async function routingCheck({ env = process.env, inventoryFor = liveInven
 			// Every option is checked; the id of option N > 0 is `route:CLASS#N`.
 			for (const option of routeOptions(route)) {
 				const id = option.index === 0 ? `route:${modelClass}` : `route:${modelClass}#${option.index}`;
-				if (!option.enabled) {
-					add(id, "warn", `switched off — ${option.index === 0 && !route.alternates ? "the gate refuses every seating of this class" : "this option is not offered"} (pteam routing enable ${modelClass}${option.index === 0 && !route.alternates ? "" : ` --option ${option.index}`})`);
+				if (!needsInventory(option)) {
+					if (!option.enabled) {
+						add(id, "warn", `switched off — ${option.index === 0 && !route.alternates ? "the gate refuses every seating of this class" : "this option is not offered"} (pteam routing enable ${modelClass}${option.index === 0 && !route.alternates ? "" : ` --option ${option.index}`})`);
+					} else {
+						add(id, "warn", `its model is switched off (disabledModels) — this option is not offered (pteam routing enable-model <family>/<model>)`);
+					}
 					continue;
 				}
-				if (isModelDisabled(table.disabledModels, option.paseoProvider, option.model)) {
-					add(id, "warn", `its model is switched off (disabledModels) — this option is not offered (pteam routing enable-model <family>/<model>)`);
-					continue;
-				}
-				const live = await inventoryFor(option.paseoProvider, { env });
-				if (!live.ok) {
-					add(id, "fail", `${live.message} — unverifiable is not a pass`);
+				const live = inventories.get(option.paseoProvider);
+				if (!live || !live.ok) {
+					add(id, "fail", `${live?.message ?? `inventory for ${option.paseoProvider} was not fetched`} — unverifiable is not a pass`);
 					continue;
 				}
 				try {

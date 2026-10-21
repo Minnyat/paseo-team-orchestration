@@ -256,7 +256,7 @@ Hoặc bật/tắt trong WebUI → Cấu hình → Định tuyến mô hình →
 | Route (`model-routing` / `cluster-routing`), công tắc `enabled` và `disabledModels` | **Ngay.** Adapter Pi chạy `gate-routes` mỗi lần `create_agent`, hook Claude là một tiến trình mới mỗi lời gọi; không có cache. |
 | Job, executor, `disabledTools` trong `jobs.local.json` | **Ngay.** `pteam jobs list/show` đọc file mỗi lần. |
 | `~/.paseo/config.json` (provider Paseo) | Cần `paseo daemon restart`. |
-| `~/.pi/agent/models.json` | Cần "Nạp lại cho Paseo" (`pteam models refresh`). |
+| `~/.pi/agent/models.json` | Cần "Nạp lại cho Paseo" — tự động sau mỗi lần lưu section `pi-models` (CLI/WebUI, `config write pi-models [--no-refresh]`) và cuối `models sync`; sửa tay file thì chạy `pteam models refresh` hoặc nút "Nạp lại cho Paseo" trong WebUI. |
 | Pi `settings.json` (tools mặc định, retry…), MCP | Từ phiên agent kế tiếp. |
 
 Một lớp việc có thể có **nhiều tool + model** (`alternates`, xem mục dưới); một *việc*
