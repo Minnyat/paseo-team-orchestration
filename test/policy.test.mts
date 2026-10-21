@@ -3020,12 +3020,27 @@ console.log("[paseo-team] skill admission tests passed");
 	]);
 	// P1 — a comment ends at a backtick that closes one opened before the #
 	bad(/R1/, ["echo `#x`; mread f 1,2 | head"]);
+	bad(/R1/, ["x=`echo a # c`; mread f 1,2 | head"]);
+	// J1 — a lone `--` ends the options; the command follows it
+	bad(/R1/, ["env -- mread f 1,2 | head", "xargs -- mgrep -n foo lib | head", "sudo -- mread f 1,2 | head"]);
+	bad(/R2/, ["env -i -- git show HEAD:x | sha256sum"]);
+	// J2 — a backtick is comment text unless a `…` substitution is open, so it cannot hide the next line
+	bad(/R1/, ["# a ` '\nmread f 1,2 | head\n: '", "echo ok # it`s fine '\nmread f 1,2 | head\n: '"]);
+	bad(/R2/, ["# a ` '\ngit show HEAD:x | sha256sum\n: '"]);
+	// J3
+	bad(/R1/, ["sudo --close-from 3 mread f 1,2 | head"]);
+	// J4 — known-miss (documented, heuristic class, not fixed): these pass today
+	good([
+		"env - mread f 1,2 | head", // lone - : env clears the environment, the shell-level parse does not see a command
+		"env -u'' X mread f 1,2 | head", // an empty quoted pair glues into the option word
+		"env -S 'mread f 1,2' | head", // -S takes a string of code
+	]);
 	// P2 — known-miss (documented, not fixed): wrapper long options may be abbreviated (env --uns X)
 	good(["env --uns X mread f 1,2 | head"]);
 	// timing: the new cluster shapes stay linear
 	{
 		const started = Date.now();
-		for (const chain of ["env " + "-u ".repeat(300), "env " + "-uC ".repeat(300), "xargs " + "-0n 1 ".repeat(300)]) {
+		for (const chain of ["env " + "-u ".repeat(300), "env " + "-uC ".repeat(300), "xargs " + "-0n 1 ".repeat(300), "env " + "-- ".repeat(300), "env " + "-u x -- -i ".repeat(300)]) {
 			mechanicalBashBlockReason("peer", chain + "x");
 		}
 		assert.ok(Date.now() - started < 2000, "cluster chains finish in milliseconds");

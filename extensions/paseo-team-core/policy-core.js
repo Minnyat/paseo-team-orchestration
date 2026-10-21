@@ -997,9 +997,12 @@ function isCommentStart(text, i) {
         slashes++;
     return slashes % 2 === 0;
 }
-/** Where a comment opened at `i` ends: at the newline, or at a backtick (which may close a `…` opened before the #). */
-function commentEnd(text, i) {
-    const m = /[\n`]/.exec(text.slice(i));
+/**
+ * Where a comment opened at `i` ends: at the newline, or — only while a `…` substitution is open — at
+ * the backtick that closes it. Without an open one a backtick is just comment text.
+ */
+function commentEnd(text, i, backtickOpen) {
+    const m = (backtickOpen ? /[\n`]/ : /\n/).exec(text.slice(i));
     return m ? i + m.index : text.length;
 }
 /**
@@ -1012,12 +1015,13 @@ function shellSurface(command) {
     let outer = "";
     const code = [];
     const extras = [];
+    let backtickOpen = false;
     let i = 0;
     while (i < command.length) {
         const ch = command[i] ?? "";
         if (isCommentStart(command, i)) {
             // the rest of the line is not run; a quote opened in it must not hide the lines after
-            i = commentEnd(command, i);
+            i = commentEnd(command, i, backtickOpen);
             continue;
         }
         if (ch === "\\") {
@@ -1026,6 +1030,8 @@ function shellSurface(command) {
             continue;
         }
         if (ch !== "'" && ch !== '"') {
+            if (ch === "`")
+                backtickOpen = !backtickOpen;
             outer += ch;
             i++;
             continue;
@@ -1159,11 +1165,11 @@ function wrapperOptions(valueLetters, longValue) {
     const attached = `-(?!-)${flag}*[${valueLetters}]\\S+`;
     const lastLetter = `-(?!-)${flag}*[${valueLetters}](?=\\s)\\s+\\S+`;
     const longTaking = `--(?:${longValue})\\s+\\S+`;
-    const bareLong = `--(?!(?:${longValue})(?:\\s|$))\\S+`;
+    const bareLong = `--(?!(?:${longValue})(?:\\s|$))\\S*`; // \S*: a lone `--` ends the options
     return `(?:\\s+(?:${bareShort}|${attached}|${lastLetter}|${longTaking}|${bareLong}))*`;
 }
 const STAGE_PREFIX = String.raw `^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
-    `(?:(?:env${wrapperOptions("uCS", "unset|chdir|split-string")}|stdbuf${wrapperOptions("ioe", "input|output|error")}|sudo${wrapperOptions("ugCphrtDRTU", "user|group|chdir|chroot|host|prompt|role|type|command-timeout|other-user")}|xargs${wrapperOptions("IaEdLnPs", "arg-file|delimiter|max-args|max-procs|max-lines|max-chars|process-slot-var")}|timeout${wrapperOptions("ks", "kill-after|signal")}\\s+\\d\\S*|(?:time|exec|nohup|command|nice|bash|sh|zsh|node)(?:\\s+-\\S+(?:\\s+\\d+)?)*)\\s+(?:[A-Za-z_]\\w*=\\S*\\s+)*)*` +
+    `(?:(?:env${wrapperOptions("uCS", "unset|chdir|split-string")}|stdbuf${wrapperOptions("ioe", "input|output|error")}|sudo${wrapperOptions("ugCphrtDRTU", "user|group|chdir|chroot|host|prompt|role|type|command-timeout|other-user|close-from")}|xargs${wrapperOptions("IaEdLnPs", "arg-file|delimiter|max-args|max-procs|max-lines|max-chars|process-slot-var")}|timeout${wrapperOptions("ks", "kill-after|signal")}\\s+\\d\\S*|(?:time|exec|nohup|command|nice|bash|sh|zsh|node)(?:\\s+-\\S+(?:\\s+\\d+)?)*)\\s+(?:[A-Za-z_]\\w*=\\S*\\s+)*)*` +
     String.raw `(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
 const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
 const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
@@ -1249,12 +1255,12 @@ function quotedEnd(text, i) {
     return -1;
 }
 /** Index of the first unquoted separator at or after `from`, or the end of the text. */
-function segmentEnd(text, from) {
+function segmentEnd(text, from, backtickOpen) {
     let i = from;
     while (i < text.length) {
         const ch = text[i] ?? "";
         if (isCommentStart(text, i)) {
-            i = commentEnd(text, i);
+            i = commentEnd(text, i, backtickOpen);
             continue;
         }
         if (ch === "\\") {
@@ -1399,9 +1405,10 @@ function mgrepPatternRanges(segment) {
  */
 function withoutMgrepPatterns(command) {
     let out = "";
+    let backtickOpen = false;
     let i = 0;
     while (i < command.length) {
-        const end = segmentEnd(command, i);
+        const end = segmentEnd(command, i, backtickOpen);
         const segment = command.slice(i, end);
         let last = 0;
         for (const [from, to] of mgrepPatternRanges(segment)) {
@@ -1413,6 +1420,8 @@ function withoutMgrepPatterns(command) {
             break;
         const width = Math.max(shellSepWidth(command, end), 1);
         out += command.slice(end, end + width);
+        if (command[end] === "`")
+            backtickOpen = !backtickOpen;
         i = end + width;
     }
     return out;
