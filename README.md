@@ -1075,7 +1075,10 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
    instead of losing them (`--only <name>` syncs just one). The
    API key never enters that file: it names the env var and the file holding it.
    The daemon caches the catalog for its whole lifetime, so `models sync` ends by
-   refreshing it; `pteam models refresh` does that step alone. A refresh that
+   refreshing it; `pteam models refresh` does that step alone, and a
+   `pi-models` save (`pteam config write pi-models` — the path the WebUI form
+   uses) refreshes on its own unless told `--no-refresh`, so a config saved
+   from the UI is a config the next session can already be seated from. A refresh that
    succeeds is what removes the need to restart the daemon — when it is skipped
    (`--dry-run`, `--no-refresh`) or fails, both commands say so and name the
    restart that finishes the job.
