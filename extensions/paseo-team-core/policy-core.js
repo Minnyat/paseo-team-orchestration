@@ -981,6 +981,13 @@ export function supportScriptBlockReason(role, command) {
     return "Peer cannot run this Paseo team support script from bash — it would grant coordination or remote-host authority the Peer role does not have. Use peer_ask_lead to raise a DEPENDENCY_REQUEST instead.";
 }
 const SHELL_CODE_CONTEXT_RE = /(?:\b(?:ba|da|z|k)?sh\s+(?:-[A-Za-z-]+\s+)*-[A-Za-z]*c\s+|\beval\s+)$/;
+/** Length of the run of `ch` ending right before index `end`. */
+function runBefore(text, end, ch) {
+    let n = 0;
+    while (end - n - 1 >= 0 && text[end - n - 1] === ch)
+        n++;
+    return n;
+}
 /**
  * `#` starts a comment when it opens a word: it follows a space, tab, newline or
  * one of ; | & ( ) ` that is not backslash-escaped (JS `\s` would also take \r, \v, NBSP).
@@ -992,10 +999,7 @@ function isCommentStart(text, i) {
         return true;
     if (!" \t\n;|&()`".includes(text[i - 1] ?? "x"))
         return false;
-    let slashes = 0;
-    for (let j = i - 2; j >= 0 && text[j] === "\\"; j--)
-        slashes++;
-    return slashes % 2 === 0;
+    return runBefore(text, i - 1, "\\") % 2 === 0;
 }
 /**
  * Where a comment opened at `i` ends: at the newline, or — only while a `…` substitution is open — at
@@ -1249,9 +1253,17 @@ function shellSepWidth(text, i) {
         return 2;
     return /[|;&\n()`]/.test(text[i] ?? "") ? 1 : 0;
 }
-/** A `$` + single quote opens an ANSI-C string, where a backslash escapes (so an escaped quote does not close it). */
+/**
+ * A single quote that opens an ANSI-C string (`$'…'`, where a backslash escapes). `$$` is the PID, so
+ * the run of `$` before the quote pairs up from the left and only an odd remainder belongs to the quote;
+ * an odd run of backslashes before the run escapes its first `$`.
+ */
 function isAnsiCQuote(text, i) {
-    return text[i] === "'" && text[i - 1] === "$" && text[i - 2] !== "\\";
+    if (text[i] !== "'")
+        return false;
+    const dollars = runBefore(text, i, "$");
+    const escaped = runBefore(text, i - dollars, "\\") % 2 === 1 ? 1 : 0;
+    return (dollars - escaped) % 2 === 1;
 }
 /** End of the quoted string opened at `i` (index after its closing quote), or -1 when unterminated. */
 function quotedEnd(text, i) {

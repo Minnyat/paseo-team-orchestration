@@ -3033,8 +3033,21 @@ console.log("[paseo-team] skill admission tests passed");
 	// K2 — in $'…' a backslash escapes the quote, so `$'\''` is one string and the next command still runs
 	bad(/R1/, ["echo $'\\''; mread f 1,2 | head; echo $'\\''"]);
 	bad(/R2/, ["echo $'\\''; git show HEAD:x | sha256sum; echo $'\\''"]);
+	// L1 — $$ is the PID: an even run of $ before a quote leaves a plain quote, no escapes inside
+	bad(/R1/, ["echo $$'\\'; mread f 1,2 | head; echo 'x'", "echo $$$$'\\'; mread f 1,2 | head; echo 'x'"]);
+	bad(/R2/, ["echo $$'\\'; git show HEAD:x | sha256sum; echo 'x'"]);
+	// L2 — a backslash run before the $ run: \\$' (even) is still ANSI-C, \$' (odd) is a plain quote
+	bad(/R1/, ["echo \\\\$'\\''; mread f 1,2 | head; echo \\\\$'\\''"]);
+	bad(/R2/, ["echo \\\\$'\\''; git show HEAD:x | sha256sum; echo \\\\$'\\''"]);
+	// old behaviour kept (a syntax-error command, still scanned): the $ here sits inside a plain quote
+	bad(/R1/, ["echo '$\\''; mread f 1,2 | head"]);
+	// L3 — known-miss (documented, not fixed): the code argument of sh -c / eval written $'…' or $"…" is not scanned
+	good(["bash -c $'mread f 1,2 | head'", "eval $'mread f 1,2 | head'", 'bash -c $"mread f 1,2 | head"']);
 	{
 		const started = Date.now();
+		mechanicalBashBlockReason("peer", "echo " + "$$'\\' ".repeat(3000));
+		mechanicalBashBlockReason("peer", "echo " + "\\\\$' ".repeat(3000));
+		assert.ok(Date.now() - started < 2000, "dollar / backslash runs stay linear");
 		mechanicalBashBlockReason("peer", "x=`echo a # " + "\\`".repeat(3000) + "\nls");
 		mechanicalBashBlockReason("peer", "echo " + "$'\\'' ".repeat(3000));
 		assert.ok(Date.now() - started < 2000, "escaped-backtick and ANSI-C chains stay linear");
