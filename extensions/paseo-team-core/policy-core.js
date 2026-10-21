@@ -1002,8 +1002,16 @@ function isCommentStart(text, i) {
  * the backtick that closes it. Without an open one a backtick is just comment text.
  */
 function commentEnd(text, i, backtickOpen) {
-    const m = (backtickOpen ? /[\n`]/ : /\n/).exec(text.slice(i));
-    return m ? i + m.index : text.length;
+    let slashes = 0; // an escaped backtick (odd run of backslashes) is a letter, not the closer
+    for (let j = i; j < text.length; j++) {
+        const c = text[j];
+        if (c === "\n")
+            return j;
+        if (c === "`" && backtickOpen && slashes % 2 === 0)
+            return j;
+        slashes = c === "\\" ? slashes + 1 : 0;
+    }
+    return text.length;
 }
 /**
  * Splits a command into its unquoted surface plus the quoted strings that are
@@ -1036,9 +1044,10 @@ function shellSurface(command) {
             i++;
             continue;
         }
+        const escapes = ch === '"' || isAnsiCQuote(command, i);
         let j = i + 1;
         while (j < command.length && command[j] !== ch) {
-            j += ch === '"' && command[j] === "\\" ? 2 : 1;
+            j += escapes && command[j] === "\\" ? 2 : 1;
         }
         if (j >= command.length) {
             outer += ch; // unbalanced: an ordinary character
@@ -1240,12 +1249,17 @@ function shellSepWidth(text, i) {
         return 2;
     return /[|;&\n()`]/.test(text[i] ?? "") ? 1 : 0;
 }
+/** A `$` + single quote opens an ANSI-C string, where a backslash escapes (so an escaped quote does not close it). */
+function isAnsiCQuote(text, i) {
+    return text[i] === "'" && text[i - 1] === "$" && text[i - 2] !== "\\";
+}
 /** End of the quoted string opened at `i` (index after its closing quote), or -1 when unterminated. */
 function quotedEnd(text, i) {
     const quote = text[i];
+    const escapes = quote === '"' || isAnsiCQuote(text, i);
     let j = i + 1;
     while (j < text.length) {
-        if (quote === '"' && text[j] === "\\")
+        if (escapes && text[j] === "\\")
             j += 2;
         else if (text[j] === quote)
             return j + 1;

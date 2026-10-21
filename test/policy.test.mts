@@ -3027,6 +3027,18 @@ console.log("[paseo-team] skill admission tests passed");
 	// J2 — a backtick is comment text unless a `…` substitution is open, so it cannot hide the next line
 	bad(/R1/, ["# a ` '\nmread f 1,2 | head\n: '", "echo ok # it`s fine '\nmread f 1,2 | head\n: '"]);
 	bad(/R2/, ["# a ` '\ngit show HEAD:x | sha256sum\n: '"]);
+	// K1 — an escaped backtick inside the comment is a letter: the substitution is still open, no quote is hidden
+	bad(/R1/, ["x=`echo a # c \\` '\nmread f 1,2 | head\n: '"]);
+	bad(/R2/, ["x=`echo a # c \\` '\ngit show HEAD:x | sha256sum\n: '"]);
+	// K2 — in $'…' a backslash escapes the quote, so `$'\''` is one string and the next command still runs
+	bad(/R1/, ["echo $'\\''; mread f 1,2 | head; echo $'\\''"]);
+	bad(/R2/, ["echo $'\\''; git show HEAD:x | sha256sum; echo $'\\''"]);
+	{
+		const started = Date.now();
+		mechanicalBashBlockReason("peer", "x=`echo a # " + "\\`".repeat(3000) + "\nls");
+		mechanicalBashBlockReason("peer", "echo " + "$'\\'' ".repeat(3000));
+		assert.ok(Date.now() - started < 2000, "escaped-backtick and ANSI-C chains stay linear");
+	}
 	// J3
 	bad(/R1/, ["sudo --close-from 3 mread f 1,2 | head"]);
 	// J4 — known-miss (documented, heuristic class, not fixed): these pass today
