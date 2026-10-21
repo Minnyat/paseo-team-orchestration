@@ -2999,9 +2999,41 @@ console.log("[paseo-team] skill admission tests passed");
 		"xargs -I mgrep /mnt/data/x",
 		"xargs -a mgrep /mnt/data/x",
 	]);
+	// H1 — getopt: the FIRST value letter in a cluster takes the rest of the cluster (attached), not the next word
+	bad(/R5/, [
+		"env -uC cat mgrep /mnt/data/x",
+		"xargs -IL cat mgrep /mnt/data/x",
+		"sudo -uD cat mgrep /mnt/data/x",
+		// measured: `sudo -n -uE true` -> "unknown user E" (u takes E), so `root` is the command here
+		"sudo -uE root mgrep -rn '/mnt/data' lib/",
+		// H2 — digits inside a cluster
+		"xargs -0I mgrep /mnt/data/x",
+		"xargs -0a mgrep /mnt/data/x",
+		"xargs --process-slot-var mgrep /mnt/data/x",
+	]);
+	bad(/R1/, ["env -uiC mread f 1,2 | head", "xargs -0n 1 mgrep -n foo lib | head"]);
+	bad(/R2/, ["xargs -0n 1 git show HEAD:x | sha256sum"]);
+	good([
+		"env -ui mgrep /mnt/data/x", // u takes "i"; mgrep is the real command and /mnt/data/x its pattern
+		"xargs -0n 1 mgrep -rn '/mnt/data' lib/",
+		"xargs -0 mgrep -rn '/mnt/data' lib/",
+	]);
+	// P1 — a comment ends at a backtick that closes one opened before the #
+	bad(/R1/, ["echo `#x`; mread f 1,2 | head"]);
+	// P2 — known-miss (documented, not fixed): wrapper long options may be abbreviated (env --uns X)
+	good(["env --uns X mread f 1,2 | head"]);
+	// timing: the new cluster shapes stay linear
+	{
+		const started = Date.now();
+		for (const chain of ["env " + "-u ".repeat(300), "env " + "-uC ".repeat(300), "xargs " + "-0n 1 ".repeat(300)]) {
+			mechanicalBashBlockReason("peer", chain + "x");
+		}
+		assert.ok(Date.now() - started < 2000, "cluster chains finish in milliseconds");
+	}
 	good([
 		"env -iu HOME mgrep -rn '/mnt/data' lib/",
 		"sudo -Eu root mgrep -rn '/mnt/data' lib/",
+		"sudo -n -u root mgrep -rn '/mnt/data' lib/",
 		"xargs -I{} mgrep -rn '/mnt/data' lib/",
 		"xargs -n 1 mgrep -rn '/mnt/data' lib/",
 		"env -C /tmp mgrep -rn '/mnt/data' lib/",

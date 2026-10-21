@@ -1190,6 +1190,12 @@ function isCommentStart(text: string, i: number): boolean {
 	return slashes % 2 === 0;
 }
 
+/** Where a comment opened at `i` ends: at the newline, or at a backtick (which may close a `…` opened before the #). */
+function commentEnd(text: string, i: number): number {
+	const m = /[\n`]/.exec(text.slice(i));
+	return m ? i + m.index : text.length;
+}
+
 /**
  * Splits a command into its unquoted surface plus the quoted strings that are
  * code (the argument of `sh -c` / `eval`). Other quoted strings are data: they
@@ -1205,8 +1211,7 @@ function shellSurface(command: string): { outer: string; code: string[] } {
 		const ch = command[i] ?? "";
 		if (isCommentStart(command, i)) {
 			// the rest of the line is not run; a quote opened in it must not hide the lines after
-			const eol = command.indexOf("\n", i);
-			i = eol < 0 ? command.length : eol;
+			i = commentEnd(command, i);
 			continue;
 		}
 		if (ch === "\\") {
@@ -1326,20 +1331,25 @@ function markPipedGroups(stages: ShellStage[]): void {
 }
 
 /**
- * Option run of a wrapper command. A short option cluster ENDING in one of `shortValue`, or a
- * long option in `longValue`, takes the next word as its value (`env -iu HOME`, `sudo -Eu root`);
- * every other option is a bare flag. The bare branch excludes exactly what the value branch takes,
- * so the two never overlap and the run cannot backtrack exponentially.
+ * Option run of a wrapper command, with getopt semantics. In a short cluster the FIRST
+ * value-taking letter (`valueLetters`) takes the rest of the cluster as its attached value, or
+ * the next word when it is the last letter; letters before it are flags. A long option in
+ * `longValue` takes the next word. The branches are disjoint (no value letter / value letter
+ * followed by more text / value letter last / long), so the run cannot backtrack exponentially.
  */
-function wrapperOptions(shortValue: string, longValue: string): string {
-	const takes = `-[A-Za-z]*[${shortValue}]`;
-	const longTakes = `--(?:${longValue})`;
-	return `(?:\\s+(?:${takes}\\s+\\S+|${longTakes}\\s+\\S+)|\\s+-(?!${takes.slice(1)}(?:\\s|$))(?!-(?:${longValue})(?:\\s|$))\\S+)*`;
+function wrapperOptions(valueLetters: string, longValue: string): string {
+	const flag = `[^\\s${valueLetters}]`;
+	const bareShort = `-(?!-)${flag}+(?=\\s|$)`;
+	const attached = `-(?!-)${flag}*[${valueLetters}]\\S+`;
+	const lastLetter = `-(?!-)${flag}*[${valueLetters}](?=\\s)\\s+\\S+`;
+	const longTaking = `--(?:${longValue})\\s+\\S+`;
+	const bareLong = `--(?!(?:${longValue})(?:\\s|$))\\S+`;
+	return `(?:\\s+(?:${bareShort}|${attached}|${lastLetter}|${longTaking}|${bareLong}))*`;
 }
 
 const STAGE_PREFIX =
 	String.raw`^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
-		`(?:(?:env${wrapperOptions("uCS", "unset|chdir|split-string")}|stdbuf${wrapperOptions("ioe", "input|output|error")}|sudo${wrapperOptions("ugCphrtDRTU", "user|group|chdir|chroot|host|prompt|role|type|command-timeout|other-user")}|xargs${wrapperOptions("IaEdLnPs", "arg-file|delimiter|max-args|max-procs|max-lines|max-chars")}|timeout${wrapperOptions("ks", "kill-after|signal")}\\s+\\d\\S*|(?:time|exec|nohup|command|nice|bash|sh|zsh|node)(?:\\s+-\\S+(?:\\s+\\d+)?)*)\\s+(?:[A-Za-z_]\\w*=\\S*\\s+)*)*` +
+		`(?:(?:env${wrapperOptions("uCS", "unset|chdir|split-string")}|stdbuf${wrapperOptions("ioe", "input|output|error")}|sudo${wrapperOptions("ugCphrtDRTU", "user|group|chdir|chroot|host|prompt|role|type|command-timeout|other-user")}|xargs${wrapperOptions("IaEdLnPs", "arg-file|delimiter|max-args|max-procs|max-lines|max-chars|process-slot-var")}|timeout${wrapperOptions("ks", "kill-after|signal")}\\s+\\d\\S*|(?:time|exec|nohup|command|nice|bash|sh|zsh|node)(?:\\s+-\\S+(?:\\s+\\d+)?)*)\\s+(?:[A-Za-z_]\\w*=\\S*\\s+)*)*` +
 	String.raw`(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
 const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
 const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
@@ -1438,8 +1448,7 @@ function segmentEnd(text: string, from: number): number {
 	while (i < text.length) {
 		const ch = text[i] ?? "";
 		if (isCommentStart(text, i)) {
-			const eol = text.indexOf("\n", i);
-			i = eol < 0 ? text.length : eol;
+			i = commentEnd(text, i);
 			continue;
 		}
 		if (ch === "\\") {
