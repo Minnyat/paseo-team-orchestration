@@ -23,7 +23,7 @@
  * Unknown tools are DENIED for every role (allowlist, not blocklist): a new
  * Claude tool must be classified deliberately, never inherited silently.
  */
-import { ALL_PASEO_TOOLS, callsPaseoCli, clusterLabelBlockReason, createAgentModeArgsBlockReason, createAgentParamsBlockReason, createAgentRouteBlockReason, updateAgentRouteBlockReason, updateAgentWatchBlockReason, leaseBlockReason, sendAgentPromptBlockReason, sendAgentPromptTargetId, teamLeaseToolBlockReason, supportScriptBlockReason, writerScopesFromCreateAgent, extraTools, gitAuthorityBlockReason, isBrowserMcpTarget, isPaseoBrowserTool, leadWorkspaceMutationBlockReason, leadWriteEnabled, matchesPaseoToolName, mcpAllowedTargets, peerAuthority, peerGitAuthority, packSkillFromPath, resolvePeerMode, skillBlockReason, leadCreateSupervisorArgsBlockReason, supervisorCreateAgentArgsBlockReason, teamToolBlockReason, LEAD_CONSULT_TOOL, PEER_COMMUNICATION_TOOL, SUPERVISOR_ALLOWED_MCP_TARGETS, TEAM_WATCHDOG_TOOL, } from "./policy-core.js";
+import { ALL_PASEO_TOOLS, callsPaseoCli, clusterLabelBlockReason, createAgentModeArgsBlockReason, createAgentParamsBlockReason, createAgentRouteBlockReason, updateAgentRouteBlockReason, updateAgentWatchBlockReason, leaseBlockReason, sendAgentPromptBlockReason, sendAgentPromptTargetId, teamLeaseToolBlockReason, supportScriptBlockReason, mechanicalBashBlockReason, mechanicalPathBlockReason, writerScopesFromCreateAgent, extraTools, gitAuthorityBlockReason, isBrowserMcpTarget, isPaseoBrowserTool, leadWorkspaceMutationBlockReason, leadWriteEnabled, matchesPaseoToolName, mcpAllowedTargets, peerAuthority, peerGitAuthority, packSkillFromPath, resolvePeerMode, skillBlockReason, leadCreateSupervisorArgsBlockReason, supervisorCreateAgentArgsBlockReason, teamToolBlockReason, LEAD_CONSULT_TOOL, PEER_COMMUNICATION_TOOL, SUPERVISOR_ALLOWED_MCP_TARGETS, TEAM_WATCHDOG_TOOL, } from "./policy-core.js";
 /** Paseo injects its own MCP server under exactly this name (daemon-side). */
 export const PASEO_MCP_SERVER = "paseo";
 /** The pack's own stdio MCP server: peer_ask_lead + team_watchdog. */
@@ -260,6 +260,16 @@ export function claudeToolBlockReason(input) {
         const reason = skill && skillBlockReason(role, skill, brief);
         if (reason)
             return reason;
+        // R3/R5: the memory directory and /mnt/data are off limits to file tools too.
+        // A Grep `pattern` is a content regex, not a path, so only Glob's counts.
+        const args = (typeof input.toolInput === "object" && input.toolInput !== null ? input.toolInput : {});
+        const pathBlock = mechanicalPathBlockReason(role, [
+            claudeReadPath(input.toolInput),
+            ...["path", "file_path", "notebook_path", "glob"].map((k) => String(args[k] ?? "")),
+            ...(toolName === "Glob" ? [String(args.pattern ?? "")] : []),
+        ]);
+        if (pathBlock)
+            return pathBlock;
     }
     if (classified.kind === "team") {
         const named = teamToolName(toolName);
@@ -463,6 +473,9 @@ export function claudeToolBlockReason(input) {
         const supportScriptReason = supportScriptBlockReason(role, command);
         if (supportScriptReason)
             return supportScriptReason;
+        const mechanicalReason = mechanicalBashBlockReason(role, command);
+        if (mechanicalReason)
+            return mechanicalReason;
         return gitAuthorityBlockReason(command, peerGitAuthority(brief), brief?.fields.get("TASK_ID"));
     }
     return null;

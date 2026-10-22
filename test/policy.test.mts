@@ -11,6 +11,8 @@ import {
 	callsTeamSupportScript,
 	pteamMutationIn,
 	supportScriptBlockReason,
+	mechanicalBashBlockReason,
+	mechanicalPathBlockReason,
 	classifyMcpInput,
 	createAgentModeArgsBlockReason,
 	CLAUDE_DEFAULT_SEAT_MODE,
@@ -2706,6 +2708,441 @@ console.log("[paseo-team] skill admission tests passed");
 		if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
 		else process.env.PASEO_PI_ROLE = prevRole;
 	}
+}
+
+// --- mechanical peer rules R1 / R2 / R3 / R5 -----------------------------------
+// The four violations peers repeat most. Whole-command scan, so wrapped
+// commands (bash -c, heredoc, flock … bash -c) are covered by the same vectors.
+{
+	const bad = (rule: RegExp, commands: string[]): void => {
+		for (const command of commands) {
+			assert.match(String(mechanicalBashBlockReason("peer", command)), rule, `blocked: ${command}`);
+			assert.equal(mechanicalBashBlockReason("lead", command), null, `the rule is Peer-only: ${command}`);
+		}
+	};
+	const good = (commands: string[]): void => {
+		for (const command of commands) {
+			assert.equal(mechanicalBashBlockReason("peer", command), null, `passes: ${command}`);
+		}
+	};
+
+	// R1 — masked tool output piped / captured
+	bad(/R1.*mread <file> <start>,<end>.*mgrep -c/s, [
+		"rok/bin/mread lib/x.ts 1,80 | tail -5",
+		"mgrep -n foo lib/ | head",
+		"/abs/rok/bin/mgrep -n foo lib/ |& head",
+		"bash -c 'mgit show abc:lib/a.ts | grep bar'",
+		"n=$(mgrep -c foo lib/a.ts)",
+		"echo `mread lib/a.ts 1,5`",
+		"diff <(mgit show a:f) <(mgit show b:f)",
+		"mask < f | head",
+		"bash <<EOF\nmread lib/x.ts 1,80 | head\nEOF",
+		"flock -w 5 /tmp/x.lock bash -c \"mgrep -n foo lib/ | head\"",
+		"cd rok && mread lib/x.ts 1,9 | cat",
+		"echo \"$(mgrep -c foo lib/a.ts)\"",
+		"for f in a b; do mread $f 1,2 | wc -l; done",
+	]);
+	good([
+		"rok/bin/mread lib/x.ts 1,80",
+		"mgrep -n foo lib/",
+		"mgit diff --stat a..b",
+		"git diff a b | rok/bin/mask",
+		'echo "mread is masked" | wc -c',
+		"echo 'mread x | tail' | wc -c",
+		"grep mread docs/notes.md | head",
+		"cat docs/mread.md | head",
+		"mgit diff a..b | git patch-id",
+		"flock -w 5 /tmp/x.lock bash -c \"mgrep -n foo lib/\"",
+		"mgrep -rn '/mnt/data' lib/",
+	]);
+	// the carve-out is mgit diff -> git patch-id only
+	bad(/R1/, ["mgit show a:f | git patch-id", "mread f 1,2 | git patch-id"]);
+
+	// R2 — raw git content
+	bad(/R2.*mgit show.*rev-parse <sha>:<path>.*cat-file -s/s, [
+		"git show HEAD:lib/x.ts",
+		"git show HEAD:lib/x.ts | sha256sum",
+		'git show "HEAD:lib/x.ts"',
+		"git show abc123",
+		"git show --format=%H:%s abc123:f",
+		"git diff a b",
+		"git -C .worktrees/T-1 diff a..b",
+		"git diff-tree -p abc",
+		"git log -p -3",
+		"git format-patch -1 HEAD",
+		"git archive HEAD | tar -x",
+		"git cat-file -p HEAD:f",
+		"git cat-file blob abc123",
+		"git grep -n foo",
+		"git blame lib/x.ts",
+		"bash -c 'git show HEAD:lib/x.ts'",
+		"bash <<EOF\ngit diff a b\nEOF",
+		"flock -w 5 /tmp/x.lock bash -c \"git blame lib/x.ts\"",
+		"git diff a b | head",
+		"cd x && git show HEAD",
+	]);
+	good([
+		"git rev-parse HEAD:lib/x.ts",
+		"git cat-file -s HEAD:lib/x.ts",
+		"git cat-file -t HEAD",
+		"git cat-file -e HEAD:f",
+		"git ls-files",
+		"git ls-tree HEAD lib",
+		"git log --format=%H -5",
+		"git log --oneline",
+		"git status",
+		"git merge-tree --write-tree a b",
+		"git worktree add -b x .worktrees/x HEAD",
+		"git branch",
+		"git diff --stat a b",
+		"git diff --name-only a b",
+		"git diff --numstat a b",
+		"git diff --quiet a b",
+		"git show --stat HEAD",
+		"git show --name-only HEAD",
+		"git show --name-status HEAD",
+		"git show -s --format=%H HEAD",
+		"git show -s HEAD",
+		"git show --no-patch HEAD",
+		"git diff a b | rok/bin/mask",
+		"echo 'git show HEAD:lib/x.ts'",
+		'echo "git diff a b is raw"',
+		'git commit -m "never git show HEAD:x"',
+	]);
+
+	// R3 — memory directory
+	bad(/R3/, [
+		"cat ~/.claude/projects/-home-x/memory/MEMORY.md",
+		"ls /home/minnyat/.claude/projects/",
+		"find ~/.claude -name '*.md'",
+		"grep -r foo /home/minnyat/.claude/projects/x/memory",
+		"python3 -c \"print(open('/home/u/.claude/projects/p/memory/a.md').read())\"",
+		"bash -c 'cat ~/.claude/projects/x/memory/a.md'",
+	]);
+	good(["ls /home/minnyat/.pi/agent/", "cat /home/minnyat/.pi/agent/skills/x/SKILL.md", "ls .claudex"]);
+
+	// R5 — /mnt/data
+	bad(/R5/, ["ls /mnt/data", "test -e /mnt/data/x", "stat /mnt/data", "cat /mnt/data/a.txt", "bash -c 'ls /mnt/data'", "mgrep foo /mnt/data/x"]);
+	good(["ls /mnt/database2x", "mgrep -rn '/mnt/data' lib/", 'mgrep -rn "/mnt/data" lib/ rok/']);
+
+	// correction: review findings F1-F10
+	// F1/F2/F3 — --format and --exit-code do not silence a patch; a patch flag beats a safe flag
+	bad(/R2/, [
+		"git show --format=%H HEAD",
+		"git show --format= HEAD",
+		"git show --format=tformat:x HEAD",
+		"git show --stat -p HEAD",
+		"git show --name-only --patch HEAD",
+		"git diff --stat -p a b",
+		"git log -p --stat",
+		"git log --unified=1 -1",
+		"git log -L1,3:file",
+		"git diff --exit-code",
+		"git diff --exit-code a b",
+		// F6 — spec examples
+		"git diff e7713b2 HEAD > /tmp/d.txt",
+		"git cat-file blob abc | awk '{print length}'",
+		"bash -c 'git diff a..b | git patch-id'",
+		// F9 — same class of content printers
+		"git annotate lib/x.ts",
+		"git diff-index -p HEAD",
+		"git diff-files -p",
+		"git stash show -p",
+		"git whatchanged -p -1",
+		"git reflog -p",
+		"git range-diff a...b",
+		"git fast-export HEAD",
+	]);
+	good([
+		"git diff --quiet a b",
+		"git show -s --format=%H HEAD",
+		"git show --no-patch HEAD",
+		"git stash show",
+		"git diff-index --name-only HEAD",
+		"git whatchanged --oneline -1",
+		"git reflog",
+	]);
+
+	// F5 — group / wrapper / process-substitution forms of R1
+	bad(/R1/, [
+		"timeout 5 mread f 1,2 | head",
+		"stdbuf -oL mgrep -n x lib/ | head",
+		"nice -n 5 mread f 1,2 | head",
+		"mread f 1,2 > >(cat)",
+		"( mread f 1,2 ) | head",
+		"{ mread f 1,2; } | head",
+		"for f in a b; do mread $f 1,2; done | head",
+		"( mgit show a:f ) |& head",
+	]);
+	good(["( mread f 1,2 )", "{ mread f 1,2; }", "for f in a b; do mread $f 1,2; done", "( echo hi ) | head"]);
+	// known-miss (documented, not fixed): these pass today
+	good([
+		"bash -c 'mread x' | head",
+		"bash <<EOF\necho don't\nmread f 1,2 | head\necho it's\nEOF",
+	]);
+
+	// F7 — R5 exemption is the mgrep PATTERN operand only
+	bad(/R5/, [
+		"mgrep -rn secret '/mnt/data/'",
+		"mgrep -rn x lib $(cat '/mnt/data/f')",
+		"mgrep -rn x '/mnt/data/'",
+		"mgrep -A 3 foo '/mnt/data/x'",
+		"mgrep -rn foo lib; cat '/mnt/data/x'",
+	]);
+	good([
+		"flock -w 5 /tmp/x.lock mgrep -rn '/mnt/data' lib/",
+		"mgrep -A 3 '/mnt/data' lib/",
+		"mgrep -rn -e '/mnt/data' lib/",
+	]);
+
+	// R3 has NO mgrep exemption (Lead decision, round 2): any mention is blocked, quoted or not
+	bad(/R3/, [
+		"mgrep -rn '.claude/projects' lib/",
+		"mgrep -rn '.claude/projects/' lib/",
+		"mgrep -rn '~/.claude' lib/",
+		"flock -w 5 /tmp/x.lock mgrep -rn '/.claude/projects/' lib/",
+		"mgrep -rnf ~/.claude/projects/p/memory/MEMORY.md lib",
+		"X=|cat mgrep ~/.claude/projects/p/memory/MEMORY.md",
+		"mgrep -rn foo '.claude/projects/'",
+		'echo "see ~/.claude/projects/x"',
+		"git commit -m 'read .claude/projects/x'",
+	]);
+
+	// N1 — the wrapper prefix must not swallow a separator and hide a later command
+	bad(/R5/, [
+		"X=;cat mgrep /mnt/data/x",
+		"nice -x;cat mgrep /mnt/data/x",
+		"timeout 5;cat mgrep /mnt/data/x",
+		"X=|cat mgrep /mnt/data/x",
+	]);
+	// N2 — option values, --, redirections and repeated -e: only PATTERN operands are exempt
+	bad(/R5/, [
+		"mgrep -rn -f /mnt/data/patterns lib",
+		"mgrep -rn --file /mnt/data/patterns lib",
+		"mgrep -rn --exclude-from /mnt/data/x foo lib",
+		"mgrep -rn -- -x /mnt/data/secret",
+		"mgrep -rn -efoo /mnt/data/x",
+		"mgrep --regexp=foo /mnt/data/x",
+		"mgrep < /mnt/data/secret foo",
+		"mgrep > /mnt/data/out foo lib",
+		"mgrep 2> /mnt/data/err foo lib",
+		"mgrep -e a -e b /mnt/data/x",
+	]);
+	good([
+		"mgrep -e '/mnt/data' -e '/mnt/data/x' lib/",
+		"mgrep --regexp='/mnt/data' lib/",
+		"mgrep -rn -- '/mnt/data' lib",
+		"mgrep -rn foo lib 2>&1",
+		"timeout -k 5 10 mgrep -rn '/mnt/data' lib/",
+		"stdbuf -o L mgrep -rn '/mnt/data' lib/",
+		"env -u HOME mgrep -rn '/mnt/data' lib/",
+	]);
+	// N3 — an expansion inside the pattern word is code, not a pattern
+	bad(/R5/, [
+		'mgrep -rn "$(cat /mnt/data/x)" lib',
+		"mgrep -rn \"`cat /mnt/data/x`\" lib",
+		"mgrep -rn x$(cat /mnt/data/x) lib",
+		"mgrep -rn 'x'$(cat /mnt/data/x) lib",
+		"mgrep -rn 'a\\' /mnt/data/x '",
+	]);
+	// N5 — more patch flags (measured with git 2.43: all print a patch)
+	bad(/R2/, [
+		"git log -1 --binary",
+		"git log --remerge-diff",
+		"git log --diff-merges=first-parent",
+		"git log --dd",
+		"git show -s --binary HEAD",
+		"git diff --stat --binary a b",
+		"git diff-tree -r --binary",
+	]);
+	// N8 — blank every -e operand; -c / -u are not patches for these
+	// -c prints a full patch on every one of these (measured, git 2.43); only stash show -u is not a patch
+	bad(/R2/, ["git diff-index -c HEAD", "git diff-files -c", "git whatchanged -c -1", "git reflog -c"]);
+	good(["git stash show -u", "git log --diff-merges=off -1"]);
+
+	// F-A — the wrapper prefix must neither backtrack exponentially nor treat -u as a bare flag
+	bad(/R5/, ["env -u mgrep /mnt/data/x", "sudo -u mgrep /mnt/data/x", "env -u -u -u mgrep /mnt/data/x"]);
+	good(["env -u HOME mgrep -rn '/mnt/data' lib/", "sudo -u nobody mgrep -rn '/mnt/data' lib/"]);
+	{
+		const started = Date.now();
+		for (const wrapper of ["env ", "stdbuf ", "timeout ", "sudo "]) {
+			const flag = wrapper === "env " ? "-u " : wrapper === "stdbuf " ? "-o " : wrapper === "timeout " ? "-k " : "-u ";
+			mechanicalBashBlockReason("peer", wrapper + flag.repeat(34) + "x");
+		}
+		mechanicalBashBlockReason("peer", "env " + "-u ".repeat(120) + "x");
+		assert.ok(Date.now() - started < 2000, "pathological wrapper chains finish in milliseconds, not minutes");
+	}
+
+	// F-C — a # comment can hide a quote opener; the lines in between still run
+	bad(/R5/, ["mgrep #'\ncat /mnt/data/x\n#' lib", "mgrep -rn foo #'\ncat /mnt/data/x\n#' lib"]);
+	bad(/R1/, ["echo #'\nmread a | head\n#'"]);
+	good(["echo a#b | wc -c", "echo ${#PATH} | wc -c", "mread f 1,2 # trailing note", "mread f 1,2\t# tab-led note"]);
+	// G1 — only an UNESCAPED space/tab/newline or ; | & ( ) ` opens a comment (bash, not JS \s)
+	bad(/R1/, [
+		"true a\\ #x; mread f | head",
+		"true\r#x; mread f | head",
+		"true\v#x; mread f | head",
+		"true\f#x; mread f | head",
+		"true #x; mread f | head",
+		// G2 — ) opens a comment too
+		"(true)#'\nmread a | head\n#'",
+	]);
+	bad(/R2/, ["true a\\ #x; git show HEAD:x | sha256sum", "true\r#x; git show HEAD:x | sha256sum"]);
+	// G3 — value-taking wrapper options must eat their value, or the tool name becomes the "value"
+	bad(/R5/, [
+		"env -iu mgrep /mnt/data/x",
+		"env -C mgrep /mnt/data/x",
+		"env --unset mgrep /mnt/data/x",
+		"sudo -Eu mgrep /mnt/data/x",
+		"sudo -D mgrep /mnt/data/x",
+		"sudo --user mgrep /mnt/data/x",
+		"xargs -I mgrep /mnt/data/x",
+		"xargs -a mgrep /mnt/data/x",
+	]);
+	// H1 — getopt: the FIRST value letter in a cluster takes the rest of the cluster (attached), not the next word
+	bad(/R5/, [
+		"env -uC cat mgrep /mnt/data/x",
+		"xargs -IL cat mgrep /mnt/data/x",
+		"sudo -uD cat mgrep /mnt/data/x",
+		// measured: `sudo -n -uE true` -> "unknown user E" (u takes E), so `root` is the command here
+		"sudo -uE root mgrep -rn '/mnt/data' lib/",
+		// H2 — digits inside a cluster
+		"xargs -0I mgrep /mnt/data/x",
+		"xargs -0a mgrep /mnt/data/x",
+		"xargs --process-slot-var mgrep /mnt/data/x",
+	]);
+	bad(/R1/, ["env -uiC mread f 1,2 | head", "xargs -0n 1 mgrep -n foo lib | head"]);
+	bad(/R2/, ["xargs -0n 1 git show HEAD:x | sha256sum"]);
+	good([
+		"env -ui mgrep /mnt/data/x", // u takes "i"; mgrep is the real command and /mnt/data/x its pattern
+		"xargs -0n 1 mgrep -rn '/mnt/data' lib/",
+		"xargs -0 mgrep -rn '/mnt/data' lib/",
+	]);
+	// P1 — a comment ends at a backtick that closes one opened before the #
+	bad(/R1/, ["echo `#x`; mread f 1,2 | head"]);
+	bad(/R1/, ["x=`echo a # c`; mread f 1,2 | head"]);
+	// J1 — a lone `--` ends the options; the command follows it
+	bad(/R1/, ["env -- mread f 1,2 | head", "xargs -- mgrep -n foo lib | head", "sudo -- mread f 1,2 | head"]);
+	bad(/R2/, ["env -i -- git show HEAD:x | sha256sum"]);
+	// J2 — a backtick is comment text unless a `…` substitution is open, so it cannot hide the next line
+	bad(/R1/, ["# a ` '\nmread f 1,2 | head\n: '", "echo ok # it`s fine '\nmread f 1,2 | head\n: '"]);
+	bad(/R2/, ["# a ` '\ngit show HEAD:x | sha256sum\n: '"]);
+	// K1 — an escaped backtick inside the comment is a letter: the substitution is still open, no quote is hidden
+	bad(/R1/, ["x=`echo a # c \\` '\nmread f 1,2 | head\n: '"]);
+	bad(/R2/, ["x=`echo a # c \\` '\ngit show HEAD:x | sha256sum\n: '"]);
+	// K2 — in $'…' a backslash escapes the quote, so `$'\''` is one string and the next command still runs
+	bad(/R1/, ["echo $'\\''; mread f 1,2 | head; echo $'\\''"]);
+	bad(/R2/, ["echo $'\\''; git show HEAD:x | sha256sum; echo $'\\''"]);
+	// L1 — $$ is the PID: an even run of $ before a quote leaves a plain quote, no escapes inside
+	bad(/R1/, ["echo $$'\\'; mread f 1,2 | head; echo 'x'", "echo $$$$'\\'; mread f 1,2 | head; echo 'x'"]);
+	bad(/R2/, ["echo $$'\\'; git show HEAD:x | sha256sum; echo 'x'"]);
+	// L2 — a backslash run before the $ run: \\$' (even) is still ANSI-C, \$' (odd) is a plain quote
+	bad(/R1/, ["echo \\\\$'\\''; mread f 1,2 | head; echo \\\\$'\\''"]);
+	bad(/R2/, ["echo \\\\$'\\''; git show HEAD:x | sha256sum; echo \\\\$'\\''"]);
+	// old behaviour kept (a syntax-error command, still scanned): the $ here sits inside a plain quote
+	bad(/R1/, ["echo '$\\''; mread f 1,2 | head"]);
+	// L3 — known-miss (documented, not fixed): the code argument of sh -c / eval written $'…' or $"…" is not scanned
+	good(["bash -c $'mread f 1,2 | head'", "eval $'mread f 1,2 | head'", 'bash -c $"mread f 1,2 | head"']);
+	{
+		const started = Date.now();
+		mechanicalBashBlockReason("peer", "echo " + "$$'\\' ".repeat(3000));
+		mechanicalBashBlockReason("peer", "echo " + "\\\\$' ".repeat(3000));
+		assert.ok(Date.now() - started < 2000, "dollar / backslash runs stay linear");
+		mechanicalBashBlockReason("peer", "x=`echo a # " + "\\`".repeat(3000) + "\nls");
+		mechanicalBashBlockReason("peer", "echo " + "$'\\'' ".repeat(3000));
+		assert.ok(Date.now() - started < 2000, "escaped-backtick and ANSI-C chains stay linear");
+	}
+	// J3
+	bad(/R1/, ["sudo --close-from 3 mread f 1,2 | head"]);
+	// J4 — known-miss (documented, heuristic class, not fixed): these pass today
+	good([
+		"env - mread f 1,2 | head", // lone - : env clears the environment, the shell-level parse does not see a command
+		"env -u'' X mread f 1,2 | head", // an empty quoted pair glues into the option word
+		"env -S 'mread f 1,2' | head", // -S takes a string of code
+	]);
+	// P2 — known-miss (documented, not fixed): wrapper long options may be abbreviated (env --uns X)
+	good(["env --uns X mread f 1,2 | head"]);
+	// timing: the new cluster shapes stay linear
+	{
+		const started = Date.now();
+		for (const chain of ["env " + "-u ".repeat(300), "env " + "-uC ".repeat(300), "xargs " + "-0n 1 ".repeat(300), "env " + "-- ".repeat(300), "env " + "-u x -- -i ".repeat(300)]) {
+			mechanicalBashBlockReason("peer", chain + "x");
+		}
+		assert.ok(Date.now() - started < 2000, "cluster chains finish in milliseconds");
+	}
+	good([
+		"env -iu HOME mgrep -rn '/mnt/data' lib/",
+		"sudo -Eu root mgrep -rn '/mnt/data' lib/",
+		"sudo -n -u root mgrep -rn '/mnt/data' lib/",
+		"xargs -I{} mgrep -rn '/mnt/data' lib/",
+		"xargs -n 1 mgrep -rn '/mnt/data' lib/",
+		"env -C /tmp mgrep -rn '/mnt/data' lib/",
+	]);
+	// not exploitable, left as is: an abbreviated long option (--fil) passes the hook, but the real mgrep dies on it
+	// N4 / N6 — known-miss (documented, not fixed): these pass today
+	good([
+		"for a in 1; do for b in 2; do mread f 1,2; done; done | head",
+		"if true; then if true; then mread f 1,2; fi; fi | head",
+		"time for f in a; do mread $f 1,2; done | head",
+	]);
+	for (const path of ["/home/minnyat/.claude/projects/**/*.md", "~/**/memory/*.md"]) {
+		assert.equal(mechanicalPathBlockReason("peer", [path]), null, `known-miss (glob past the root): ${path}`);
+	}
+
+	// F4 — path normalisation and search roots above .claude/projects
+	for (const path of [
+		"/home/minnyat/.claude/projects/foo/../p/memory/MEMORY.md",
+		"/home/minnyat/.claude/projects/-home-x//memory/MEMORY.md",
+		"/home/minnyat/.claude/./projects/p/memory/a.md",
+		"~/.claude",
+		"/home/minnyat/.claude/",
+		"/home/minnyat/.claude/projects",
+		"/home/minnyat/.claude/*/p/memory/a.md",
+	]) {
+		assert.match(String(mechanicalPathBlockReason("peer", [path])), /R3/, path);
+	}
+	assert.match(String(mechanicalPathBlockReason("peer", ["**/memory/*.md", "/home/minnyat/.claude"])), /R3/, "Glob pattern with a .claude search root");
+	assert.match(String(mechanicalPathBlockReason("peer", ["/mnt//data/x"])), /R5/, "// is collapsed before matching");
+
+	// tool side: Read / Grep / Glob / pi read
+	for (const path of [
+		"/home/minnyat/.claude/projects/-home-x/memory/MEMORY.md",
+		"~/.claude/projects/p/memory",
+		"/home/minnyat/.claude/projects/p/memory/**",
+		"/home/minnyat/.claude/projects/p",
+	]) {
+		assert.match(String(mechanicalPathBlockReason("peer", [path])), /R3/, path);
+		assert.equal(mechanicalPathBlockReason("lead", [path]), null);
+	}
+	for (const path of ["/mnt/data", "/mnt/data/x.csv", "/mnt/data/**/*.md"]) {
+		assert.match(String(mechanicalPathBlockReason("peer", [path])), /R5/, path);
+	}
+	for (const path of ["/home/minnyat/.pi/agent/skills/x/SKILL.md", "lib/x.ts", "", "/home/minnyat/.claude/projects/p/s1/tool-results/a.txt"]) {
+		assert.equal(mechanicalPathBlockReason("peer", [path]), null, path);
+	}
+}
+
+// pi adapter: the bash leg and the read leg both reach the rules.
+{
+	const { piStub, handlers } = makePiStub(["read", "bash"]);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	process.env.PASEO_PI_ROLE = "peer";
+	const createExtension = await loadFreshExtension("lifecycle=mechanical-rules");
+	createExtension(piStub);
+	const toolCall = requireHandler(handlers, "tool_call");
+	const run = async (toolName: string, input: Record<string, string>) =>
+		(await toolCall({ toolName, input })) as { block?: boolean; reason?: string } | undefined;
+	assert.match(String((await run("bash", { command: "mread f 1,2 | head" }))?.reason), /R1/);
+	assert.match(String((await run("bash", { command: "git show HEAD:lib/x.ts | sha256sum" }))?.reason), /R2/);
+	assert.match(String((await run("read", { path: "/home/u/.claude/projects/p/memory/MEMORY.md" }))?.reason), /R3/);
+	assert.match(String((await run("read", { path: "/mnt/data/a" }))?.reason), /R5/);
+	assert.match(String((await run("find", { pattern: "/mnt/data/**/*.md" }))?.reason), /R5/, "pi find has a glob pattern");
+	assert.match(String((await run("grep", { pattern: "x", path: "~/.claude", glob: "**/memory/*.md" }))?.reason), /R3/);
+	assert.equal((await run("grep", { pattern: "/mnt/data", path: "lib" }))?.block, undefined, "a grep regex is not a path");
+	assert.equal((await run("bash", { command: "mread f 1,2" }))?.block, undefined);
+	assert.equal((await run("read", { path: "/home/u/.pi/agent/x" }))?.block, undefined);
+	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+	else process.env.PASEO_PI_ROLE = prevRole;
 }
 
 console.log("[paseo-team] pi adapter wiring tests passed");

@@ -45,6 +45,8 @@ import {
 	type SupervisorSeat,
 	type TeamTopology,
 	supportScriptBlockReason,
+	mechanicalBashBlockReason,
+	mechanicalPathBlockReason,
 	writerScopesFromCreateAgent,
 	extraTools,
 	gitAuthorityBlockReason,
@@ -371,6 +373,15 @@ export function claudeToolBlockReason(
 		const skill = packSkillFromPath(claudeReadPath(input.toolInput));
 		const reason = skill && skillBlockReason(role, skill, brief);
 		if (reason) return reason;
+		// R3/R5: the memory directory and /mnt/data are off limits to file tools too.
+		// A Grep `pattern` is a content regex, not a path, so only Glob's counts.
+		const args = (typeof input.toolInput === "object" && input.toolInput !== null ? input.toolInput : {}) as Record<string, unknown>;
+		const pathBlock = mechanicalPathBlockReason(role, [
+			claudeReadPath(input.toolInput),
+			...["path", "file_path", "notebook_path", "glob"].map((k) => String(args[k] ?? "")),
+			...(toolName === "Glob" ? [String(args.pattern ?? "")] : []),
+		]);
+		if (pathBlock) return pathBlock;
 	}
 
 	if (classified.kind === "team") {
@@ -576,6 +587,8 @@ export function claudeToolBlockReason(
 		// Chrome extension), so the typed check above is the whole surface.
 		const supportScriptReason = supportScriptBlockReason(role, command);
 		if (supportScriptReason) return supportScriptReason;
+		const mechanicalReason = mechanicalBashBlockReason(role, command);
+		if (mechanicalReason) return mechanicalReason;
 		return gitAuthorityBlockReason(
 			command,
 			peerGitAuthority(brief),

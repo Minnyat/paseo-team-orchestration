@@ -20,7 +20,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { isAgentId, paseoAgentsRoot, readAgentStates, readAllAgentStates, } from "./agent-directory.js";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 /**
  * The active role, from the environment Paseo sets on the agent process.
@@ -978,6 +979,552 @@ export function supportScriptBlockReason(role, command) {
     if (!callsTeamSupportScript(command))
         return null;
     return "Peer cannot run this Paseo team support script from bash — it would grant coordination or remote-host authority the Peer role does not have. Use peer_ask_lead to raise a DEPENDENCY_REQUEST instead.";
+}
+const SHELL_CODE_CONTEXT_RE = /(?:\b(?:ba|da|z|k)?sh\s+(?:-[A-Za-z-]+\s+)*-[A-Za-z]*c\s+|\beval\s+)$/;
+/** Length of the run of `ch` ending right before index `end`. */
+function runBefore(text, end, ch) {
+    let n = 0;
+    while (end - n - 1 >= 0 && text[end - n - 1] === ch)
+        n++;
+    return n;
+}
+/**
+ * `#` starts a comment when it opens a word: it follows a space, tab, newline or
+ * one of ; | & ( ) ` that is not backslash-escaped (JS `\s` would also take \r, \v, NBSP).
+ */
+function isCommentStart(text, i) {
+    if (text[i] !== "#")
+        return false;
+    if (i === 0)
+        return true;
+    if (!" \t\n;|&()`".includes(text[i - 1] ?? "x"))
+        return false;
+    return runBefore(text, i - 1, "\\") % 2 === 0;
+}
+/**
+ * Where a comment opened at `i` ends: at the newline, or — only while a `…` substitution is open — at
+ * the backtick that closes it. Without an open one a backtick is just comment text.
+ */
+function commentEnd(text, i, backtickOpen) {
+    let slashes = 0; // an escaped backtick (odd run of backslashes) is a letter, not the closer
+    for (let j = i; j < text.length; j++) {
+        const c = text[j];
+        if (c === "\n")
+            return j;
+        if (c === "`" && backtickOpen && slashes % 2 === 0)
+            return j;
+        slashes = c === "\\" ? slashes + 1 : 0;
+    }
+    return text.length;
+}
+/**
+ * Splits a command into its unquoted surface plus the quoted strings that are
+ * code (the argument of `sh -c` / `eval`). Other quoted strings are data: they
+ * collapse to a placeholder (keeping a ":" marker for `rev:path`), except for
+ * `$(…)` / backtick bodies inside double quotes, which the shell runs.
+ */
+function shellSurface(command) {
+    let outer = "";
+    const code = [];
+    const extras = [];
+    let backtickOpen = false;
+    let i = 0;
+    while (i < command.length) {
+        const ch = command[i] ?? "";
+        if (isCommentStart(command, i)) {
+            // the rest of the line is not run; a quote opened in it must not hide the lines after
+            i = commentEnd(command, i, backtickOpen);
+            continue;
+        }
+        if (ch === "\\") {
+            outer += command.slice(i, i + 2);
+            i += 2;
+            continue;
+        }
+        if (ch !== "'" && ch !== '"') {
+            if (ch === "`")
+                backtickOpen = !backtickOpen;
+            outer += ch;
+            i++;
+            continue;
+        }
+        const escapes = ch === '"' || isAnsiCQuote(command, i);
+        let j = i + 1;
+        while (j < command.length && command[j] !== ch) {
+            j += escapes && command[j] === "\\" ? 2 : 1;
+        }
+        if (j >= command.length) {
+            outer += ch; // unbalanced: an ordinary character
+            i++;
+            continue;
+        }
+        const content = command.slice(i + 1, j);
+        if (SHELL_CODE_CONTEXT_RE.test(outer)) {
+            code.push(ch === '"' ? content.replace(/\\(["\\$`])/g, "$1") : content);
+        }
+        else if (ch === '"') {
+            for (const m of content.matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) {
+                extras.push(`$(${m[1] ?? m[2] ?? ""})`);
+            }
+        }
+        outer += content.includes(":") ? "Q:Q" : "Q";
+        i = j + 1;
+    }
+    for (const extra of extras)
+        outer += `;${extra}`;
+    return { outer, code };
+}
+function splitShellStages(outer) {
+    const stages = [];
+    const stack = [];
+    let start = 0;
+    const cut = (end, sep) => {
+        stages.push({
+            text: outer.slice(start, end),
+            sub: stack.some((kind) => kind !== "("),
+            sep,
+        });
+    };
+    let i = 0;
+    while (i < outer.length) {
+        const two = outer.slice(i, i + 2);
+        const ch = outer[i] ?? "";
+        let sep = "";
+        let width = 1;
+        if (ch === "\\") {
+            i += 2;
+            continue;
+        }
+        if (two === "$(" || two === "<(" || two === ">(") {
+            sep = two;
+            width = 2;
+        }
+        else if (two === "||" || two === "&&" || two === "|&") {
+            sep = two;
+            width = 2;
+        }
+        else if (ch === "|" || ch === ";" || ch === "\n" || ch === "(" || ch === ")" || ch === "`") {
+            sep = ch;
+        }
+        else if (ch === "&" && !/[<>]/.test(outer[i - 1] ?? "") && outer[i + 1] !== ">") {
+            sep = ch;
+        }
+        else {
+            i++;
+            continue;
+        }
+        cut(i, sep);
+        if (sep === "$(" || sep === "<(" || sep === ">(" || sep === "(")
+            stack.push(sep);
+        else if (sep === ")")
+            stack.pop();
+        else if (sep === "`") {
+            if (stack[stack.length - 1] === "`")
+                stack.pop();
+            else
+                stack.push("`");
+        }
+        i += width;
+        start = i;
+    }
+    cut(outer.length, "");
+    markPipedGroups(stages);
+    return stages;
+}
+const PIPE_SEPS = ["|", "|&", ">("];
+/**
+ * A group's output is piped on when its closer is followed by a pipe:
+ * `( mread f ) | head`, `{ mread f; } | head`, `for …; do mread $f; done | head`.
+ * Every stage inside is marked, since all of the group's stdout flows to it.
+ */
+function markPipedGroups(stages) {
+    const parens = [];
+    const blocks = [];
+    const markFrom = (from, to) => {
+        for (let m = from; m <= to; m++)
+            stages[m].pipedOut = true;
+    };
+    for (let k = 0; k < stages.length; k++) {
+        const stage = stages[k];
+        if (/^\s*(?:for|while|until|select|if|case|\{)(?=\s|$)/.test(stage.text))
+            blocks.push(k);
+        if (/^\s*(?:done|fi|esac|\})(?=\s|$)/.test(stage.text)) {
+            const from = blocks.pop();
+            const following = stage.sep;
+            if (from !== undefined && PIPE_SEPS.includes(following))
+                markFrom(from, k);
+        }
+        if (stage.sep === "(" || stage.sep === "$(" || stage.sep === "<(" || stage.sep === ">(")
+            parens.push(k + 1);
+        else if (stage.sep === ")") {
+            const from = parens.pop();
+            const after = stages[k + 1];
+            if (from !== undefined && after !== undefined && after.text.trim() === "" && PIPE_SEPS.includes(after.sep)) {
+                markFrom(from, k);
+            }
+        }
+    }
+}
+/**
+ * Option run of a wrapper command, with getopt semantics. In a short cluster the FIRST
+ * value-taking letter (`valueLetters`) takes the rest of the cluster as its attached value, or
+ * the next word when it is the last letter; letters before it are flags. A long option in
+ * `longValue` takes the next word. The branches are disjoint (no value letter / value letter
+ * followed by more text / value letter last / long), so the run cannot backtrack exponentially.
+ */
+function wrapperOptions(valueLetters, longValue) {
+    const flag = `[^\\s${valueLetters}]`;
+    const bareShort = `-(?!-)${flag}+(?=\\s|$)`;
+    const attached = `-(?!-)${flag}*[${valueLetters}]\\S+`;
+    const lastLetter = `-(?!-)${flag}*[${valueLetters}](?=\\s)\\s+\\S+`;
+    const longTaking = `--(?:${longValue})\\s+\\S+`;
+    const bareLong = `--(?!(?:${longValue})(?:\\s|$))\\S*`; // \S*: a lone `--` ends the options
+    return `(?:\\s+(?:${bareShort}|${attached}|${lastLetter}|${longTaking}|${bareLong}))*`;
+}
+const STAGE_PREFIX = String.raw `^\s*(?:(?:do|then|else|elif|if|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*` +
+    `(?:(?:env${wrapperOptions("uCS", "unset|chdir|split-string")}|stdbuf${wrapperOptions("ioe", "input|output|error")}|sudo${wrapperOptions("ugCphrtDRTU", "user|group|chdir|chroot|host|prompt|role|type|command-timeout|other-user|close-from")}|xargs${wrapperOptions("IaEdLnPs", "arg-file|delimiter|max-args|max-procs|max-lines|max-chars|process-slot-var")}|timeout${wrapperOptions("ks", "kill-after|signal")}\\s+\\d\\S*|(?:time|exec|nohup|command|nice|bash|sh|zsh|node)(?:\\s+-\\S+(?:\\s+\\d+)?)*)\\s+(?:[A-Za-z_]\\w*=\\S*\\s+)*)*` +
+    String.raw `(?:flock(?:\s+-\w+(?:\s+\d+)?)*\s+\S+\s+)?`;
+const MASKED_TOOL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?(mread|mgrep|mgit|mask)(?=\\s|$)`);
+const GIT_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git(?=\\s|$)`);
+const PATCH_ID_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?git\\s+patch-id\\b`);
+const MASK_ONLY_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?mask(?=\\s|$)`);
+// `--exit-code` is not here: git still prints the patch with it; only --quiet silences.
+const GIT_SAFE_FLAG_RE = /^--(?:stat|numstat|shortstat|name-only|name-status|quiet)(?:=|$)/;
+// A patch flag wins over a safe flag: `--stat -p` prints both.
+const GIT_PATCH_FLAG_RE = /^(?:-[a-z]*[pu][a-z]*|-[Uc]\d*|-L.*|--unified(?:=.*)?|--patch(?:-with-\w+)?|--cc|--binary|--remerge-diff|--dd|--diff-merges=(?!(?:off|none)$).*)$/;
+const GIT_SHOW_QUIET_RE = /^(?:--stat|--numstat|--shortstat|--name-only|--name-status|--no-patch|-s)(?:=|$)/;
+/** Whether `git <args>` prints file content or a patch (the R2 recommendation level). */
+function gitPrintsContent(args) {
+    const words = args.trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < words.length && (words[i] ?? "").startsWith("-")) {
+        i += /^(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env)$/.test(words[i] ?? "") ? 2 : 1;
+    }
+    const sub = words[i] ?? "";
+    const rest = words.slice(i + 1);
+    const flags = rest.filter((w) => w.startsWith("-"));
+    const operands = rest.filter((w) => !w.startsWith("-"));
+    const safe = flags.some((f) => GIT_SAFE_FLAG_RE.test(f));
+    const patch = flags.some((f) => GIT_PATCH_FLAG_RE.test(f));
+    // git stash show: -u means --include-untracked there, not a patch (-c does print one everywhere).
+    const stashPatch = flags.some((f) => f !== "-u" && GIT_PATCH_FLAG_RE.test(f));
+    switch (sub) {
+        case "show":
+            if (patch || operands.some((w) => w.includes(":")))
+                return true;
+            // --format only decorates the header; the patch still prints unless -s/--no-patch.
+            return !flags.some((f) => GIT_SHOW_QUIET_RE.test(f));
+        case "diff":
+        case "format-patch":
+            return patch || !safe;
+        case "diff-tree":
+        case "log":
+            return patch;
+        case "diff-index":
+        case "diff-files":
+        case "whatchanged":
+        case "reflog":
+            return patch;
+        case "stash":
+            return operands[0] === "show" && stashPatch;
+        case "archive":
+        case "grep":
+        case "blame":
+        case "annotate":
+        case "range-diff":
+        case "fast-export":
+            return true;
+        case "cat-file":
+            return (flags.some((f) => f === "-p" || f === "--batch" || f.startsWith("--batch=") || f === "--textconv" || f === "--filters") ||
+                operands[0] === "blob");
+        default:
+            return false;
+    }
+}
+const MECHANICAL_R1 = "R1: Peer cannot pipe or capture the output of a masked read tool (mread/mgrep/mgit/mask) — a pipe, $(…), backticks or <(…) hand the content to another process and defeat the masking. Read a slice with `mread <file> <start>,<end>`, count with `mgrep -c <pattern> <file>`, and run the tool as the whole command (`mask` may END a pipe: `git diff a b | mask`; `mgit diff … | git patch-id` is allowed).";
+const MECHANICAL_R2 = "R2: Peer does not read raw git content (git show/diff/log -p/format-patch/archive/cat-file -p|blob/grep/blame). Use `mgit show` / `mgit diff`, or `git rev-parse <sha>:<path>` or `git cat-file -s` for a hash or size; `--stat`, `--name-only` and `--numstat` forms are fine.";
+const MECHANICAL_R3 = "R3: Peer must not read the memory directory (~/.claude/projects/*/memory, or anything under .claude/projects or /.claude/). Ask the Lead for the context you need with peer_ask_lead.";
+const MECHANICAL_R5 = "R5: Peer must not touch /mnt/data (not even ls, test -e or stat). The only mention allowed is inside an `mgrep` search pattern: `mgrep -rn '/mnt/data' lib/`.";
+const MGREP_CALL_RE = new RegExp(`${STAGE_PREFIX}(?:\\S*/)?mgrep(?=\\s|$)`);
+/** Width of the shell separator starting at `i` (`$(`, `<(`, `>(` or one of | ; & newline ( ) backtick), else 0. */
+function shellSepWidth(text, i) {
+    const two = text.slice(i, i + 2);
+    if (two === "$(" || two === "<(" || two === ">(")
+        return 2;
+    return /[|;&\n()`]/.test(text[i] ?? "") ? 1 : 0;
+}
+/**
+ * A single quote that opens an ANSI-C string (`$'…'`, where a backslash escapes). `$$` is the PID, so
+ * the run of `$` before the quote pairs up from the left and only an odd remainder belongs to the quote;
+ * an odd run of backslashes before the run escapes its first `$`.
+ */
+function isAnsiCQuote(text, i) {
+    if (text[i] !== "'")
+        return false;
+    const dollars = runBefore(text, i, "$");
+    const escaped = runBefore(text, i - dollars, "\\") % 2 === 1 ? 1 : 0;
+    return (dollars - escaped) % 2 === 1;
+}
+/** End of the quoted string opened at `i` (index after its closing quote), or -1 when unterminated. */
+function quotedEnd(text, i) {
+    const quote = text[i];
+    const escapes = quote === '"' || isAnsiCQuote(text, i);
+    let j = i + 1;
+    while (j < text.length) {
+        if (escapes && text[j] === "\\")
+            j += 2;
+        else if (text[j] === quote)
+            return j + 1;
+        else
+            j++;
+    }
+    return -1;
+}
+/** Index of the first unquoted separator at or after `from`, or the end of the text. */
+function segmentEnd(text, from, backtickOpen) {
+    let i = from;
+    while (i < text.length) {
+        const ch = text[i] ?? "";
+        if (isCommentStart(text, i)) {
+            i = commentEnd(text, i, backtickOpen);
+            continue;
+        }
+        if (ch === "\\") {
+            i += 2;
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            const end = quotedEnd(text, i);
+            if (end > 0) {
+                i = end;
+                continue;
+            }
+        }
+        if (shellSepWidth(text, i) > 0)
+            return i;
+        i++;
+    }
+    return text.length;
+}
+/** Splits the arguments of one mgrep call into words; `<` and `>` runs are redirections. */
+function mgrepWords(text) {
+    const words = [];
+    let i = 0;
+    let afterRedirect = false;
+    while (i < text.length) {
+        const ch = text[i] ?? "";
+        if (/\s/.test(ch)) {
+            i++;
+            continue;
+        }
+        if (ch === "<" || ch === ">") {
+            while (text[i] === "<" || text[i] === ">")
+                i++;
+            afterRedirect = true;
+            continue;
+        }
+        if (ch === "#")
+            break; // a comment ends the arguments
+        const start = i;
+        let unsafe = false;
+        while (i < text.length) {
+            const c = text[i] ?? "";
+            if (c === "\\") {
+                i += 2;
+            }
+            else if (c === "'" || c === '"') {
+                const end = quotedEnd(text, i);
+                if (end < 0) {
+                    unsafe = true;
+                    i = text.length;
+                }
+                else {
+                    if (c === '"' && /[$`]/.test(text.slice(i, end)))
+                        unsafe = true;
+                    i = end;
+                }
+            }
+            else if (/[\s<>]/.test(c)) {
+                break;
+            }
+            else {
+                if (c === "$" || c === "`")
+                    unsafe = true;
+                i++;
+            }
+        }
+        const raw = text.slice(start, Math.min(i, text.length));
+        if (raw.includes("\n"))
+            unsafe = true;
+        const fdBeforeRedirect = /^\d+$/.test(raw) && (text[i] === "<" || text[i] === ">");
+        words.push({ start, end: Math.min(i, text.length), text: raw, unsafe, redirect: afterRedirect || fdBeforeRedirect });
+        afterRedirect = false;
+    }
+    return words;
+}
+// Options mgrep (GNU grep) takes a value for; see rok/bin/mgrep LONG_ARG and the [ABCDdefm] cluster case.
+const MGREP_LONG_VALUE = new Set([
+    "after-context", "before-context", "context", "regexp", "file", "max-count", "label",
+    "binary-files", "devices", "directories", "exclude", "exclude-from", "exclude-dir", "include", "group-separator",
+]);
+/** `[start, end)` ranges inside `segment` that are mgrep search PATTERNS (every -e / --regexp value, else the first operand). */
+function mgrepPatternRanges(segment) {
+    const call = MGREP_CALL_RE.exec(segment);
+    if (!call)
+        return [];
+    const base = call[0].length;
+    const words = mgrepWords(segment.slice(base));
+    const patterns = [];
+    const operands = [];
+    let patternGiven = false;
+    let optionsEnded = false;
+    const take = (word, from, isPattern) => {
+        if (isPattern && word)
+            patterns.push([word.start + from, word.end, word.unsafe]);
+    };
+    for (let w = 0; w < words.length; w++) {
+        const word = words[w];
+        if (word.redirect)
+            continue;
+        const text = word.text;
+        if (optionsEnded || text === "-" || !text.startsWith("-")) {
+            operands.push(word);
+        }
+        else if (text === "--") {
+            optionsEnded = true;
+        }
+        else if (text.startsWith("--")) {
+            const eq = text.indexOf("=");
+            const name = text.slice(2, eq > 0 ? eq : undefined);
+            if (!MGREP_LONG_VALUE.has(name))
+                continue;
+            if (name === "regexp" || name === "file")
+                patternGiven = true;
+            if (eq > 0)
+                take(word, eq + 1, name === "regexp");
+            else
+                take(words[++w], 0, name === "regexp");
+        }
+        else {
+            for (let j = 1; j < text.length; j++) {
+                const c = text[j] ?? "";
+                if (!"ABCDdefm".includes(c))
+                    continue;
+                if (c === "e" || c === "f")
+                    patternGiven = true;
+                if (j + 1 < text.length)
+                    take(word, j + 1, c === "e");
+                else
+                    take(words[++w], 0, c === "e");
+                break;
+            }
+        }
+    }
+    if (!patternGiven)
+        take(operands[0], 0, true);
+    return patterns.filter(([, , unsafe]) => !unsafe).map(([s, e]) => [base + s, base + e]);
+}
+/**
+ * The command with the search PATTERN operand(s) of every `mgrep` call blanked
+ * (a pattern may name /mnt/data). Path operands, option values such as -f FILE,
+ * redirection targets and anything holding an expansion stay visible.
+ */
+function withoutMgrepPatterns(command) {
+    let out = "";
+    let backtickOpen = false;
+    let i = 0;
+    while (i < command.length) {
+        const end = segmentEnd(command, i, backtickOpen);
+        const segment = command.slice(i, end);
+        let last = 0;
+        for (const [from, to] of mgrepPatternRanges(segment)) {
+            out += segment.slice(last, from) + "Q";
+            last = to;
+        }
+        out += segment.slice(last);
+        if (end >= command.length)
+            break;
+        const width = Math.max(shellSepWidth(command, end), 1);
+        out += command.slice(end, end + width);
+        if (command[end] === "`")
+            backtickOpen = !backtickOpen;
+        i = end + width;
+    }
+    return out;
+}
+function mechanicalShellViolation(command, depth) {
+    const { outer, code } = shellSurface(command);
+    const stages = splitShellStages(outer);
+    for (let k = 0; k < stages.length; k++) {
+        const stage = stages[k];
+        const next = stages[k + 1];
+        const piped = stage.sep === "|" || stage.sep === "|&" || stage.sep === ">(" || stage.pipedOut === true;
+        const tool = MASKED_TOOL_RE.exec(stage.text);
+        if (tool) {
+            const rest = stage.text.slice(tool[0].length);
+            const patchId = tool[1] === "mgit" && stage.sep === "|" && /^\s*diff\b/.test(rest) && next !== undefined && PATCH_ID_RE.test(next.text);
+            if (!patchId && (stage.sub || piped))
+                return MECHANICAL_R1;
+        }
+        const git = GIT_CALL_RE.exec(stage.text);
+        if (git && gitPrintsContent(stage.text.slice(git[0].length))) {
+            const toMask = stage.sep === "|" && next !== undefined && MASK_ONLY_RE.test(next.text);
+            if (!toMask)
+                return MECHANICAL_R2;
+        }
+    }
+    if (depth < 4) {
+        for (const inner of code) {
+            const reason = mechanicalShellViolation(inner, depth + 1);
+            if (reason)
+                return reason;
+        }
+    }
+    return null;
+}
+/**
+ * Deny reason for a Peer bash command that breaks R1 (masked tool output piped
+ * or captured), R2 (raw git content), R3 (memory directory) or R5 (/mnt/data);
+ * null otherwise. Applies to every Peer, briefed or not.
+ */
+export function mechanicalBashBlockReason(role, command) {
+    if (role !== "peer" || typeof command !== "string" || command.trim() === "")
+        return null;
+    // R3 has no exemption: a quoted mention (echo, commit message, mgrep pattern) is
+    // blocked on purpose, fail-closed for secret paths. Only R5 spares an mgrep pattern.
+    if (/\.claude\/projects(?![\w.-])/.test(command) || /\/\.claude(?![\w.-])/.test(command))
+        return MECHANICAL_R3;
+    if (/\/mnt\/data(?![\w.-])/.test(withoutMgrepPatterns(command)))
+        return MECHANICAL_R5;
+    return mechanicalShellViolation(command, 0);
+}
+/**
+ * Deny reason for a Peer file-tool call (Read/Grep/Glob, or pi's read) whose
+ * path-like arguments reach the memory directory (R3) or /mnt/data (R5).
+ */
+export function mechanicalPathBlockReason(role, paths) {
+    if (role !== "peer")
+        return null;
+    for (const given of paths) {
+        if (typeof given !== "string" || given === "")
+            continue;
+        // `..`, `//` and `./` must not hide the target.
+        let raw = posix.normalize(given);
+        if (raw.length > 1 && raw.endsWith("/"))
+            raw = raw.slice(0, -1);
+        if (/\/mnt\/data(?![\w.-])/.test(raw))
+            return MECHANICAL_R5;
+        if (/(?:^|\/)\.claude\/projects\/[^/]+\/memory(?:\/|$)/.test(raw) ||
+            // a glob segment right under .claude can reach projects/*/memory
+            /(?:^|\/)\.claude\/[^/]*[*?[{][^/]*(?:\/|$)/.test(raw) ||
+            // a search root that CONTAINS .claude/projects (Grep path + glob filter, Glob path)
+            /(?:^|\/)\.claude(?:\/projects(?:\/[^/]*)?)?$/.test(raw) ||
+            raw === "~" ||
+            raw === homedir()) {
+            return MECHANICAL_R3;
+        }
+    }
+    return null;
 }
 /**
  * The text the runtime adapters put on the team_lease tool.

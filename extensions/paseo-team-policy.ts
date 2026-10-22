@@ -112,6 +112,8 @@ import {
 	type RouteTable,
 	type SupervisorSeat,
 	supportScriptBlockReason,
+	mechanicalBashBlockReason,
+	mechanicalPathBlockReason,
 	writerScopesFromCreateAgent,
 	type ParsedTaskBrief,
 	type PeerMode,
@@ -725,6 +727,19 @@ export default function (pi: ExtensionAPI) {
 			const skillReason = skill && skillBlockReason(r, skill, currentBrief);
 			if (skillReason) return { block: true, reason: skillReason };
 		}
+		if (r === "peer" && ["read", "grep", "find", "ls", "glob"].includes(event.toolName)) {
+			// R3/R5 on the file tools pi gives a Peer (read; grep/find/ls where present).
+			const args = event.input as Record<string, unknown>;
+			const pathBlock = mechanicalPathBlockReason(
+				r,
+				[
+					...["path", "file_path", "glob"].map((k) => String(args[k] ?? "")),
+					// pi's find takes a glob `pattern` (its grep `pattern` is a content regex).
+					...(event.toolName === "find" || event.toolName === "glob" ? [String(args.pattern ?? "")] : []),
+				],
+			);
+			if (pathBlock) return { block: true, reason: pathBlock };
+		}
 		if (policy.deny.includes(event.toolName)) {
 			if (
 				r === "peer" &&
@@ -790,6 +805,10 @@ export default function (pi: ExtensionAPI) {
 			const supportScriptReason = supportScriptBlockReason(r, command);
 			if (supportScriptReason) {
 				return { block: true, reason: supportScriptReason };
+			}
+			const mechanicalReason = mechanicalBashBlockReason(r, command);
+			if (mechanicalReason) {
+				return { block: true, reason: mechanicalReason };
 			}
 			const gitBlockReason = gitAuthorityBlockReason(
 				command,
