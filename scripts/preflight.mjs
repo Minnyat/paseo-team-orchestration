@@ -17,7 +17,7 @@
 // model inventory, silently-clamped thinking levels, missing required remote
 // endpoint env) are escalated to failures — unverifiable is NOT a pass.
 
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 // Only for the ONE path that is a historical constant rather than a resolved
 // location: the pre-unification default of the pack's config directory.
@@ -137,6 +137,14 @@ const strictCheck = wantStrict ? fail : warn;
 const NEEDS_SHELL = process.platform === "win32";
 
 function tryExec(cmd, argv, timeoutMs = 30000) {
+	// A probe already run concurrently by prefetchProbes: consume it instead of
+	// spawning again. One-shot, so a repeated identical call still runs for real.
+	const key = probeKey(cmd, argv, timeoutMs);
+	const hit = prefetched.get(key);
+	if (hit) {
+		prefetched.delete(key);
+		if (hit.res.ok || !hit.retrySync) return hit.res;
+	}
 	try {
 		const stdout = NEEDS_SHELL
 			? execSync([cmd, ...argv.map(String)].join(" "), {
@@ -161,12 +169,117 @@ function tryExec(cmd, argv, timeoutMs = 30000) {
 	}
 }
 
+// --- concurrent probes --------------------------------------------------------
+//
+// Output order is fixed by the sequential code below, which keeps calling
+// tryExec()/listModels() in declaration order. What runs concurrently is only
+// the spawning: independent, read-only probes are started up front through a
+// bounded pool and their results parked where those calls pick them up. A probe
+// nobody prefetched simply runs synchronously, as it always did.
+
+// <probe-runner>
+/** Run worker over items with at most `limit` in flight; results keep input order. */
+async function runBounded(items, limit, worker) {
+	const out = new Array(items.length);
+	let next = 0;
+	const lane = async () => {
+		while (next < items.length) {
+			const i = next++;
+			out[i] = await worker(items[i], i);
+		}
+	};
+	await Promise.all(
+		Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane),
+	);
+	return out;
+}
+
+// Same contract as execFileSync(..., { timeout, encoding: "utf8",
+// stdio: ["ignore", "pipe", "pipe"] }): stdin is closed, SIGTERM at the
+// timeout, output past 1 MiB is a failure, stdout survives a failure. Never
+// rejects.
+function execAsync(cmd, argv, timeoutMs, shell = false) {
+	return new Promise((resolve) => {
+		const stdio = ["ignore", "pipe", "pipe"];
+		let child;
+		let out = "";
+		let size = 0;
+		let settled = false;
+		let timer;
+		const done = (res) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(res);
+		};
+		const abort = (message) => {
+			child?.kill("SIGTERM");
+			done({ ok: false, stdout: out, error: message });
+		};
+		try {
+			child = shell
+				? spawn([cmd, ...argv.map(String)].join(" "), { shell: true, stdio, env: process.env })
+				: spawn(cmd, argv, { stdio, env: process.env });
+		} catch (error) {
+			done({ ok: false, stdout: "", error: String(error?.message ?? error) });
+			return;
+		}
+		timer = setTimeout(() => abort(`${cmd} timed out after ${timeoutMs}ms`), timeoutMs);
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk) => {
+			size += Buffer.byteLength(chunk);
+			if (size > 1024 * 1024) return abort(`${cmd} output exceeded maxBuffer`);
+			out += chunk;
+		});
+		child.stderr.resume();
+		child.on("error", (error) => done({ ok: false, stdout: out, error: String(error?.message ?? error) }));
+		child.on("close", (code, signal) =>
+			done(code === 0 ? { ok: true, stdout: out } : { ok: false, stdout: out, error: `${cmd} exited with ${signal ?? code}` }),
+		);
+	});
+}
+// </probe-runner>
+
+// Enough to overlap the ~9 startup probes and the per-provider model listings
+// without hammering the one daemon they all talk to.
+const PROBE_CONCURRENCY = 6;
+
+const prefetched = new Map();
+const probeKey = (cmd, argv, timeoutMs) => JSON.stringify([cmd, argv.map(String), timeoutMs]);
+
+/** specs: { cmd, argv, timeoutMs?, retrySync? }. retrySync: a failure is re-run
+ * synchronously, because its error text reaches the report. */
+async function prefetchProbes(specs) {
+	const results = await runBounded(specs, PROBE_CONCURRENCY, (spec) =>
+		execAsync(spec.cmd, spec.argv, spec.timeoutMs ?? 30000, NEEDS_SHELL),
+	);
+	specs.forEach((spec, i) =>
+		prefetched.set(probeKey(spec.cmd, spec.argv, spec.timeoutMs ?? 30000), {
+			res: results[i],
+			retrySync: spec.retrySync === true,
+		}),
+	);
+}
+
 function summarizeMessages() {
 	if (results.some((r) => r.status === "fail")) return 1;
 	return 0;
 }
 
 // --- node / git / CLIs --------------------------------------------------------
+
+await prefetchProbes([
+	{ cmd: "ocr", argv: ["version"] },
+	{ cmd: "ocr", argv: ["delegate", "preview", "--help"] },
+	{ cmd: "ocr", argv: ["delegate", "rule", "--help"] },
+	{ cmd: "git", argv: ["--version"] },
+	{ cmd: "paseo", argv: ["--version"] },
+	{ cmd: "pi", argv: ["--version"] },
+	{ cmd: "claude", argv: ["--version"] },
+	{ cmd: "paseo", argv: ["status", "--json"], retrySync: true },
+	// Only read when pi is one of the runtimes under check.
+	...(runtimeOpt === "claude" ? [] : [{ cmd: "pi", argv: ["list"] }]),
+]);
 
 {
 	const ocr = tryExec("ocr", ["version"]);
@@ -487,25 +600,38 @@ if (wantClaude) {
 // --- role providers + model inventory -----------------------------------------
 
 const modelsCache = new Map();
+function modelsFromResult(res) {
+	if (!res.ok) return null;
+	try {
+		return JSON.parse(res.stdout);
+	} catch {
+		return null;
+	}
+}
 function listModels(roleProvider) {
 	if (modelsCache.has(roleProvider)) return modelsCache.get(roleProvider);
-	const res = tryExec(
-		"paseo",
-		["provider", "models", roleProvider, "--json"],
-		120000,
+	const models = modelsFromResult(
+		tryExec("paseo", ["provider", "models", roleProvider, "--json"], 120000),
 	);
-	if (!res.ok) {
-		modelsCache.set(roleProvider, null);
-		return null;
-	}
-	try {
-		const models = JSON.parse(res.stdout);
-		modelsCache.set(roleProvider, models);
-		return models;
-	} catch {
-		modelsCache.set(roleProvider, null);
-		return null;
-	}
+	modelsCache.set(roleProvider, models);
+	return models;
+}
+/** Fill modelsCache for providers listModels is about to be asked for, concurrently. */
+async function prefetchModels(providers) {
+	const wanted = [...new Set(providers)].filter((p) => !modelsCache.has(p));
+	const results = await runBounded(wanted, PROBE_CONCURRENCY, (p) =>
+		execAsync("paseo", ["provider", "models", p, "--json"], 120000, NEEDS_SHELL),
+	);
+	wanted.forEach((p, i) => modelsCache.set(p, modelsFromResult(results[i])));
+}
+
+/** Providers whose model listing the sequential code below will ask for. */
+function routeProviders(routes) {
+	return classesToResolve(routes).flatMap((modelClass) =>
+		routeOptions(routes[modelClass])
+			.filter((route) => route.enabled !== false)
+			.map((route) => route.paseoProvider),
+	);
 }
 
 const providersById = new Map();
@@ -523,6 +649,18 @@ if (daemonUp) {
 		const expectedRoleProviders = runtimes.flatMap((family) =>
 			["supervisor", "lead", "peer"].map((role) => `${family}-${role}`),
 		);
+		if (!skipModels) {
+			// Exactly the roles the loop below will list models for.
+			await prefetchModels(
+				expectedRoleProviders.filter((role) => {
+					const entry = providersById.get(role);
+					if (!entry) return false;
+					if (String(entry.enabled).toLowerCase() !== "enabled" && entry.enabled !== true) return false;
+					const status = typeof entry.status === "string" ? entry.status.toLowerCase() : null;
+					return status === null || PROVIDER_OK_STATUSES.has(status);
+				}),
+			);
+		}
 		for (const role of expectedRoleProviders) {
 			const entry = providersById.get(role);
 			if (!entry)
@@ -658,6 +796,7 @@ function piModelLevelUnreachable(piProvider, modelId, level) {
 }
 
 if (routing && daemonUp && !skipModels) {
+	await prefetchModels(routeProviders(routing.routes));
 	for (const modelClass of classesToResolve(routing.routes)) {
 	// Every option of the class is checked (0 = the primary, `route:CLASS#N` for the others).
 	for (const route of routeOptions(routing.routes[modelClass])) {
@@ -1113,6 +1252,7 @@ if (cluster) {
 			);
 		} else if (host.connection.type === "local" && daemonUp && !skipModels) {
 			// Local host: full route resolution against the live daemon, strict.
+			await prefetchModels(routeProviders(host.routes));
 			for (const modelClass of classesToResolve(host.routes)) {
 				for (const route of routeOptions(host.routes[modelClass])) {
 				const optionId = route.index === 0 ? `cluster-route:${verifyHostId}:${modelClass}` : `cluster-route:${verifyHostId}:${modelClass}#${route.index}`;
