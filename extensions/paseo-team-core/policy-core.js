@@ -5226,6 +5226,136 @@ export function parseTaskBrief(prompt) {
     }
     return { version, mode, malformed, fields };
 }
+// ---------------------------------------------------------------------------
+// Paseo agent-message envelope (Paseo >= 0.14)
+//
+// From 0.14 the daemon wraps every prompt one agent sends another — `paseo
+// run`/`send` and MCP `create_agent`/`send_agent_prompt` alike — as
+//
+//   <paseo-system version="1" kind="agent-message" source-agent-id="…"
+//     message-id="…"[ source-server-id="…"][ source-agent-title="…"]>
+//   {escapeXml(body)}
+//   </paseo-system>
+//
+// so a Lead's brief no longer starts with the V3 marker and parsed to null.
+// The grammar below is Paseo's own (server/agent/agent-messages/envelope.js,
+// parseAgentMessage + unescapeXml in 0.14.0), copied rather than approximated:
+// an envelope is unwrapped only when Paseo itself would accept it, and only
+// when the WHOLE prompt is that one envelope. Anything else — prose around it,
+// a batch of several, another kind, the bare `<paseo-system>` schedule form —
+// is handed to parseTaskBrief as-is, where the first line is not a marker and
+// the turn stays the read-only null it always was.
+// ---------------------------------------------------------------------------
+const AGENT_MESSAGE_ENVELOPE_RE = /^<paseo-system((?:\s+[a-z-]+="[^"<>]*")+)>\n([\s\S]*)\n<\/paseo-system>$/;
+const AGENT_MESSAGE_ATTRIBUTE_RE = /\s+([a-z-]+)="([^"<>]*)"/g;
+/** Paseo's unescapeXml: one pass, the five entities only, a raw < > or a stray & rejects. */
+function unescapePaseoXml(value) {
+    if (/[<>]|&(?!amp;|lt;|gt;|quot;|apos;)/.test(value))
+        return null;
+    return value.replace(/&(amp|lt|gt|quot|apos);/g, (_, entity) => {
+        switch (entity) {
+            case "amp":
+                return "&";
+            case "lt":
+                return "<";
+            case "gt":
+                return ">";
+            case "quot":
+                return '"';
+            default:
+                return "'";
+        }
+    });
+}
+/**
+ * The prompt as one `kind="agent-message"` envelope, or null.
+ *
+ * Mirrors Paseo's parseAgentMessage: duplicate attributes, a malformed escape
+ * in an attribute or the body, a version other than "1" or a missing
+ * message-id all reject, and so does an empty source-agent-id / server-id /
+ * title (Paseo's schema requires min(1) for each one present). Unknown
+ * attributes are tolerated because Paseo's schema strips them. `user-message`
+ * and `agent-notification` envelopes are valid Paseo but null here: neither
+ * is a Lead speaking.
+ */
+export function parseAgentMessageEnvelope(prompt) {
+    const envelope = AGENT_MESSAGE_ENVELOPE_RE.exec(prompt);
+    if (!envelope || envelope[1] === undefined || envelope[2] === undefined) {
+        return null;
+    }
+    const attributes = new Map();
+    for (const match of envelope[1].matchAll(AGENT_MESSAGE_ATTRIBUTE_RE)) {
+        const name = match[1] ?? "";
+        const value = unescapePaseoXml(match[2] ?? "");
+        if (value === null || attributes.has(name))
+            return null;
+        attributes.set(name, value);
+    }
+    if (attributes.get("version") !== "1")
+        return null;
+    if (attributes.get("kind") !== "agent-message")
+        return null;
+    const messageId = attributes.get("message-id");
+    const sourceAgentId = attributes.get("source-agent-id");
+    const sourceServerId = attributes.get("source-server-id");
+    const sourceAgentTitle = attributes.get("source-agent-title");
+    if (!messageId || !sourceAgentId)
+        return null;
+    if (sourceServerId === "" || sourceAgentTitle === "")
+        return null;
+    const body = unescapePaseoXml(envelope[2]);
+    if (body === null)
+        return null;
+    return {
+        messageId,
+        sourceAgentId,
+        sourceServerId: sourceServerId ?? null,
+        sourceAgentTitle: sourceAgentTitle ?? null,
+        body,
+    };
+}
+/**
+ * This seat's parent (`paseo.parent-agent-id`), read from its own agent state
+ * file — the label `paseo inspect` reports and peer_ask_lead sends to, without
+ * the ~3s daemon round trip. Deliberately not memoised: it is read only for a
+ * prompt that already is an agent-message envelope, and a label is the kind of
+ * fact a stale cache would keep granting after it changed. Anything unreadable
+ * is null, which unwraps nothing.
+ */
+export function selfParentAgentId(env = process.env) {
+    const selfId = env.PASEO_AGENT_ID?.trim();
+    if (!selfId || !isAgentId(selfId))
+        return null;
+    try {
+        const { states } = readAgentStates([selfId], {
+            root: paseoAgentsRoot(env),
+        });
+        const parent = states[selfId]?.parentAgentId?.trim();
+        return parent && isAgentId(parent) ? parent : null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * The brief a Peer's turn carries: parseTaskBrief on the prompt, or — when the
+ * whole prompt is one agent-message envelope — on its body, but only if the
+ * sender is this Peer's own parent Lead. Any other sender, or a parent that
+ * cannot be resolved, is null: an envelope never falls back to a read of the
+ * raw text, and the body is never unwrapped twice.
+ *
+ * `resolveParent` is called only once the prompt has parsed as an envelope, so
+ * a bare brief (Paseo <= 0.13) costs nothing it did not cost before.
+ */
+export function parseTurnBrief(prompt, resolveParent = () => selfParentAgentId()) {
+    const envelope = parseAgentMessageEnvelope(prompt);
+    if (!envelope)
+        return parseTaskBrief(prompt);
+    const parent = resolveParent();
+    if (!parent || parent !== envelope.sourceAgentId)
+        return null;
+    return parseTaskBrief(envelope.body);
+}
 export function serializeBrief(brief) {
     return {
         version: brief.version,

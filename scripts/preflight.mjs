@@ -389,6 +389,7 @@ if (wantPi) {
 			);
 			if (
 				typeof core.parseTaskBrief !== "function" ||
+				typeof core.parseTurnBrief !== "function" ||
 				typeof claudeDialect.claudeToolBlockReason !== "function"
 			) {
 				fail("policy-core", `${coreDir} loaded but does not export the policy API`);

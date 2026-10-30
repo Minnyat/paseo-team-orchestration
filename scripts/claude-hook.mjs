@@ -201,7 +201,7 @@ export async function currentBrief(payload, env = process.env, now = Date.now())
 		if (restored) return restored;
 	}
 	const prompt = lastUserPrompt(payload?.transcript_path);
-	return prompt ? core.parseTaskBrief(prompt) : null;
+	return prompt ? core.parseTurnBrief(prompt, () => core.selfParentAgentId(env)) : null;
 }
 
 function roleContextBlock(rolePrompt, role) {
@@ -627,7 +627,9 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		const prompt = typeof payload?.prompt === "string" ? payload.prompt : "";
 		// Authority is recomputed from THIS prompt on every turn and never
 		// inherited: same invariant as the Pi extension's before_agent_start.
-		const brief = role === "peer" ? core.parseTaskBrief(prompt) : null;
+		// parseTurnBrief also opens a Paseo 0.14 agent-message envelope, but only
+		// one sent by this Peer's own parent Lead.
+		const brief = role === "peer" ? core.parseTurnBrief(prompt, () => core.selfParentAgentId(env)) : null;
 		const previous = readSessionState(payload?.session_id, env, now);
 		const injected = previous?.rolePromptInjected === true;
 		// Reload "routing now" from the files; show it when it differs from what this
