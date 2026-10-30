@@ -813,6 +813,13 @@ After implementation:
 7. Preserve the existing one-writer, fresh-reviewer-worktree, exact-SHA, Lead
    acceptance, and Human merge/deploy invariants.
 
+Advisory, not a gate: when a job produced several candidate
+`agent/<TASK_ID>` branches, consider one combined-diff look across them before
+the Human merges — a single review of the seams where the branches meet, on top
+of the per-candidate reviews. Per-branch review sees each branch alone; the
+seam contracts locked in the briefs are only checked branch by branch. This is
+recommended, not required, and nothing enforces it.
+
 ## Completion
 
 Report:
