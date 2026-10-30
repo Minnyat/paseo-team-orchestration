@@ -59,7 +59,7 @@ import {
 	loadRolePrompt,
 	mcpBlockReason,
 	mcpScriptBlockReason,
-	parseTaskBrief,
+	parseTurnBrief,
 	peerGitAuthority,
 	peerMcpBlockReason,
 	policyWithAuthority,
@@ -665,8 +665,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event) => {
 		if (r === "peer") {
 			// Recompute authority from THIS prompt — never inherit from an
-			// earlier turn. Missing/malformed brief → read-only.
-			currentBrief = parseTaskBrief(event.prompt);
+			// earlier turn. Missing/malformed brief → read-only. A Paseo 0.14
+			// agent-message envelope is opened only when the parent Lead sent it.
+			currentBrief = parseTurnBrief(event.prompt);
 			if (currentBrief?.malformed.length) {
 				console.warn(
 					`[paseo-team] malformed task brief → read-only: ${currentBrief.malformed.join("; ")}`,
