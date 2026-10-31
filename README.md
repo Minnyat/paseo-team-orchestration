@@ -122,7 +122,7 @@ paseo-team-orchestration/
 │   ├── ocr-review.test.mjs         # OCR delegation preflight contract
 │   ├── ocr-setup.test.mjs          # capability probe + version comparison
 │   ├── instruction-budget.test.mjs # standing-instruction size ratchet
-│   ├── preflight.test.mjs          # which checks run, and at what severity
+│   ├── preflight.test.mjs          # which checks run, at what severity, and that probes stay ordered under concurrency
 │   ├── uninstall.test.mjs          # removes what install wrote, and nothing else
 │   ├── tools/mutate.mjs            # mutation harness: would these tests catch the bug?
 │   ├── workspace-protocol.test.mjs # protocol admission states + digest
@@ -799,6 +799,11 @@ Check the CLI manually with `ocr version` (`Get-Command ocr` on PowerShell,
 `command -v ocr` on Unix-like shells), and use delegation mode — not
 `ocr review`. See [`docs/ocr-integration.md`](docs/ocr-integration.md).
 
+Before the Human merges several `agent/<TASK_ID>` branches, a Scout or Reviewer
+may read one integration commit (made by the Human or an integration owner) or
+the branch diffs side by side to catch seams between them. This is advisory and
+unenforced, and the Lead merges nothing.
+
 The optional deterministic preflight emits a normalized manifest:
 
 ```bash
@@ -1166,6 +1171,10 @@ What actually guards the Paseo surface is not a version number but
 version pin notices that upstream moved; the contract test notices whether the
 move broke anything, which is the question worth answering.
 
+The Lead skill and the role prompts also have byte budgets, enforced by
+`test/instruction-budget.test.mjs`. Fold a new rule into an existing section
+instead of raising a budget.
+
 ### Testing the tests
 
 `npm test` answers "do the tests pass?". It cannot answer "would these tests
@@ -1261,6 +1270,10 @@ installed copy still matches this release** (`install-drift`), **the target
 repository's protocol** (`workspace-protocol`), the pack's config directory
 after the two-variable unification (`team-config-dir`), and repository state (a
 writer host must be clean in strict mode).
+
+Independent read-only probes run concurrently through a bounded pool; the report
+order is unchanged, a probe nobody prefetched runs synchronously, and output past
+1 MiB on either stream counts as a failure.
 
 No secret is ever printed. That is a real invariant and not a hope: an endpoint
 is a pairing offer, it travels only inside argv, and `remoteExec` redacts it
