@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   isEntrypoint,
@@ -365,6 +365,8 @@ function parseArgs(argv) {
       options.base = requireSha(options.base, "--base");
     }
   }
+  // OCR runs with cwd=repo, so a relative --repo must be made absolute once here.
+  options.repo = resolve(options.repo);
   return options;
 }
 
