@@ -143,7 +143,7 @@ function tryExec(cmd, argv, timeoutMs = 30000) {
 	const hit = prefetched.get(key);
 	if (hit) {
 		prefetched.delete(key);
-		if (hit.res.ok || !hit.retrySync) return hit.res;
+		return hit.res;
 	}
 	try {
 		const stdout = NEEDS_SHELL
@@ -196,7 +196,7 @@ async function runBounded(items, limit, worker) {
 
 // Same contract as execFileSync(..., { timeout, encoding: "utf8",
 // stdio: ["ignore", "pipe", "pipe"] }): stdin is closed, SIGTERM at the
-// timeout, output past 1 MiB is a failure, stdout survives a failure. Never
+// timeout, output past 1 MiB on either stream is a failure, stdout survives a failure. Never
 // rejects.
 function execAsync(cmd, argv, timeoutMs, shell = false) {
 	return new Promise((resolve) => {
@@ -231,7 +231,11 @@ function execAsync(cmd, argv, timeoutMs, shell = false) {
 			if (size > 1024 * 1024) return abort(`${cmd} output exceeded maxBuffer`);
 			out += chunk;
 		});
-		child.stderr.resume();
+		let errSize = 0;
+		child.stderr.on("data", (chunk) => {
+			errSize += chunk.length;
+			if (errSize > 1024 * 1024) abort(`${cmd} stderr exceeded maxBuffer`);
+		});
 		child.on("error", (error) => done({ ok: false, stdout: out, error: String(error?.message ?? error) }));
 		child.on("close", (code, signal) =>
 			done(code === 0 ? { ok: true, stdout: out } : { ok: false, stdout: out, error: `${cmd} exited with ${signal ?? code}` }),
@@ -247,8 +251,9 @@ const PROBE_CONCURRENCY = 6;
 const prefetched = new Map();
 const probeKey = (cmd, argv, timeoutMs) => JSON.stringify([cmd, argv.map(String), timeoutMs]);
 
-/** specs: { cmd, argv, timeoutMs?, retrySync? }. retrySync: a failure is re-run
- * synchronously, because its error text reaches the report. */
+/** specs: { cmd, argv, timeoutMs? }. Only probes whose failure text never reaches
+ * the report belong here: async error strings differ from execFileSync's.
+ * `paseo status` prints its error, so it stays a plain synchronous tryExec. */
 async function prefetchProbes(specs) {
 	const results = await runBounded(specs, PROBE_CONCURRENCY, (spec) =>
 		execAsync(spec.cmd, spec.argv, spec.timeoutMs ?? 30000, NEEDS_SHELL),
@@ -256,7 +261,6 @@ async function prefetchProbes(specs) {
 	specs.forEach((spec, i) =>
 		prefetched.set(probeKey(spec.cmd, spec.argv, spec.timeoutMs ?? 30000), {
 			res: results[i],
-			retrySync: spec.retrySync === true,
 		}),
 	);
 }
@@ -276,7 +280,6 @@ await prefetchProbes([
 	{ cmd: "paseo", argv: ["--version"] },
 	{ cmd: "pi", argv: ["--version"] },
 	{ cmd: "claude", argv: ["--version"] },
-	{ cmd: "paseo", argv: ["status", "--json"], retrySync: true },
 	// Only read when pi is one of the runtimes under check.
 	...(runtimeOpt === "claude" ? [] : [{ cmd: "pi", argv: ["list"] }]),
 ]);

@@ -83,7 +83,7 @@ mkdirSync(repo, { recursive: true });
  */
 function stub(name, body) {
 	const path = join(binDir, name);
-	writeFileSync(path, `#!${process.execPath}\nconst argv = process.argv.slice(2);\nconst at = (i) => argv[i] ?? "";\nconst env = process.env;\nconst nap = Number(env.FAKE_DELAY_MS_${name.toUpperCase()} ?? 0);\nif (nap > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, nap);\n${body}\nprocess.stderr.write("fake ${name}: unsupported argv " + JSON.stringify(argv) + "\\n");\nprocess.exit(64);\n`);
+	writeFileSync(path, `#!${process.execPath}\nconst argv = process.argv.slice(2);\nconst at = (i) => argv[i] ?? "";\nconst env = process.env;\nif (env.FAKE_CALL_LOG) require("node:fs").appendFileSync(env.FAKE_CALL_LOG, argv.join(" ") + "\\n");\nconst nap = Number(env.FAKE_DELAY_MS_${name.toUpperCase()} ?? 0);\nif (nap > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, nap);\n${body}\nprocess.stderr.write("fake ${name}: unsupported argv " + JSON.stringify(argv) + "\\n");\nprocess.exit(64);\n`);
 	chmodSync(path, 0o755);
 }
 
@@ -1254,7 +1254,7 @@ test("execAsync keeps execFileSync's contract: timeout, closed stdin, stdout kep
 });
 
 test("slow, unevenly-timed CLIs: same report in the same order, in less than the sum of their latencies", { skip: !POSIX }, () => {
-	const delays = { FAKE_DELAY_MS_OCR: "600", FAKE_DELAY_MS_GIT: "50", FAKE_DELAY_MS_PASEO: "400", FAKE_DELAY_MS_PI: "800", FAKE_DELAY_MS_CLAUDE: "200" };
+	const delays = { FAKE_DELAY_MS_OCR: "600", FAKE_DELAY_MS_GIT: "50", FAKE_DELAY_MS_PASEO: "400", FAKE_DELAY_MS_PI: "800" };
 	const flat = (run) => run.checks.map((c) => `${c.id}|${c.status}|${c.detail}`);
 	const fast = preflight(["--runtime", "both"]);
 	const t0 = Date.now();
@@ -1262,10 +1262,23 @@ test("slow, unevenly-timed CLIs: same report in the same order, in less than the
 	assert.equal(slow.status, fast.status);
 	const elapsed = Date.now() - t0;
 	assert.deepEqual(flat(slow), flat(fast), "latency must not reorder or rewrite a single check");
-	// Probes the pool overlaps: ocr x3, git, paseo x2 (version, status), pi x2, claude. Run one
+	// Probes the pool overlaps: ocr x3, git, paseo x2 (version, status), pi x2. Run one
 	// after another they cost at least 5s on their own; a bounded pool needs about the slowest lane.
-	const sequentialFloor = 600 * 3 + 50 + 400 * 2 + 800 * 2 + 200;
+	const sequentialFloor = 600 * 3 + 50 + 400 * 2 + 800 * 2;
 	assert.ok(elapsed < sequentialFloor - 1000, `took ${elapsed}ms; one-after-another would take >= ${sequentialFloor}ms`);
+});
+
+test("a failing `paseo status` runs once and keeps execFileSync's error text (a hang must not cost two timeouts)", { skip: !POSIX }, () => {
+	// A hung daemon takes the same path as this failure: one probe, ending in
+	// that probe's error. Re-running it after a prefetch would double the 30s
+	// timeout, so the call log must show exactly one `status --json`.
+	const log = join(home, "paseo-calls.log");
+	rmSync(log, { force: true });
+	const daemon = preflight([], { FAKE_DAEMON_DOWN: "1", FAKE_CALL_LOG: log }).of("paseo-daemon");
+	assert.equal(daemon.status, "fail");
+	assert.match(daemon.detail, /^daemon unreachable: Command failed: paseo status --json\n?/);
+	const calls = readFileSync(log, "utf8").split("\n").filter((line) => line === "status --json");
+	assert.equal(calls.length, 1, "`paseo status --json` must be probed exactly once");
 });
 
 test.after(() => rmSync(home, { recursive: true, force: true }));
