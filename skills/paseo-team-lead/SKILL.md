@@ -813,15 +813,10 @@ After implementation:
 7. Preserve the existing one-writer, fresh-reviewer-worktree, exact-SHA, Lead
    acceptance, and Human merge/deploy invariants.
 
-Advisory, not a gate: when a job produced several candidate
-`agent/<TASK_ID>` branches, consider one combined-diff look across them before
-the Human merges — a single review of the seams where the branches meet, on top
-of the per-candidate reviews. Per-branch review sees each branch alone; the
-seam contracts locked in the briefs are only checked branch by branch. A Scout
-or Reviewer can do the look (reading is a Peer's job), against an integration
-commit the Human or an integration owner makes, or by reading the branch diffs
-side by side when none exists; the Lead does not merge to create one. This is
-recommended, not required, and is not enforced today.
+Advisory: consider a combined-diff look across `agent/<TASK_ID>` branches
+before Human merges; a Scout/Reviewer reads an integration commit the Human or
+integration owner makes, or branch diffs side by side. Lead merges nothing.
+Unenforced today.
 
 ## Completion
 
