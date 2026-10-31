@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -61,7 +61,7 @@ function makeRepo() {
   return { repo, source, base, candidate };
 }
 
-function runWrapper(repo, base, candidate, extraEnv = {}) {
+function runWrapper(repo, base, candidate, extraEnv = {}, { cwd, repoArg = repo } = {}) {
   const env = {
     ...process.env,
     PASEO_TEAM_OCR_EXEC: `"${NODE}" "${FAKE_OCR}"`,
@@ -73,8 +73,8 @@ function runWrapper(repo, base, candidate, extraEnv = {}) {
   };
   const result = spawnSync(
     NODE,
-    [WRAPPER, "--repo", repo, "--base", base, "--candidate", candidate],
-    { encoding: "utf8", env, timeout: 30_000 },
+    [WRAPPER, "--repo", repoArg, "--base", base, "--candidate", candidate],
+    { encoding: "utf8", env, timeout: 30_000, cwd },
   );
   let json;
   try {
@@ -83,6 +83,24 @@ function runWrapper(repo, base, candidate, extraEnv = {}) {
     json = null;
   }
   return { ...result, json };
+}
+
+// Real OCR resolves --repo against its own cwd, which the wrapper sets to the
+// repo. This shim reproduces that and then defers to the fake OCR.
+function makeCwdResolvingOcr() {
+  const shim = join(mkdtempSync(join(tmpdir(), "paseo-ocr-shim-")), "shim.mjs");
+  writeFileSync(shim, [
+    'import { spawnSync } from "node:child_process";',
+    'import { statSync } from "node:fs";',
+    'import { resolve } from "node:path";',
+    'const args = process.argv.slice(2);',
+    'const at = args.indexOf("--repo");',
+    'if (at >= 0) { try { statSync(resolve(process.cwd(), args[at + 1])); } catch (e) { console.error(`stat ${e.path}: no such file`); process.exit(1); } }',
+    `const r = spawnSync(process.execPath, [${JSON.stringify(FAKE_OCR)}, ...args], { stdio: "inherit" });`,
+    'process.exit(r.status ?? 1);',
+    '',
+  ].join("\n"));
+  return `"${NODE}" "${shim}"`;
 }
 
 // Pure response validation cases.
@@ -207,6 +225,16 @@ assert.equal(OCR_BASELINE_VERSION, "1.8.10");
   assert.equal(result.status, 0, result.stdout);
   assert.equal(result.json.harness.ocr_version, "1.9.2");
   assert.equal(result.json.harness.ocr_output_format, "json");
+}
+
+// A relative --repo is resolved once against the invoking cwd; OCR runs with
+// cwd=repo and would otherwise resolve the same relative path a second time.
+{
+  const { repo, base, candidate } = makeRepo();
+  const cwd = dirname(repo);
+  const result = runWrapper(repo, base, candidate, { PASEO_TEAM_OCR_EXEC: makeCwdResolvingOcr() }, { cwd, repoArg: relative(cwd, repo) });
+  assert.equal(result.status, 0, result.stdout);
+  assert.equal(result.json.harness.ocr_version, "1.8.10");
 }
 
 // The reviewer isolation invariant: a primary checkout is rejected even when
