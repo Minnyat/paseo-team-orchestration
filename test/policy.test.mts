@@ -2759,6 +2759,8 @@ console.log("[paseo-team] skill admission tests passed");
 	bad(/R1/, ["mgit show a:f | git patch-id", "mread f 1,2 | git patch-id"]);
 
 	// R2 — raw git content
+	// the denial names the fallback that works when the masked tools are not on PATH
+	bad(/R2.*detached worktrees.*diff -u.*--stat.*--name-only.*--numstat/s, ["git diff a b"]);
 	bad(/R2.*mgit show.*rev-parse <sha>:<path>.*cat-file -s/s, [
 		"git show HEAD:lib/x.ts",
 		"git show HEAD:lib/x.ts | sha256sum",

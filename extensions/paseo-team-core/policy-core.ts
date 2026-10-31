@@ -1432,7 +1432,7 @@ function gitPrintsContent(args: string): boolean {
 const MECHANICAL_R1 =
 	"R1: Peer cannot pipe or capture the output of a masked read tool (mread/mgrep/mgit/mask) — a pipe, $(…), backticks or <(…) hand the content to another process and defeat the masking. Read a slice with `mread <file> <start>,<end>`, count with `mgrep -c <pattern> <file>`, and run the tool as the whole command (`mask` may END a pipe: `git diff a b | mask`; `mgit diff … | git patch-id` is allowed).";
 const MECHANICAL_R2 =
-	"R2: Peer does not read raw git content (git show/diff/log -p/format-patch/archive/cat-file -p|blob/grep/blame). Use `mgit show` / `mgit diff`, or `git rev-parse <sha>:<path>` or `git cat-file -s` for a hash or size; `--stat`, `--name-only` and `--numstat` forms are fine.";
+	"R2: Peer does not read raw git content (git show/diff/log -p/format-patch/archive/cat-file -p|blob/grep/blame). Use `mgit show` / `mgit diff`, or `git rev-parse <sha>:<path>` or `git cat-file -s` for a hash or size; `--stat`, `--name-only` and `--numstat` forms are fine. If `mgit` is not installed, check out the two assigned SHAs in detached worktrees and run `diff -u` on the checked-out files, or use `git diff --stat`/`--name-only`/`--numstat` for mechanical summaries.";
 const MECHANICAL_R3 =
 	"R3: Peer must not read the memory directory (~/.claude/projects/*/memory, or anything under .claude/projects or /.claude/). Ask the Lead for the context you need with peer_ask_lead.";
 const MECHANICAL_R5 =
