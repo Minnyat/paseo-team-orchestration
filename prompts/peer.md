@@ -186,7 +186,8 @@ send it: the receiver could not tell which you meant. Reword or quote it
 
 For the same reason the report templates below head the task line `TASK:`, not
 `TASK_ID:` — the header already carries the id, and a bare envelope key in the
-body is what gets a message refused.
+body whose value differs from the header (or that appears when the header has
+none) is what gets a message refused.
 
 The tool reads `PASEO_AGENT_ID` itself, inspects the parent label
 `paseo.parent-agent-id`, and sends to the correct parent Lead. The inspect has
