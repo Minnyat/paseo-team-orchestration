@@ -288,7 +288,7 @@ Return a report to the Lead, not an acceptance decision:
 ```text
 OCR_REVIEW_REPORT
 
-TASK_ID:
+TASK:
 STATUS: COMPLETE | BLOCKED | PARTIAL
 
 REVIEW_ENGINE: ocr-delegate

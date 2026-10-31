@@ -184,6 +184,10 @@ giving one of them a DIFFERENT value than the header is refused the moment you
 send it: the receiver could not tell which you meant. Reword or quote it
 (`> TASK_ID: ...`).
 
+For the same reason the report templates below head the task line `TASK:`, not
+`TASK_ID:` — the header already carries the id, and a bare envelope key in the
+body is what gets a message refused.
+
 The tool reads `PASEO_AGENT_ID` itself, inspects the parent label
 `paseo.parent-agent-id`, and sends to the correct parent Lead. The inspect has
 bounded retries for transport errors; the `send` is never retried because
@@ -278,7 +282,7 @@ authority)`.
 ```text
 PEER_REPORT
 
-TASK_ID:
+TASK:
 DISPOSITION:
 STATUS:
 
