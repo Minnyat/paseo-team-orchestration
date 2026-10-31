@@ -83,7 +83,7 @@ mkdirSync(repo, { recursive: true });
  */
 function stub(name, body) {
 	const path = join(binDir, name);
-	writeFileSync(path, `#!${process.execPath}\nconst argv = process.argv.slice(2);\nconst at = (i) => argv[i] ?? "";\nconst env = process.env;\n${body}\nprocess.stderr.write("fake ${name}: unsupported argv " + JSON.stringify(argv) + "\\n");\nprocess.exit(64);\n`);
+	writeFileSync(path, `#!${process.execPath}\nconst argv = process.argv.slice(2);\nconst at = (i) => argv[i] ?? "";\nconst env = process.env;\nif (env.FAKE_CALL_LOG) require("node:fs").appendFileSync(env.FAKE_CALL_LOG, argv.join(" ") + "\\n");\nconst nap = Number(env.FAKE_DELAY_MS_${name.toUpperCase()} ?? 0);\nif (nap > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, nap);\n${body}\nprocess.stderr.write("fake ${name}: unsupported argv " + JSON.stringify(argv) + "\\n");\nprocess.exit(64);\n`);
 	chmodSync(path, 0o755);
 }
 
@@ -1196,6 +1196,89 @@ test("route-enforcement: the opt-out is a WARN, and --strict FAILS it", { skip: 
 	assert.equal(off.status, "warn");
 	assert.match(off.detail, /never a default/);
 	assert.equal(preflight(["--strict"], { PASEO_TEAM_ROUTE_ENFORCE: "off" }).of("route-enforcement").status, "fail");
+});
+
+// --- concurrency --------------------------------------------------------------
+//
+// The probes run through a bounded pool, but the report must read exactly as the
+// sequential script's did. Two layers: the pool itself (sliced out of the script
+// between its marker comments, so this exercises the shipped code and not a copy),
+// and the whole script with stubs of deliberately different speeds.
+
+async function loadRunner() {
+	const block = /\/\/ <probe-runner>\n([\s\S]*?)\/\/ <\/probe-runner>/.exec(preflightSource)?.[1];
+	assert.ok(block, "could not find the <probe-runner> block in preflight.mjs");
+	const source = `import { spawn } from "node:child_process";\n${block}\nexport { runBounded, execAsync };`;
+	return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+}
+
+test("runBounded: results keep input order, and no more than `limit` run at once", async () => {
+	const { runBounded } = await loadRunner();
+	const delays = [120, 5, 60, 5, 90, 5];
+	let inFlight = 0;
+	let peak = 0;
+	const finished = [];
+	const out = await runBounded(delays, 2, async (ms, i) => {
+		inFlight++;
+		peak = Math.max(peak, inFlight);
+		await new Promise((resolve) => setTimeout(resolve, ms));
+		inFlight--;
+		finished.push(i);
+		return `r${i}`;
+	});
+	assert.deepEqual(out, ["r0", "r1", "r2", "r3", "r4", "r5"], "declaration order, not completion order");
+	assert.notDeepEqual(finished, [0, 1, 2, 3, 4, 5], "the probes really did finish out of order");
+	assert.equal(peak, 2);
+	assert.deepEqual(await runBounded([], 6, async () => 1), []);
+});
+
+test("execAsync keeps execFileSync's contract: timeout, closed stdin, stdout kept on failure", async () => {
+	const { execAsync } = await loadRunner();
+	const node = process.execPath;
+	const started = Date.now();
+	const hung = await execAsync(node, ["-e", "process.stdout.write('partial'); setTimeout(() => {}, 60000)"], 400);
+	assert.equal(hung.ok, false, "a probe past its timeout fails");
+	assert.ok(Date.now() - started < 10_000, "and is killed at the timeout, not awaited");
+	assert.equal(hung.stdout, "partial");
+
+	// stdin must be /dev/null, as with stdio: ["ignore", ...]: a CLI that reads it would hang on a pipe.
+	const eof = await execAsync(node, ["-e", "process.stdin.on('end', () => process.stdout.write('eof')).resume()"], 5000);
+	assert.deepEqual([eof.ok, eof.stdout], [true, "eof"]);
+
+	const bad = await execAsync(node, ["-e", "process.stdout.write('out'); process.exit(3)"], 5000);
+	assert.deepEqual([bad.ok, bad.stdout], [false, "out"]);
+	assert.equal((await execAsync("no-such-binary-for-preflight", [], 5000)).ok, false);
+
+	const big = await execAsync(node, ["-e", "process.stdout.write('x'.repeat(2 * 1024 * 1024))"], 10_000);
+	assert.equal(big.ok, false, "output past 1 MiB fails like execFileSync's maxBuffer");
+});
+
+test("slow, unevenly-timed CLIs: same report in the same order, in less than the sum of their latencies", { skip: !POSIX }, () => {
+	const delays = { FAKE_DELAY_MS_OCR: "600", FAKE_DELAY_MS_GIT: "50", FAKE_DELAY_MS_PASEO: "400", FAKE_DELAY_MS_PI: "800" };
+	const flat = (run) => run.checks.map((c) => `${c.id}|${c.status}|${c.detail}`);
+	const fast = preflight(["--runtime", "both"]);
+	const t0 = Date.now();
+	const slow = preflight(["--runtime", "both"], delays);
+	assert.equal(slow.status, fast.status);
+	const elapsed = Date.now() - t0;
+	assert.deepEqual(flat(slow), flat(fast), "latency must not reorder or rewrite a single check");
+	// Probes the pool overlaps: ocr x3, git, paseo x2 (version, status), pi x2. Run one
+	// after another they cost at least 5s on their own; a bounded pool needs about the slowest lane.
+	const sequentialFloor = 600 * 3 + 50 + 400 * 2 + 800 * 2;
+	assert.ok(elapsed < sequentialFloor - 1000, `took ${elapsed}ms; one-after-another would take >= ${sequentialFloor}ms`);
+});
+
+test("a failing `paseo status` runs once and keeps execFileSync's error text (a hang must not cost two timeouts)", { skip: !POSIX }, () => {
+	// A hung daemon takes the same path as this failure: one probe, ending in
+	// that probe's error. Re-running it after a prefetch would double the 30s
+	// timeout, so the call log must show exactly one `status --json`.
+	const log = join(home, "paseo-calls.log");
+	rmSync(log, { force: true });
+	const daemon = preflight([], { FAKE_DAEMON_DOWN: "1", FAKE_CALL_LOG: log }).of("paseo-daemon");
+	assert.equal(daemon.status, "fail");
+	assert.match(daemon.detail, /^daemon unreachable: Command failed: paseo status --json\n?/);
+	const calls = readFileSync(log, "utf8").split("\n").filter((line) => line === "status --json");
+	assert.equal(calls.length, 1, "`paseo status --json` must be probed exactly once");
 });
 
 test.after(() => rmSync(home, { recursive: true, force: true }));
