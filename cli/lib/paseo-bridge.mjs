@@ -21,7 +21,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { resolvePaseoClientModule, resolvePaseoExec } from "../../scripts/lib-common.mjs";
+import { parsePaseoError, resolvePaseoClientModule, resolvePaseoExec } from "../../scripts/lib-common.mjs";
 
 /** Generous because a cold paseo start alone eats ~3s of it. */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
@@ -98,9 +98,14 @@ export function runPaseoJson(args, options = {}) {
 			},
 			(error, stdout, stderr) => {
 				if (error) {
-					const text = `${String(stderr ?? "").trim()} ${String(error.message ?? "")}`.trim();
 					const code = error.killed || error.signal ? "TIMEOUT" : (error.code ?? "CLI_ERROR");
-					reject(new PaseoError(typeof code === "number" ? "CLI_ERROR" : code, text || "paseo failed", { args }));
+					// Paseo >= 0.14: {"error":{code,message}} on stderr — keep its reason
+					// (and code) instead of a blob ending in "Command failed: <argv>".
+					const paseoError = parsePaseoError({ stderr, stdout });
+					const text = paseoError
+						? `${paseoError.code}: ${paseoError.message}`
+						: `${String(stderr ?? "").trim()} ${String(error.message ?? "")}`.trim();
+					reject(new PaseoError(typeof code === "number" ? "CLI_ERROR" : code, text || "paseo failed", { args, ...(paseoError ? { paseoError } : {}) }));
 					return;
 				}
 				try {
@@ -153,9 +158,14 @@ export function runPaseoText(args, options = {}) {
 			},
 			(error, stdout, stderr) => {
 				if (error) {
-					const text = `${String(stderr ?? "").trim()} ${String(error.message ?? "")}`.trim();
 					const code = error.killed || error.signal ? "TIMEOUT" : (error.code ?? "CLI_ERROR");
-					reject(new PaseoError(typeof code === "number" ? "CLI_ERROR" : code, text || "paseo failed", { args }));
+					// Paseo >= 0.14: {"error":{code,message}} on stderr — keep its reason
+					// (and code) instead of a blob ending in "Command failed: <argv>".
+					const paseoError = parsePaseoError({ stderr, stdout });
+					const text = paseoError
+						? `${paseoError.code}: ${paseoError.message}`
+						: `${String(stderr ?? "").trim()} ${String(error.message ?? "")}`.trim();
+					reject(new PaseoError(typeof code === "number" ? "CLI_ERROR" : code, text || "paseo failed", { args, ...(paseoError ? { paseoError } : {}) }));
 					return;
 				}
 				const text = String(stdout ?? "");

@@ -1127,6 +1127,11 @@ const PTEAM_READ_ONLY: Record<string, readonly string[] | null> = {
 	seats: ["list"],
 	routing: ["show", "check"],
 	permits: ["list"],
+	// "" = the bare command (`pteam hosts`, `pteam runtimes`), which lists.
+	runtimes: ["", "list"],
+	hosts: ["", "list", "check"],
+	dispatch: ["plan"],
+	flow: null,
 };
 
 /** The first `pteam` invocation in `command` that is not read-only, as "pteam <a> <b>", or null. */
