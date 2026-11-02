@@ -12,6 +12,7 @@ import {
 	THINKING_LEVELS_BY_FAMILY,
 	RoutingError,
 	runtimeDescriptor,
+	PASEO_EXTENDABLE_BASES,
 	buildProviderInventory,
 	cmdPercentExpansionRisk,
 	composeProviderModel,
@@ -207,7 +208,7 @@ expectRoutingError("CONFIG_INVALID", () => composeProviderModel("pi-peer", ""));
 // The model reference shape is family-specific — pi ids carry a provider
 // segment, Claude ids are bare — so each family is roundtripped with its own.
 for (const roleProvider of ROLE_PROVIDERS) {
-	const model = providerFamily(roleProvider) === "claude" ? "claude-opus-5" : "a/b/c";
+	const model = runtimeDescriptor(providerFamily(roleProvider)).model.carriesProvider ? "a/b/c" : "bare-model-id";
 	const composed = composeProviderModel(roleProvider, model);
 	const split = splitProviderModel(composed);
 	assert.equal(split.provider, roleProvider);
@@ -266,6 +267,15 @@ assert.equal(providerFamily("codex-peer"), null);
 			authority.hasPermissionModes,
 			`${family}: permission-mode capability disagrees across the boundary`,
 		);
+		assert.equal(routing.enforcement, authority.enforcement, `${family}: enforcement tier disagrees across the boundary`);
+		assert.deepEqual([...routing.roles], [...authority.roles], `${family}: carried roles disagree across the boundary`);
+		// The invariant that makes a new runtime safe to add: only a family the
+		// core polices per turn may carry Supervisor or Lead authority.
+		if (routing.enforcement !== "full") {
+			assert.deepEqual([...routing.roles], ["peer"], `${family}: a family without per-turn enforcement is Peer-only`);
+		}
+		assert.ok(["full", "static"].includes(routing.enforcement), `${family}: known enforcement tier (there is no unpoliced one)`);
+		assert.ok(PASEO_EXTENDABLE_BASES.includes(routing.paseoBase), `${family}: paseoBase "${routing.paseoBase}" must be a provider Paseo lets a custom provider extend`);
 	}
 	// pi carries its own provider segment (3), Claude is a bare id (2): the fact
 	// every route-length gate keys off, pinned to concrete values so a typo in
@@ -681,7 +691,10 @@ assert.deepEqual(ROLE_PROVIDERS, [
 	"claude-supervisor",
 	"claude-lead",
 	"claude-peer",
+	// Peer-only families: no opencode-lead / opencode-supervisor exists.
+	"opencode-peer",
 ]);
+assert.equal(providerFamily("opencode-lead"), null, "a role a family cannot carry is not a role provider");
 assert.ok(THINKING_LEVELS.includes("max") && THINKING_LEVELS.includes("off"));
 // Family-specific thinking vocabularies: neither is a superset of the other,
 // so a shared list would accept a level the target runtime silently clamps.

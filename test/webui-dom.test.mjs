@@ -84,4 +84,20 @@ for (const [, target] of html.matchAll(/data-goto="([^"]+)"/g)) {
 	assert.ok(offered.includes("jobs"), "the jobs section is offered in the dropdown");
 }
 
+// fleet.js (hosts + flow tabs): every element it looks up exists in the page,
+// and every nav tab has its section.
+{
+	const html = readFileSync(join(PUBLIC_DIR, "index.html"), "utf8");
+	const fleet = readFileSync(join(PUBLIC_DIR, "fleet.js"), "utf8");
+	const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+	const ids = [...fleet.matchAll(/\$\("([a-z-]+)"\)/g), ...app.matchAll(/\$\("((?:hosts|fleet|flow)-[a-z-]+)"\)/g)].map((m) => m[1]);
+	assert.ok(ids.length >= 5, "fleet.js looks elements up by id");
+	for (const id of new Set(ids)) assert.ok(html.includes(`id="${id}"`), `index.html has #${id}`);
+	for (const [, tab] of html.matchAll(/data-tab="([a-z]+)"/g)) {
+		assert.ok(html.includes(`id="tab-${tab}"`), `tab ${tab} has a section`);
+	}
+	assert.ok(!/innerHTML/.test(fleet), "fleet.js inserts text only");
+	assert.match(app, /import \{ mountFleet \} from "\.\/fleet\.js"/);
+}
+
 console.log("webui-dom tests passed");

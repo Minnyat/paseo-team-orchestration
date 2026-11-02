@@ -1832,6 +1832,13 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		"sudo -n pteam install",
 		"echo a b | xargs pteam permits allow",
 		"cat <<'EOF' | bash\npteam routing disable-model pi/*\nEOF",
+		// host management and runtime providers change the cluster / the daemon
+		"pteam hosts add mac --connection tcp://x:1",
+		"pteam hosts sync",
+		"pteam hosts remove mac",
+		"pteam hosts adopt mac --registration hst_1",
+		"pteam hosts set-connection mac --connection y",
+		"pteam runtimes apply",
 	]) {
 		assert.ok(pteamMutationIn(mutating), `a Peer is refused: ${mutating}`);
 		assert.match(String(supportScriptBlockReason("peer", mutating)), /Peer cannot run/, mutating);
@@ -1847,6 +1854,13 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		"pteam models --provider pi-peer",
 		"pteam graph",
 		"pteam status",
+		"pteam hosts",
+		"pteam hosts --no-live",
+		"pteam hosts list",
+		"pteam hosts check mac",
+		"pteam runtimes",
+		"pteam dispatch plan --class REVIEW_HIGH --avoid-host ctl",
+		"pteam flow",
 		"grep -n pteam README.md",
 		"echo 'run pteam to see'",
 		"cat docs/pteam-notes.md",

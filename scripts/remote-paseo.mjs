@@ -69,10 +69,13 @@ import {
 	PASEO_CONVENTIONAL_ENTRIES,
 	importPolicyCore,
 	isEntrypoint,
+	parsePaseoError,
 	resolveCmdEntry as resolveCmdEntryFromShim,
 	resolvePaseoExec as resolvePaseoExecShared,
 } from "./lib-common.mjs";
 import { classifyRemoteFailure } from "./reliability.mjs";
+
+export { parsePaseoError };
 import {
 	ROLE_PROVIDERS,
 	THINKING_LEVELS_BY_FAMILY,
@@ -102,9 +105,45 @@ export const REMOTE_ERROR_CODES = Object.freeze([
 	"ENDPOINT_ENV_MISSING",
 	"ENDPOINT_UNSAFE",
 	"CLI_ERROR",
+	"HOST_ROUTE_UNAVAILABLE",
+	"HOST_AUTH_FAILED",
 	"PROMPT_TOO_LONG",
 	"WORKSPACE_ISOLATION_REFUSED",
 ]);
+
+/**
+ * Daemon-side codes meaning "this HOST cannot be reached", as opposed to "the
+ * host answered and refused". docs/multi-host.md tells the Lead to answer the
+ * first with HOST_ROUTE_UNAVAILABLE and never to fall back to another host, so
+ * the wrapper names it that way instead of a generic CLI_ERROR.
+ */
+const UNREACHABLE_PASEO_CODES = new Set(["DAEMON_UNREACHABLE", "DAEMON_NOT_RUNNING"]);
+/**
+ * The host answered but refused the credential (measured on Paseo 0.14:
+ * AUTH_REQUIRED when the endpoint carries no password, AUTH_FAILED for a wrong
+ * one). Not "unreachable": the fix is the endpoint env value, not waiting for
+ * the daemon, so it gets its own code.
+ */
+const AUTH_PASEO_CODES = new Set(["AUTH_REQUIRED", "AUTH_FAILED"]);
+
+/** Fill code/message/paseoError on a failure payload from a runCli result. */
+function describeCliFailure(payload, result, fallbackMessage) {
+	const paseoError = parsePaseoError(result);
+	payload.ok = false;
+	if (paseoError) {
+		payload.paseoError = paseoError;
+		payload.code = UNREACHABLE_PASEO_CODES.has(paseoError.code)
+			? "HOST_ROUTE_UNAVAILABLE"
+			: AUTH_PASEO_CODES.has(paseoError.code)
+				? "HOST_AUTH_FAILED"
+				: "CLI_ERROR";
+		payload.message = `${paseoError.code}: ${paseoError.message}`;
+	} else {
+		payload.code = "CLI_ERROR";
+		payload.message = fallbackMessage;
+	}
+	return payload;
+}
 
 export class RemoteError extends Error {
 	/**
@@ -856,10 +895,16 @@ export function resolvePaseoExec() {
  */
 export function runCli(argv, { timeoutMs = 120000, secret = "", maxAttempts = 3 } = {}) {
 	const [bin, ...prefix] = resolvePaseoExec();
+	// Exact-value redaction first; then credential-shaped fragments, because the
+	// daemon's own error text can echo a NORMALIZED endpoint (reordered query,
+	// decoded offer) that no longer matches the env value byte for byte.
 	const redact = (text) =>
-		secret
+		(secret
 			? String(text).split(secret).join("<endpoint-value-redacted>")
-			: String(text);
+			: String(text)
+		)
+			.replace(/(password=)[^&\s"']+/gi, "$1<redacted>")
+			.replace(/(#offer=)[^\s"']+/gi, "$1<redacted>");
 	for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt++) {
 	try {
 		const stdout = execFileSync(bin, [...prefix, ...argv], {
@@ -1155,10 +1200,8 @@ async function main() {
 		// A listing that FAILED is not "there is none": creating on top of a
 		// workspace that may exist is the very duplication this step prevents.
 		if (!listing.ok) {
-			const failed = basePayload(command, hostInfo);
-			failed.ok = false;
-			failed.code = "CLI_ERROR";
-			failed.message = `could not list the workspaces already open on host "${hostInfo.hostId}", so whether one exists for ${parsed.path} is unknown — not creating a second one blind (${listing.error || `paseo exit ${listing.status}`})`;
+			const failed = describeCliFailure(basePayload(command, hostInfo), listing, "");
+			failed.message = `could not list the workspaces already open on host "${hostInfo.hostId}", so whether one exists for ${parsed.path} is unknown — not creating a second one blind (${failed.message || listing.error || `paseo exit ${listing.status}`})`;
 			emit(failed, 2);
 		}
 		const existing = findWorkspaceByPath(parseWorkspaceList(listing.stdout), parsed.path);
@@ -1211,11 +1254,11 @@ async function main() {
 	});
 	const payload = basePayload(command, hostInfo);
 	if (!result.ok) {
-		payload.ok = false;
-		payload.code = "CLI_ERROR";
-		payload.message =
-			result.error ||
-			`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
+		describeCliFailure(
+			payload,
+			result,
+			result.error || `paseo ${command} failed with exit ${result.status} (stderr redacted)`,
+		);
 		if (result.stdout) payload.data = result.stdout;
 		emit(payload, 2);
 	}

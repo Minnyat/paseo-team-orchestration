@@ -61,6 +61,8 @@ import {
 	syncWarningText,
 	toolMeaning,
 } from "./humanize.js";
+import { mountFleet } from "./fleet.js";
+import { mountShell } from "./shell.js";
 
 // --- token -----------------------------------------------------------------
 
@@ -221,6 +223,10 @@ const STRINGS = {
 	vi: {
 		skipToContent: "Đến nội dung chính", brandCaption: "Không gian điều phối", navAria: "Điều hướng chính",
 		navHome: "Trang chủ", navGraph: "Nhóm agent", navPermits: "Chờ duyệt", navRoles: "Vai trò", navConfig: "Cấu hình",
+		navFlow: "Luồng việc", navHosts: "Máy", navGroupWatch: "Theo dõi", navGroupInfra: "Hạ tầng", navGroupSetup: "Thiết lập",
+		statPermits: "Chờ bạn duyệt", statPermitsCaption: "Agent đang dừng chờ quyết định", statHosts: "Máy online", statHostsCaption: "Trong cụm nhiều máy",
+		guideFlow: "Chia việc & theo dõi luồng", guideFlowSub: "Chọn máy cho task, xem mỗi phần đang chạy ở đâu", guideGraphSub: "Ai giao việc cho ai, ai đang bận",
+		guideHosts: "Quản lý máy", guideHostsSub: "Thêm máy, kiểm tra kết nối và năng lực", guidePermitsSub: "Cho phép hoặc chặn hành động của agent",
 		advancedTitle: "Chế độ nâng cao hiện thêm phần chỉnh cấu hình và mô tả vai trò", advanced: "Chế độ nâng cao",
 		homeTitle: "Tổng quan", homeSub: "Nắm tình hình nhóm. Tập trung vào việc cần bạn quyết định.", workspaceLabel: "Paseo / Không gian làm việc",
 		statRunning: "Đang làm việc", statRunningTitle: "Agent đang thực sự chạy ngay lúc này. Bấm để xem.", statRunningCaption: "Agent đang thực hiện công việc",
@@ -303,6 +309,10 @@ const STRINGS = {
 	en: {
 		skipToContent: "Skip to main content", brandCaption: "Orchestration workspace", navAria: "Main navigation",
 		navHome: "Home", navGraph: "Agent team", navPermits: "Pending approvals", navRoles: "Roles", navConfig: "Settings",
+		navFlow: "Task flow", navHosts: "Machines", navGroupWatch: "Monitor", navGroupInfra: "Infrastructure", navGroupSetup: "Setup",
+		statPermits: "Awaiting you", statPermitsCaption: "Agents paused for a decision", statHosts: "Machines online", statHostsCaption: "In the multi-machine cluster",
+		guideFlow: "Split work & follow the flow", guideFlowSub: "Pick a machine for a task, see where each part runs", guideGraphSub: "Who assigned whom, who is busy",
+		guideHosts: "Manage machines", guideHostsSub: "Add machines, check connection and capabilities", guidePermitsSub: "Allow or block an agent's action",
 		advancedTitle: "Advanced mode reveals configuration editors and role prompts", advanced: "Advanced mode",
 		homeTitle: "Overview", homeSub: "Stay on top of the team. Focus on what needs your decision.", workspaceLabel: "Paseo / Workspace",
 		statRunning: "Working", statRunningTitle: "Agents actually running right now. Click to view.", statRunningCaption: "Agents doing work",
@@ -428,6 +438,7 @@ $("lang-en").addEventListener("click", () => setLang("en"));
 
 const loaders = {};
 let activeTab = "home";
+let shell = null;
 
 /** Publish the top bar's height so the config toolbar can stick right under it, however the nav wraps. */
 function syncTopbarOffset() {
@@ -446,6 +457,7 @@ function selectTab(name) {
 	for (const section of document.querySelectorAll(".tab")) {
 		section.classList.toggle("active", section.id === `tab-${name}`);
 	}
+	shell?.onTab(name);
 	loaders[name]?.();
 }
 
@@ -464,6 +476,7 @@ function setBadge(count) {
 	const badge = $("permit-badge");
 	badge.textContent = String(count);
 	badge.classList.toggle("hidden", !count);
+	$("stat-permits").textContent = String(count);
 }
 
 function kvTable(pairs) {
@@ -1633,9 +1646,22 @@ function roleProviderControl(field, path) {
 
 	const note = el("p", { class: "cfg-hint cfg-roleprovider-note hidden" });
 
+	// A runtime option without `roles` (an older schema) carries every role.
+	const carries = (rt, role) => !Array.isArray(rt.roles) || rt.roles.includes(role);
+	const paintRuntimeOptions = () => {
+		for (const option of runtimeSel.options) {
+			const rt = runtimes.find((candidate) => candidate.id === option.value);
+			if (!rt) continue;
+			const ok = !roleSel.value || carries(rt, roleSel.value);
+			option.disabled = !ok;
+			option.textContent = ok ? rt.label : `${rt.label} (chỉ ${rt.roles.map(roleLabel).join("/")})`;
+		}
+	};
+
 	const parse = (value) => {
 		for (const rt of runtimes) {
 			for (const role of roles) {
+				if (!carries(rt, role)) continue;
 				if (value === `${rt.id}-${role}`) return { runtime: rt.id, role };
 			}
 		}
@@ -1654,11 +1680,18 @@ function roleProviderControl(field, path) {
 		const { runtime, role } = parse(String(getPath(configState.doc, path) ?? ""));
 		roleSel.value = role;
 		runtimeSel.value = runtime;
+		paintRuntimeOptions();
 		paintNote();
 	};
 
 	const commit = () => {
+		paintRuntimeOptions();
 		const role = roleSel.value;
+		const rt = runtimes.find((candidate) => candidate.id === runtimeSel.value);
+		// A role the chosen runtime cannot carry (switching to "lead" while a
+		// Peer-only runtime is picked) clears the runtime half instead of storing
+		// a provider name that does not exist.
+		if (rt && role && !carries(rt, role)) runtimeSel.value = "";
 		const runtime = runtimeSel.value;
 		if (role && runtime) setPath(configState.doc, path, `${runtime}-${role}`);
 		else deletePath(configState.doc, path);
@@ -3313,6 +3346,24 @@ $("config-save").addEventListener("click", async () => {
 loaders.config = async () => {
 	if (configState.section !== $("config-section").value) await loadConfig();
 };
+
+// --- hosts + task flow (fleet.js) -----------------------------------------
+
+shell = mountShell({ selectTab, $ });
+const fleet = mountFleet({ api, el, clear, toast, toastError, $ });
+loaders.hosts = () => fleet.hosts();
+loaders.flow = () => fleet.flow();
+$("hosts-refresh").addEventListener("click", () => fleet.refresh());
+$("hosts-sync").addEventListener("click", (event) => fleet.sync(event.currentTarget));
+$("hosts-add").addEventListener("click", () => fleet.add());
+{
+	// Home also shows machines online; the nav badge counts machines needing attention.
+	const homeLoader = loaders.home;
+	loaders.home = () => {
+		homeLoader?.();
+		fleet.summary();
+	};
+}
 
 // --- boot ------------------------------------------------------------------
 

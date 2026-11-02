@@ -55,6 +55,33 @@ const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const TOKEN_LIKE = /^[A-Za-z0-9._:-]{1,128}$/;
 const CONFIG_REV = /^(?:absent|[0-9a-f]{64})$/;
 const SKILL_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const HOST_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const REGISTRATION_ID = /^hst_[A-Za-z0-9_-]{1,80}$/;
+const MODEL_CLASS = /^[A-Z][A-Z_]{2,40}$/;
+const PROJECT_NAME = /^[A-Za-z0-9._-]{1,80}$/;
+const CLUSTER_LABEL = /^[A-Za-z0-9._:/-]{1,128}$/;
+const HOST_CAPABILITY = /^[a-z][a-z0-9-]{1,40}$/;
+const RUNTIME_FAMILY = /^[a-z][a-z0-9-]{1,30}$/;
+const TASK_KIND = ["writer", "reviewer", "reader"];
+
+/**
+ * A connection string travels to the CLI on STDIN, never in argv: it may carry
+ * a daemon password, and argv is both visible in a process list and echoed
+ * back to the browser as `command`. One line, bounded, no control characters.
+ */
+function connectionStdin(value) {
+	const text = typeof value === "string" ? value.trim() : "";
+	if (!text || text.length > 2048 || /[\u0000-\u001f\u007f]/.test(text)) {
+		throw new RouteError(400, "PARAM_INVALID", "connection must be one non-empty line (host:port, tcp://..., or a pairing URL)");
+	}
+	return `${text}\n`;
+}
+
+function optionalInt(value, label) {
+	if (value === undefined || value === null || value === "") return [];
+	if (!Number.isInteger(value) || value < 0 || value > 999) throw new RouteError(400, "PARAM_INVALID", `${label} must be an integer 0..999`);
+	return [String(value)];
+}
 
 class RouteError extends Error {
 	constructor(status, code, message) {
@@ -239,6 +266,113 @@ export const ROUTES = {
 	},
 
 	"GET /api/watchdog": { build: () => ({ args: ["watchdog"] }), cacheMs: 10_000, tag: "watchdog" },
+
+	// --- hosts: the machines of a cluster (cli/lib/hosts.mjs) ---------------
+	"GET /api/hosts": {
+		build: (q) => ({ args: ["hosts", "list", ...(q.live === "0" ? ["--no-live"] : [])] }),
+		cacheMs: 4_000,
+		timeoutMs: 120_000,
+		tag: "hosts",
+	},
+	"GET /api/hosts/check": {
+		build: (q) => ({ args: ["hosts", "check", match(q.id, HOST_ID, "id"), ...(q.strict === "1" ? ["--strict"] : [])] }),
+		cacheMs: 15_000,
+		timeoutMs: 300_000,
+		tag: "hosts",
+	},
+	"POST /api/hosts/add": {
+		build: (q, body) => {
+			const caps = Array.isArray(body?.capabilities) ? body.capabilities : [];
+			return {
+				args: [
+					"hosts",
+					"add",
+					match(body?.hostId, HOST_ID, "hostId"),
+					"--connection-stdin",
+					...caps.flatMap((c) => ["--capability", match(c, HOST_CAPABILITY, "capability")]),
+					...optionalInt(body?.writers, "writers").flatMap((v) => ["--writers", v]),
+					...optionalInt(body?.readers, "readers").flatMap((v) => ["--readers", v]),
+					...(body?.required === true ? ["--required"] : []),
+					...(body?.copyRoutesFrom ? ["--copy-routes-from", match(body.copyRoutesFrom, HOST_ID, "copyRoutesFrom")] : []),
+					...(body?.dryRun === true ? ["--dry-run"] : []),
+				],
+				stdin: connectionStdin(body?.connection),
+			};
+		},
+		timeoutMs: 60_000,
+		invalidates: ["hosts", "config", "preflight", "flow"],
+	},
+	"POST /api/hosts/sync": {
+		build: (q, body) => ({ args: ["hosts", "sync", ...(body?.dryRun === true ? ["--dry-run"] : [])] }),
+		invalidates: ["hosts", "config", "flow"],
+	},
+	"POST /api/hosts/remove": {
+		build: (q, body) => ({
+			args: [
+				"hosts",
+				"remove",
+				match(body?.hostId, HOST_ID, "hostId"),
+				...(body?.keepRegistry === true ? ["--keep-registry"] : []),
+				...(body?.dryRun === true ? ["--dry-run"] : []),
+			],
+		}),
+		invalidates: ["hosts", "config", "preflight", "flow"],
+	},
+	"POST /api/hosts/adopt": {
+		build: (q, body) => ({
+			args: [
+				"hosts",
+				"adopt",
+				match(body?.hostId, HOST_ID, "hostId"),
+				"--registration",
+				match(body?.registrationId, REGISTRATION_ID, "registrationId"),
+				...(body?.copyRoutesFrom ? ["--copy-routes-from", match(body.copyRoutesFrom, HOST_ID, "copyRoutesFrom")] : []),
+			],
+		}),
+		invalidates: ["hosts", "config", "flow"],
+	},
+	"POST /api/hosts/set-connection": {
+		build: (q, body) => ({
+			args: ["hosts", "set-connection", match(body?.hostId, HOST_ID, "hostId"), "--connection-stdin"],
+			stdin: connectionStdin(body?.connection),
+		}),
+		invalidates: ["hosts", "flow"],
+	},
+
+	// --- where a task runs, and what runs where ----------------------------
+	"GET /api/dispatch/plan": {
+		build: (q) => ({
+			args: [
+				"dispatch",
+				"plan",
+				"--class",
+				match(q.class, MODEL_CLASS, "class"),
+				...(q.kind ? ["--kind", pick(q.kind, TASK_KIND, "kind")] : []),
+				...(q.avoidHost ? ["--avoid-host", match(q.avoidHost, HOST_ID, "avoidHost")] : []),
+				...(q.project ? ["--project", match(q.project, PROJECT_NAME, "project")] : []),
+				...(q.clusterLabel ? ["--cluster-label", match(q.clusterLabel, CLUSTER_LABEL, "clusterLabel")] : []),
+				...(q.strict === "1" ? ["--strict"] : []),
+			],
+		}),
+		cacheMs: 3_000,
+		timeoutMs: 180_000,
+		tag: "flow",
+	},
+	"GET /api/flow": { build: () => ({ args: ["flow"] }), cacheMs: 4_000, timeoutMs: 120_000, tag: "flow" },
+
+	// --- coding agents the pack can seat -----------------------------------
+	"GET /api/runtimes": { build: () => ({ args: ["runtimes", "list"] }), cacheMs: 10_000, tag: "runtimes" },
+	"POST /api/runtimes/apply": {
+		build: (q, body) => ({
+			args: [
+				"runtimes",
+				"apply",
+				...(body?.family ? ["--family", match(body.family, RUNTIME_FAMILY, "family")] : []),
+				...(body?.dryRun === true ? ["--dry-run"] : []),
+			],
+		}),
+		invalidates: ["runtimes", "config", "status", "preflight"],
+	},
 
 	// Rebuilding pi's catalog means one real completion per model the endpoint
 	// lists, so it is minutes rather than seconds on a slow upstream — hence a

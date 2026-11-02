@@ -180,7 +180,34 @@ assert.equal(parentAgentIdFromInspect({ ParentAgentId: null }), null);
     ),
     /connection reset after delivery/,
   );
-  assert.deepEqual(calls.map((args) => args[0]), ["inspect", "send"], "send mutation is never retried");
+  // self inspect, parent inspect (a read: is the Lead on this daemon?), one send.
+  assert.deepEqual(calls.map((args) => args[0]), ["inspect", "inspect", "send"], "send mutation is never retried");
+  if (previousAgentId === undefined) delete process.env.PASEO_AGENT_ID;
+  else process.env.PASEO_AGENT_ID = previousAgentId;
+}
+
+// A Lead on another host (MCP create_agent with serverId): its id is not on
+// this daemon. Refuse with PARENT_LEAD_REMOTE and NEVER attempt the send.
+{
+  const previousAgentId = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "peer-1";
+  const calls = [];
+  await assert.rejects(
+    sendPeerMessage(
+      { kind: "question", message: "which file?", taskId: "T-9", correlationId: "c-9" },
+      {
+        maxAttempts: 1,
+        baseMs: 0,
+        runPaseo: async (args) => {
+          calls.push(args);
+          if (args[1] === "peer-1") return { ok: true, data: { ParentAgentId: "remote-lead" } };
+          throw Object.assign(new Error("AGENT_NOT_FOUND: Agent not found: remote-lead"), { code: "CLI_ERROR", paseoCode: "AGENT_NOT_FOUND" });
+        },
+      },
+    ),
+    (error) => error.code === "PARENT_LEAD_REMOTE" && /FINAL reply/.test(error.message) && /c-9/.test(error.message),
+  );
+  assert.ok(!calls.some((args) => args[0] === "send"), "no send to a Lead that is not on this daemon");
   if (previousAgentId === undefined) delete process.env.PASEO_AGENT_ID;
   else process.env.PASEO_AGENT_ID = previousAgentId;
 }

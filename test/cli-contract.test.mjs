@@ -685,8 +685,8 @@ try {
 		assert.equal(model.type, "enum", "the model field is a picker fed by the daemon");
 		assert.deepEqual(
 			card.item.fields.find((field) => field.path === "paseoProvider").enum,
-			["pi-supervisor", "pi-lead", "pi-peer", "claude-supervisor", "claude-lead", "claude-peer"],
-			"the form offers both runtime families, not pi alone",
+			["pi-supervisor", "pi-lead", "pi-peer", "claude-supervisor", "claude-lead", "claude-peer", "opencode-peer"],
+			"the form offers every runtime family, peer-only ones as Peer alone",
 		);
 		assert.deepEqual(routing.json.inventory.degraded, []);
 

@@ -52,11 +52,18 @@ import {
 	baseRole,
 	SEAT_CAPABILITIES,
 } from "../scripts/seat-profiles.mjs";
+import {
+	describeRuntimes,
+	generatedFamilies,
+	materializeRuntimeProviders,
+	runtimeLedgerPath,
+} from "../scripts/runtime-providers.mjs";
 import { runPaseoJson, runPaseoText, mapWithConcurrency, refreshProviderSnapshot, PaseoError } from "./lib/paseo-bridge.mjs";
 import { describeProtocolState, protocolState } from "./lib/workspace-protocol.mjs";
 import {
 	ROLE_PROVIDERS,
 	RUNTIME_FAMILIES,
+	runtimeDescriptor,
 	PROVIDER_OK_STATUSES,
 	buildProviderInventory,
 	loadLocalRouteTable,
@@ -71,6 +78,8 @@ import { agentCluster, extraToolDiagnostics, normalizeCluster } from "../extensi
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
 import * as routing from "./lib/routing.mjs";
+import * as hostsLib from "./lib/hosts.mjs";
+import * as dispatchLib from "./lib/dispatch.mjs";
 import { JOBS_SECTION, JobsConfigError, activeJobs, defaultJobsPath, describeJobs, validateJobsConfig } from "../scripts/jobs.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -251,6 +260,10 @@ async function discoverModels(options = {}) {
 		const members = ROLE_PROVIDERS.filter((name) => providerFamily(name) === family);
 		const representative = members.find((name) => healthy.has(name));
 		if (representative === undefined) {
+			// pi and Claude are the pack's own runtimes: missing one is worth
+			// saying. A Peer-only runtime (opencode, agy) is opt-in — a host that
+			// never ran `pteam runtimes apply` has simply not chosen it.
+			if (runtimeDescriptor(family)?.enforcement !== "full") continue;
 			degraded.push({
 				step: `family ${family}`,
 				code: "NO_HEALTHY_ROLE_PROVIDER",
@@ -1732,6 +1745,467 @@ function dispatchSeats(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// runtimes — coding agents the pack can seat (scripts/runtime-providers.mjs)
+// ---------------------------------------------------------------------------
+
+function cliVersionOf(command) {
+	const r = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 10000, shell: process.platform === "win32" });
+	if (r.status !== 0) return null;
+	return String(r.stdout || r.stderr).trim().split("\n")[0] || "present";
+}
+
+function readRuntimeLedger() {
+	const ledger = cw.readJsonOrNull(runtimeLedgerPath(cw.teamConfigDir()));
+	return Array.isArray(ledger?.providers) ? ledger.providers : [];
+}
+
+function cmdRuntimesList(rest = []) {
+	rejectUnknownFlags(rest, []);
+	const config = cw.readJsonOrNull(cw.paseoConfigPath());
+	json({
+		ok: true,
+		configPath: cw.paseoConfigPath(),
+		runtimes: describeRuntimes({
+			installedCli: cliVersionOf,
+			configuredProviders: config?.agents?.providers ?? {},
+		}),
+	});
+}
+
+/** `--family a --family b` (or none = every generated family). */
+function familiesFrom(rest) {
+	const out = [];
+	for (let i = 0; i < rest.length; i++) {
+		if (rest[i] !== "--family") continue;
+		const value = rest[i + 1];
+		if (value === undefined || value.startsWith("--")) fail("--family requires a value");
+		if (!generatedFamilies().includes(value)) {
+			fail(`--family must be one of ${generatedFamilies().join(", ")} (got '${value}'; pi/claude have their own installer)`);
+		}
+		out.push(value);
+	}
+	return out;
+}
+
+/**
+ * Merge the Peer-only runtime providers into ~/.paseo/config.json. Same
+ * ownership rule as `seats apply` (applySeatsToPaseoConfig with a separate
+ * ledger): a name this tool did not create is reported as skipped, never
+ * overwritten; with --family, providers of the other generated families this
+ * tool owns are kept, not removed.
+ */
+function cmdRuntimesApply(rest = []) {
+	rejectUnknownFlags(rest, ["--dry-run", "--family"]);
+	const dryRun = flag(rest, "--dry-run");
+	const families = familiesFrom(rest);
+	const ledger = readRuntimeLedger();
+	const promptsDir = cw.promptsDir();
+	const generated = {
+		// Keep what this tool already owns for the families not asked about now.
+		...(families.length > 0
+			? materializeRuntimeProviders({ families: generatedFamilies().filter((f) => !families.includes(f) && ledger.some((n) => n.startsWith(`${f}-`))), promptsDir })
+			: {}),
+		...materializeRuntimeProviders({ families, promptsDir }),
+	};
+	const configPath = cw.paseoConfigPath();
+	const result = applySeatsToPaseoConfig(cw.readJsonOrNull(configPath), generated, ledger);
+	if (!dryRun) {
+		cw.atomicWriteJson(configPath, JSON.stringify(result.config));
+		cw.atomicWriteJson(
+			runtimeLedgerPath(cw.teamConfigDir()),
+			JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), providers: result.ledger }),
+		);
+	}
+	json({
+		ok: true,
+		dryRun,
+		configPath,
+		created: result.created,
+		updated: result.updated,
+		removed: result.removed,
+		skipped: result.skipped,
+		providers: generated,
+		note: dryRun
+			? "Chưa ghi gì. Bỏ --dry-run để áp dụng."
+			: "Đã ghi provider. Chạy 'paseo daemon restart' (hoặc 'paseo reload') để daemon nạp lại, rồi route một class tới <family>-peer (pteam routing set|add-option).",
+	});
+}
+
+// ---------------------------------------------------------------------------
+// hosts — the machines of a cluster (cli/lib/hosts.mjs)
+// ---------------------------------------------------------------------------
+
+const hostsPaseo = (args) => runPaseoJson(args, { timeoutMs: 30000 });
+
+function clusterFilePath() {
+	return join(cw.teamConfigDir(), "cluster-routing.local.json");
+}
+
+async function hostsContext() {
+	const path = clusterFilePath();
+	let cluster = null;
+	try {
+		cluster = hostsLib.readCluster(path);
+	} catch (error) {
+		throw new hostsLib.HostsError("CLUSTER_INVALID", `${path}: ${error.message}`);
+	}
+	let registry = [];
+	let registryProblem = null;
+	try {
+		const listed = await hostsPaseo(["host", "ls"]);
+		registry = Array.isArray(listed) ? listed : [];
+	} catch (error) {
+		registryProblem = String(error?.message ?? error);
+	}
+	const localServer = await hostsLib.localServerId(hostsPaseo, cw.paseoHome());
+	const local = loadLocalRouteTable();
+	return { path, cluster, registry, registryProblem, localServer, localRoutes: local.ok ? local.routes : null, localHostId: local.ok ? local.hostId : null };
+}
+
+/** A cluster file to add to: the existing one, or a new one holding this host. */
+function clusterOrSeed(ctx) {
+	if (ctx.cluster) return ctx.cluster;
+	if (!ctx.localRoutes) return null;
+	return {
+		version: 1,
+		hosts: {
+			[ctx.localHostId ?? "local"]: {
+				connection: { type: "local", ...(ctx.localServer ? { serverId: ctx.localServer } : {}) },
+				required: true,
+				capabilities: ["git-read", "git-write", "focused-test"],
+				limits: { writers: 1, readers: 3 },
+				routes: structuredClone(ctx.localRoutes),
+			},
+		},
+	};
+}
+
+/**
+ * The connection string, from `--connection <c>` or — so a password never sits
+ * in argv, a process list or the WebUI's echoed command — the first line of
+ * stdin with `--connection-stdin`.
+ */
+function connectionFrom(argv) {
+	if (flag(argv, "--connection-stdin")) return readStdin().split(/\r?\n/)[0].trim() || undefined;
+	return flagValue(argv, "--connection");
+}
+
+function multiFlag(argv, name) {
+	const out = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] !== name) continue;
+		const value = argv[i + 1];
+		if (value === undefined || value.startsWith("--")) fail(`${name} requires a value`);
+		out.push(value);
+	}
+	return out;
+}
+
+function intFlag(argv, name) {
+	const raw = flagValue(argv, name);
+	if (raw === undefined) return undefined;
+	if (!/^\d+$/.test(raw)) fail(`${name} must be a non-negative integer`);
+	return Number(raw);
+}
+
+async function runHosts(work) {
+	try {
+		json({ ok: true, ...(await work()) });
+	} catch (error) {
+		if (!(error instanceof hostsLib.HostsError) && error?.name !== "RoutingError" && !(error instanceof PaseoError)) throw error;
+		json({ ok: false, code: error.code, message: error.message, ...(error.details ?? {}) });
+		process.exitCode = 1;
+	}
+}
+
+function writeCluster(path, doc) {
+	cw.atomicWriteJson(path, JSON.stringify(doc));
+}
+
+function dispatchHosts(argv) {
+	// `pteam hosts --no-live` = `pteam hosts list --no-live`.
+	const [sub = "list", ...rest] = argv[0]?.startsWith("--") ? ["list", ...argv] : argv;
+	const dryRun = flag(rest, "--dry-run");
+	switch (sub) {
+		case "list":
+			rejectUnknownFlags(rest, ["--no-live"]);
+			return runHosts(async () => {
+				const ctx = await hostsContext();
+				const live = ctx.cluster && !flag(rest, "--no-live") ? await hostsLib.probeLive({ cluster: ctx.cluster, paseo: hostsPaseo }) : {};
+				return {
+					clusterPath: ctx.path,
+					clusterExists: ctx.cluster !== null,
+					localServerId: ctx.localServer,
+					registryProblem: ctx.registryProblem,
+					...hostsLib.describeHosts({ cluster: ctx.cluster, registry: ctx.registry, localServer: ctx.localServer, live }),
+				};
+			});
+		case "add": {
+			const [hostId] = rest;
+			if (!hostId || hostId.startsWith("-")) usageFail("hosts add: missing <host-id>");
+			const options = rest.slice(1);
+			rejectUnknownFlags(options, ["--connection", "--connection-stdin", "--endpoint-env", "--capability", "--writers", "--readers", "--required", "--copy-routes-from", "--dry-run"]);
+			return runHosts(async () => {
+				const ctx = await hostsContext();
+				const base = clusterOrSeed(ctx);
+				const plan = await hostsLib.planAddHost({
+					cluster: base,
+					hostId,
+					connection: connectionFrom(options),
+					registry: ctx.registry,
+					paseo: hostsPaseo,
+					localRoutes: ctx.localRoutes,
+					dryRun,
+					options: {
+						endpointEnv: flagValue(options, "--endpoint-env"),
+						capabilities: multiFlag(options, "--capability"),
+						writers: intFlag(options, "--writers"),
+						readers: intFlag(options, "--readers"),
+						required: flag(options, "--required"),
+						copyRoutesFrom: flagValue(options, "--copy-routes-from"),
+					},
+				});
+				if (!dryRun) writeCluster(ctx.path, plan.next);
+				return {
+					dryRun,
+					clusterPath: ctx.path,
+					seededCluster: ctx.cluster === null,
+					hostId,
+					host: plan.host,
+					steps: plan.steps,
+					online: plan.online,
+					next: [
+						`export ${plan.host.connection.endpointEnv}='<same connection>'   # only for remote-paseo.mjs / preflight; MCP seating uses the registry`,
+						`pteam routing set <CLASS> --host-id ${hostId} --provider ... --model ... --thinking ...   # routes were copied — adjust to what ${hostId} offers`,
+						`pteam hosts check ${hostId}`,
+					],
+				};
+			});
+		}
+		case "sync":
+			rejectUnknownFlags(rest, ["--dry-run"]);
+			return runHosts(async () => {
+				const ctx = await hostsContext();
+				if (!ctx.cluster) throw new hostsLib.HostsError("NO_CLUSTER", `${ctx.path} does not exist — add a host first (pteam hosts add)`);
+				if (ctx.registryProblem) throw new hostsLib.HostsError("REGISTRY_UNREADABLE", `paseo host ls failed: ${ctx.registryProblem}`);
+				const plan = hostsLib.planSync({ cluster: ctx.cluster, registry: ctx.registry, localServer: ctx.localServer });
+				if (!dryRun && plan.changes.length > 0) writeCluster(ctx.path, plan.next);
+				return { dryRun, clusterPath: ctx.path, changes: plan.changes };
+			});
+		case "remove": {
+			const [hostId] = rest;
+			if (!hostId || hostId.startsWith("-")) usageFail("hosts remove: missing <host-id>");
+			rejectUnknownFlags(rest.slice(1), ["--keep-registry", "--dry-run"]);
+			return runHosts(async () => {
+				const ctx = await hostsContext();
+				const plan = hostsLib.planRemove({ cluster: ctx.cluster, registry: ctx.registry, hostId, keepRegistry: flag(rest, "--keep-registry") });
+				if (!dryRun) {
+					writeCluster(ctx.path, plan.next);
+					if (plan.registrationId) await hostsPaseo(["host", "rm", plan.registrationId]);
+				}
+				return { dryRun, clusterPath: ctx.path, removed: hostId, registryRemoved: plan.registrationId };
+			});
+		}
+		case "adopt": {
+			const [hostId] = rest;
+			if (!hostId || hostId.startsWith("-")) usageFail("hosts adopt: missing <host-id>");
+			const options = rest.slice(1);
+			rejectUnknownFlags(options, ["--registration", "--copy-routes-from", "--dry-run"]);
+			return runHosts(async () => {
+				const ctx = await hostsContext();
+				const plan = hostsLib.planAdopt({
+					cluster: clusterOrSeed(ctx),
+					registry: ctx.registry,
+					hostId,
+					registrationId: flagValue(options, "--registration"),
+					localRoutes: ctx.localRoutes,
+					copyRoutesFrom: flagValue(options, "--copy-routes-from"),
+				});
+				if (!dryRun) {
+					writeCluster(ctx.path, plan.next);
+					if (plan.metaUpdate) await hostsPaseo(["host", "update", plan.metaUpdate, "--label", hostId, "--meta", `${hostsLib.HOST_ID_META}=${hostId}`]);
+				}
+				return { dryRun, clusterPath: ctx.path, adopted: hostId, host: plan.next.hosts[hostId] };
+			});
+		}
+		case "set-connection": {
+			const [hostId] = rest;
+			if (!hostId || hostId.startsWith("-")) usageFail("hosts set-connection: missing <host-id>");
+			rejectUnknownFlags(rest.slice(1), ["--connection", "--connection-stdin"]);
+			return runHosts(async () => {
+				const ctx = await hostsContext();
+				const entry = hostsLib.registryEntryFor(ctx.registry, hostId);
+				if (!entry) throw new hostsLib.HostsError("NOT_IN_REGISTRY", `no registry entry for "${hostId}" — pteam hosts add ${hostId} --connection ...`);
+				const connection = connectionFrom(rest);
+				if (!connection) usageFail("hosts set-connection: --connection (or --connection-stdin) is required");
+				const updated = await hostsPaseo(["host", "update", entry.registrationId, "--connection", connection]);
+				return { hostId, registrationId: entry.registrationId, status: updated?.status ?? null };
+			});
+		}
+		case "check": {
+			const [hostId] = rest;
+			if (!hostId || hostId.startsWith("-")) usageFail("hosts check: missing <host-id>");
+			rejectUnknownFlags(rest.slice(1), ["--strict"]);
+			return runHosts(async () => {
+				const args = [join(ROOT, "scripts", "preflight.mjs"), "--json", "--host-id", hostId, ...(flag(rest, "--strict") ? ["--strict"] : [])];
+				const r = spawnSync(process.execPath, args, { encoding: "utf8", env: process.env, timeout: 300000 });
+				let checks = [];
+				try {
+					checks = JSON.parse(r.stdout).checks ?? [];
+				} catch {
+					throw new hostsLib.HostsError("PREFLIGHT_FAILED", `preflight produced no JSON: ${String(r.stderr).slice(0, 300)}`);
+				}
+				const mine = checks.filter((c) => String(c.name ?? c.id ?? "").includes(hostId) || /^runtime:/.test(c.name ?? c.id ?? ""));
+				const verdict = mine.some((c) => (c.status ?? c.level) === "fail") ? "fail" : mine.some((c) => (c.status ?? c.level) === "warn") ? "warn" : "pass";
+				return { hostId, verdict, checks: mine };
+			});
+		}
+		default:
+			fail(`hosts: unknown subcommand '${sub}' (expected: list, add, sync, remove, adopt, set-connection, check)`, 2);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dispatch plan / flow — where a task should run; what runs where
+// ---------------------------------------------------------------------------
+
+/** A runner aimed at one host, or null when it cannot be observed from here. */
+function runnerFor(hostId, host) {
+	if (host.connection.type === "local") return (args) => runPaseoJson(args, { timeoutMs: 60000 });
+	const endpoint = String(process.env[host.connection.endpointEnv] ?? "").trim();
+	if (!endpoint) return null;
+	return (args) => runPaseoJson([...args, "--host", endpoint], { timeoutMs: 60000 });
+}
+
+async function settledProviders(run) {
+	const until = Date.now() + 20000;
+	for (;;) {
+		const listed = await run(["provider", "ls"]);
+		const list = Array.isArray(listed) ? listed : [];
+		if (!list.some((p) => String(p.status).toLowerCase() === "loading") || Date.now() >= until) return list;
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+	}
+}
+
+async function planningContext() {
+	const path = clusterFilePath();
+	let cluster = null;
+	try {
+		cluster = hostsLib.readCluster(path);
+	} catch (error) {
+		throw new hostsLib.HostsError("CLUSTER_INVALID", `${path}: ${error.message}`);
+	}
+	let registry = [];
+	try {
+		const listed = await hostsPaseo(["host", "ls"]);
+		registry = Array.isArray(listed) ? listed : [];
+	} catch {}
+	return { cluster, registry, routeTable: loadLocalRouteTable() };
+}
+
+function makeProbe({ registry, modelClass }) {
+	return async (hostId, host) => {
+		const run = runnerFor(hostId, host);
+		if (!run) {
+			const entry = hostsLib.registryEntryFor(registry, hostId);
+			return entry?.status === "online"
+				? { reachable: true, observable: false, running: null }
+				: { reachable: false, observable: false, error: entry ? `registry status ${entry.status}${entry.error ? `: ${entry.error}` : ""}` : `no endpoint env (${host.connection.endpointEnv}) and not in the daemon's host registry (pteam hosts add)` };
+		}
+		try {
+			const agents = await run(["ls", "-g"]);
+			const providers = await settledProviders(run);
+			const wanted = [...new Set(routeOptionsFor(host, modelClass).map((o) => o.paseoProvider))];
+			const models = {};
+			await Promise.all(
+				wanted.map(async (p) => {
+					try {
+						models[p] = await run(["provider", "models", p]);
+					} catch {
+						models[p] = [];
+					}
+				}),
+			);
+			let workspaces = null;
+			if (host.connection.type === "remote") {
+				try {
+					workspaces = await run(["workspace", "ls"]);
+				} catch {}
+			}
+			return {
+				reachable: true,
+				observable: true,
+				providers,
+				models,
+				workspaces: Array.isArray(workspaces) ? workspaces : null,
+				running: (Array.isArray(agents) ? agents : []).filter((a) => a.status === "running").length,
+			};
+		} catch (error) {
+			const why = error?.details?.paseoError;
+			return { reachable: false, observable: true, error: why ? `${why.code}: ${why.message}` : String(error?.message ?? error).slice(0, 200) };
+		}
+	};
+}
+
+function routeOptionsFor(host, modelClass) {
+	const route = host.routes?.[modelClass];
+	if (!route) return [];
+	return [route, ...(route.alternates ?? [])];
+}
+
+async function cmdDispatchPlan(rest) {
+	rejectUnknownFlags(rest, ["--class", "--kind", "--avoid-host", "--allow-same-host", "--project", "--cluster-label", "--strict"]);
+	const modelClass = flagValue(rest, "--class");
+	if (!modelClass) usageFail("dispatch plan: --class <MODEL_CLASS> is required");
+	try {
+		const ctx = await planningContext();
+		const plan = await dispatchLib.planDispatch({
+			cluster: ctx.cluster,
+			routeTable: ctx.routeTable,
+			modelClass,
+			kind: flagValue(rest, "--kind"),
+			avoidHost: flagValue(rest, "--avoid-host") ?? null,
+			allowSameHost: flag(rest, "--allow-same-host"),
+			project: flagValue(rest, "--project") ?? null,
+			teamCluster: flagValue(rest, "--cluster-label") ?? null,
+			strict: flag(rest, "--strict"),
+			probe: makeProbe({ registry: ctx.registry, modelClass }),
+		});
+		json({ ok: plan.chosen !== null, ...plan });
+		if (!plan.chosen) process.exitCode = 1;
+	} catch (error) {
+		if (!(error instanceof dispatchLib.DispatchError) && !(error instanceof hostsLib.HostsError)) throw error;
+		json({ ok: false, code: error.code, message: error.message });
+		process.exitCode = 1;
+	}
+}
+
+async function cmdFlow(rest) {
+	rejectUnknownFlags(rest, []);
+	const ctx = await planningContext();
+	let jobs = [];
+	try {
+		const view = loadJobsView({ all: true });
+		jobs = view.jobs ?? [];
+	} catch {}
+	const flowView = await dispatchLib.collectFlow({ cluster: ctx.cluster, routeTable: ctx.routeTable, jobs, paseoFor: runnerFor });
+	json({ ok: true, generatedAt: new Date().toISOString(), ...flowView });
+}
+
+function dispatchDispatch(argv) {
+	const [sub, ...rest] = argv;
+	if (sub === "plan") return cmdDispatchPlan(rest);
+	fail(`dispatch: unknown subcommand '${sub ?? "<missing>"}' (expected: plan)`, 2);
+}
+
+function dispatchRuntimes(argv) {
+	const [sub, ...rest] = argv;
+	if (sub === "list" || sub === undefined) return cmdRuntimesList(rest);
+	if (sub === "apply") return cmdRuntimesApply(rest);
+	fail(`runtimes: unknown subcommand '${sub}' (expected: list, apply)`, 2);
+}
+
+// ---------------------------------------------------------------------------
 
 function helpText() {
 	return `pteam ${su.currentVersion()} — role pack CLI (Paseo + Pi)   (alias: paseo-team)
@@ -1762,6 +2236,19 @@ usage:
                                            (SUPERVISOR_GOVERNANCE | LEAD_RECOVERY only)
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
+  pteam hosts [list] [--no-live]           (every machine: cluster file + Paseo registry + live state, and what disagrees)
+  pteam hosts add <id> --connection <conn> [--capability c]... [--writers n] [--readers n] [--required] [--copy-routes-from <id>] [--endpoint-env NAME] [--dry-run]
+  pteam hosts sync [--dry-run]             (fill connection.serverId from the registry — needed for create_agent { serverId })
+  pteam hosts remove <id> [--keep-registry] [--dry-run]
+  pteam hosts adopt <id> --registration <hst_...> [--copy-routes-from <id>]
+  pteam hosts set-connection <id> --connection <conn>   (new address / password; kept by the daemon)
+  pteam hosts check <id> [--strict]        (preflight for that host only)
+  pteam dispatch plan --class <CLASS> [--kind writer|reviewer|reader] [--avoid-host <writer-host>] [--project <name>] [--cluster-label <c>] [--strict]
+                                           (pick the host for one seat: capability → reachable → route on THAT inventory → load; prints create_agent args + ROUTING_DECISION)
+  pteam flow                               (every seat on every observable host, grouped by model class and job)
+  pteam runtimes [list]                    (every coding agent the pack can seat: CLI present, enforcement tier, roles, providers configured)
+  pteam runtimes apply [--family <f>]... [--dry-run]
+                                           (write the Peer-only runtime providers, e.g. opencode-peer, into ~/.paseo/config.json)
   pteam jobs list [--all]                  (job presets a Lead may use NOW: switched-off jobs/executors/tools are left out and named; --all shows everything)
   pteam jobs show <id> [--all]             (one job preset, same shape; a switched-off job is JOB_INACTIVE)
   pteam jobs resolve <id>                  (reload right before seating: the exact create_agent arguments + labels for each executor usable NOW, CLI commands, skipped steps)
@@ -1856,6 +2343,10 @@ async function main() {
 		case "permits": return dispatchPermits(argv);
 		case "models": return cmdModels(argv);
 		case "seats": return dispatchSeats(argv);
+		case "runtimes": return dispatchRuntimes(argv);
+		case "hosts": return dispatchHosts(argv);
+		case "dispatch": return dispatchDispatch(argv);
+		case "flow": return cmdFlow(argv);
 		case "routing": return dispatchRouting(argv);
 		case "jobs": return dispatchJobs(argv);
 		case "cost": return cmdCost(argv);

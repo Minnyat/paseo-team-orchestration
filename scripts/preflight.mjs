@@ -29,7 +29,7 @@ import {
 	readJsonOrNull,
 	verify as verifyClaudeSetup,
 } from "./claude-setup.mjs";
-import { orchestrationPreferencesNotice } from "./lib-common.mjs";
+import { orchestrationPreferencesNotice, parsePaseoError } from "./lib-common.mjs";
 // Lives in cli/lib because that is where the pack's path knowledge lives
 // (config-walker.mjs). preflight.mjs is never copied into the installed support
 // directory, so this relative path always resolves to the package it shipped in
@@ -164,6 +164,7 @@ function tryExec(cmd, argv, timeoutMs = 30000) {
 		return {
 			ok: false,
 			stdout: error?.stdout ? String(error.stdout) : "",
+			stderr: error?.stderr ? String(error.stderr) : "",
 			error: String(error?.message ?? error),
 		};
 	}
@@ -329,13 +330,17 @@ await prefetchProbes([
 }
 const piCli = tryExec("pi", ["--version"]);
 const claudeCli = tryExec("claude", ["--version"]);
+// --runtime picks which INSTALLED adapter to check (pi extension, Claude
+// hooks). Only a "full" family has one; peer-only runtimes (opencode, agy) are
+// checked per route below instead (runtime-cli / runtime-policy).
+const ADAPTER_FAMILIES = RUNTIME_FAMILIES.filter((f) => runtimeDescriptor(f).enforcement === "full");
 const runtimes = (() => {
-	if (RUNTIME_FAMILIES.includes(runtimeOpt)) return [runtimeOpt];
-	if (runtimeOpt === "both") return [...RUNTIME_FAMILIES];
+	if (ADAPTER_FAMILIES.includes(runtimeOpt)) return [runtimeOpt];
+	if (runtimeOpt === "both") return [...ADAPTER_FAMILIES];
 	if (runtimeOpt) {
 		fail(
 			"runtime",
-			`unknown --runtime "${runtimeOpt}" (${[...RUNTIME_FAMILIES, "both"].join("|")})`,
+			`unknown --runtime "${runtimeOpt}" (${[...ADAPTER_FAMILIES, "both"].join("|")})`,
 		);
 		return ["pi"];
 	}
@@ -637,9 +642,33 @@ function routeProviders(routes) {
 	);
 }
 
+/**
+ * `paseo provider ls` right after a daemon (re)start reports every provider
+ * "loading" for a few seconds (measured on 0.14: gone within ~4s). That is not
+ * an unhealthy provider, and failing on it made a preflight run just after a
+ * restart report a healthy host as broken. Re-ask, briefly, while anything is
+ * still loading; whatever is left after the deadline is judged as reported.
+ */
+function settledProviderList(run, deadlineMs = Number(process.env.PASEO_TEAM_PROVIDER_SETTLE_MS ?? 20000)) {
+	const until = Date.now() + deadlineMs;
+	let last = run();
+	for (;;) {
+		if (!last.ok) return last;
+		let loading = false;
+		try {
+			loading = (JSON.parse(last.stdout) ?? []).some((p) => String(p?.status ?? "").toLowerCase() === "loading");
+		} catch {
+			return last;
+		}
+		if (!loading || Date.now() >= until) return last;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+		last = run();
+	}
+}
+
 const providersById = new Map();
 if (daemonUp) {
-	const ls = tryExec("paseo", ["provider", "ls", "--json"]);
+	const ls = settledProviderList(() => tryExec("paseo", ["provider", "ls", "--json"]));
 	if (ls.ok) {
 		try {
 			const providers = JSON.parse(ls.stdout);
@@ -836,7 +865,10 @@ if (routing && daemonUp && !skipModels) {
 			// indexOf("/") === -1 yielded a truncated name ("claude-opus-") and
 			// looked it up anyway.
 			const routeFamily = providerFamily(route.paseoProvider);
+			// ~/.pi/agent/models.json is pi's own file: another provider-carrying
+			// family (opencode: "<provider>/<model>") has no thinkingLevelMap there.
 			const clamped =
+				routeFamily === "pi" &&
 				Boolean(runtimeDescriptor(routeFamily)?.model.carriesProvider) &&
 				piModelLevelUnreachable(
 					resolved.model.slice(0, resolved.model.indexOf("/")),
@@ -863,6 +895,39 @@ if (routing && daemonUp && !skipModels) {
 	}
 } else if (routing && skipModels) {
 	warn("routes", "model inventory checks skipped (--skip-models)");
+}
+
+// --- Peer-only runtimes the routes use (opencode, ...) ---------------------------
+//
+// pi and Claude are checked above as installed adapters. A Peer-only runtime is
+// opt-in per host, so it is checked only when a route names it: its provider
+// must be registered (pteam runtimes apply), its CLI should be on PATH, and the
+// report says plainly that its policy is static — commit/push are never
+// brief-granted on such a seat.
+if (routing) {
+	const used = new Set(
+		classesToResolve(routing.routes).flatMap((modelClass) =>
+			routeOptions(routing.routes[modelClass])
+				.filter((route) => route.enabled !== false)
+				.map((route) => route.paseoProvider),
+		),
+	);
+	for (const family of RUNTIME_FAMILIES) {
+		const d = runtimeDescriptor(family);
+		if (d.enforcement === "full") continue;
+		const providers = [...used].filter((name) => providerFamily(name) === family);
+		if (providers.length === 0) continue;
+		const id = `runtime:${family}`;
+		const missing = daemonUp ? providers.filter((name) => !providersById.has(name)) : [];
+		const cli = tryExec(d.cli, ["--version"], 15000);
+		if (missing.length > 0) {
+			fail(id, `${missing.join(", ")} routed but not registered in ~/.paseo/config.json → run: pteam runtimes apply --family ${family} && paseo daemon restart`);
+		} else if (!cli.ok) {
+			strictCheck(id, `${d.cli} CLI not found on PATH — ${providers.join(", ")} cannot start on this host`);
+		} else {
+			warn(id, `${providers.join(", ")} (${d.cli} ${cli.stdout.trim().split("\n")[0]}): policy is STATIC (${d.label}'s own permission config) — edits allowed, git commit/push/merge and paseo/pteam denied for every brief; commit that seat's work from a pi/Claude Peer`);
+		}
+	}
 }
 
 // --- the create_agent route gate ------------------------------------------------
@@ -1039,23 +1104,21 @@ function runRemotePreflight(hostId, host, endpointValue) {
 	// 1. daemon reachable?
 	const reach = remoteExec(["paseo", "ls", "--host", endpointValue, "--json"]);
 	if (!reach.ok) {
+		// The daemon's own reason (DAEMON_UNREACHABLE vs AUTH_FAILED ...), not
+		// execFileSync's "Command failed: <argv>" — the fixes are different.
+		const why = parsePaseoError(reach);
 		fail(
 			`cluster-remote:${hostId}`,
-			`remote daemon unreachable via ${host.connection.endpointEnv}: ${String(reach.error).slice(0, 120)}`,
+			`remote daemon ${why && /^AUTH_/.test(why.code) ? "refused the credential" : "unreachable"} via ${host.connection.endpointEnv}: ${why ? `${why.code}: ${why.message}` : String(reach.error).slice(0, 120)}`,
 		);
 		return;
 	}
 	pass(`cluster-remote:${hostId}`, "remote daemon reachable (offer accepted)");
 
 	// 2. role providers present + enabled + healthy on the remote daemon.
-	const ls = remoteExec([
-		"paseo",
-		"provider",
-		"ls",
-		"--host",
-		endpointValue,
-		"--json",
-	]);
+	const ls = settledProviderList(() =>
+		remoteExec(["paseo", "provider", "ls", "--host", endpointValue, "--json"]),
+	);
 	const remoteProviders = new Map();
 	if (ls.ok) {
 		try {

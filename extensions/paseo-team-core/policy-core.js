@@ -950,6 +950,11 @@ const PTEAM_READ_ONLY = {
     seats: ["list"],
     routing: ["show", "check"],
     permits: ["list"],
+    // "" = the bare command (`pteam hosts`, `pteam runtimes`), which lists.
+    runtimes: ["", "list"],
+    hosts: ["", "list", "check"],
+    dispatch: ["plan"],
+    flow: null,
 };
 /** The first `pteam` invocation in `command` that is not read-only, as "pteam <a> <b>", or null. */
 export function pteamMutationIn(command) {
@@ -3598,18 +3603,31 @@ export function forkModelBlockReason({ expectedModel, actualModel, expectedThink
     }
     return null;
 }
+const ALL_ROLES = ["supervisor", "lead", "peer"];
 export const RUNTIME_DESCRIPTORS = {
     pi: {
         family: "pi",
         minRouteSegments: 3,
         modelHintPrefix: "<pi-provider>/",
         hasPermissionModes: false,
+        enforcement: "full",
+        roles: ALL_ROLES,
     },
     claude: {
         family: "claude",
         minRouteSegments: 2,
         modelHintPrefix: "",
         hasPermissionModes: true,
+        enforcement: "full",
+        roles: ALL_ROLES,
+    },
+    opencode: {
+        family: "opencode",
+        minRouteSegments: 3,
+        modelHintPrefix: "<provider>/",
+        hasPermissionModes: false,
+        enforcement: "static",
+        roles: ["peer"],
     },
 };
 export const RUNTIME_FAMILIES = Object.keys(RUNTIME_DESCRIPTORS);
@@ -3635,7 +3653,7 @@ export function familyHasPermissionModes(family) {
     return runtimeDescriptor(family)?.hasPermissionModes === true;
 }
 /** Every role provider name the pack owns, e.g. "pi-peer", "claude-lead". */
-export const ROLE_PROVIDERS = RUNTIME_FAMILIES.flatMap((family) => ROLES.map((r) => `${family}-${r}`));
+export const ROLE_PROVIDERS = RUNTIME_FAMILIES.flatMap((family) => RUNTIME_DESCRIPTORS[family].roles.map((r) => `${family}-${r}`));
 /** Tail of a seat provider name — mirrors SEAT_ID_RE in scripts/seat-profiles.mjs. */
 const SEAT_TAIL_RE = /^[a-z][a-z0-9-]{1,23}$/;
 /**
@@ -3656,7 +3674,9 @@ export function parseRoleProvider(name) {
         if (!head.startsWith(prefix))
             continue;
         const rest = head.slice(prefix.length);
-        for (const role of ROLES) {
+        // Only the roles the family may carry: "opencode-lead" is not a role
+        // provider, so it parses to null and every gate refuses it as unknown.
+        for (const role of RUNTIME_DESCRIPTORS[family].roles) {
             if (rest === role)
                 return { family, role, seat: null };
             if (!rest.startsWith(`${role}-`))
@@ -3753,6 +3773,37 @@ function routeOptionsOf(route) {
 }
 const optionUsable = (option) => option.enabled !== false && !option.modelDisabled;
 const optionLabel = (option) => `${option.paseoProvider}/${option.model} @${option.thinking}`;
+/**
+ * The table a create_agent is checked against: the local one, or — when the
+ * call names a `serverId` — that host's. A serverId the cluster file does not
+ * map is refused rather than checked against the local routes: that would
+ * approve a model for a daemon whose inventory and routes were never consulted.
+ */
+export function routeTableForServer(routeTable, serverId) {
+    if (serverId === undefined)
+        return { table: routeTable };
+    if (typeof serverId !== "string" || serverId.trim() === "") {
+        return { reason: `BLOCKED: ROUTE_HOST_UNKNOWN — serverId must be a non-empty server id from list_hosts (got ${JSON.stringify(serverId)}).` };
+    }
+    if (!routeTable || !routeTable.ok)
+        return { table: routeTable };
+    const host = routeTable.serverHosts?.[serverId];
+    if (!host) {
+        const known = Object.entries(routeTable.serverHosts ?? {}).map(([id, h]) => `${h.hostId}=${id}`);
+        return {
+            reason: `BLOCKED: ROUTE_HOST_UNKNOWN — serverId "${serverId}" is not mapped to any host in ${routeTable.path} (connection.serverId), so there is no route of that host to check this seat against. ${known.length > 0 ? `Mapped: ${known.join(", ")}.` : "No host is mapped yet."} The Human runs \`pteam hosts sync\` (or adds the host with \`pteam hosts add\`); do not retry without serverId to seat it locally instead.`,
+        };
+    }
+    return {
+        table: {
+            ...routeTable,
+            hostId: host.hostId,
+            routes: host.routes,
+            disabledModels: host.disabledModels ?? [],
+            ...(host.jobs ? { jobs: host.jobs } : {}),
+        },
+    };
+}
 /**
  * On unless the variable is EXACTLY "off". Any other value — "OFF", "0",
  * "false", a typo — keeps the gate on: a mistyped opt-out costs one refused
@@ -4037,12 +4088,19 @@ function declaredClassReason(declared, allowed, who) {
 export function createAgentRouteBlockReason({ role, args, routeTable, env = process.env, }) {
     if (role !== "lead" && role !== "supervisor")
         return null;
+    const unsupported = staticRuntimeAuthorityBlockReason(args);
+    if (unsupported)
+        return unsupported;
     if (routeEnforcement(env) === "off")
         return null;
     if (typeof args !== "object" || args === null) {
         return "BLOCKED: ROUTE_UNVERIFIABLE — create_agent requires an args object (provider, settings, labels) to be checked against the host's model routes. Refusing fail-closed.";
     }
     const rec = args;
+    const scoped = routeTableForServer(routeTable, rec.serverId);
+    if ("reason" in scoped)
+        return scoped.reason;
+    routeTable = scoped.table;
     const provider = typeof rec.provider === "string" ? rec.provider : "";
     const target = parseRoleProvider(provider);
     if (!target) {
@@ -4101,6 +4159,31 @@ export function createAgentRouteBlockReason({ role, args, routeTable, env = proc
         return `BLOCKED: ROUTE_THINKING_MISMATCH — a top-level "thinking" (legacy) overrides settings.thinkingOptionId in Paseo's top-level create_agent, and it is ${JSON.stringify(rec.thinking)}, not the route's "${chosen.thinking}". Drop it; settings.thinkingOptionId is the only place thinking goes.`;
     }
     return null;
+}
+/**
+ * A seat whose runtime enforces a STATIC policy (opencode: its own permission
+ * config, generated once per provider) can never be granted commit or push by
+ * a brief — that config denies both for every task. Seating one with a brief
+ * that grants them would leave the Lead waiting on a SHA that cannot appear, so
+ * the create_agent is refused up front, naming what to do instead. Independent
+ * of PASEO_TEAM_ROUTE_ENFORCE: this is what the seat can do, not which model.
+ */
+export function staticRuntimeAuthorityBlockReason(args) {
+    if (typeof args !== "object" || args === null)
+        return null;
+    const rec = args;
+    const target = parseRoleProvider(typeof rec.provider === "string" ? rec.provider : "");
+    if (!target || runtimeDescriptor(target.family)?.enforcement !== "static")
+        return null;
+    const prompt = typeof rec.initialPrompt === "string" ? rec.initialPrompt : "";
+    const authority = peerAuthority(parseTaskBrief(prompt));
+    const granted = [
+        ...(authority.commit ? ["COMMIT_AUTHORITY"] : []),
+        ...(authority.pushTaskBranch ? ["PUSH_TASK_BRANCH_AUTHORITY"] : []),
+    ];
+    if (granted.length === 0)
+        return null;
+    return `BLOCKED: RUNTIME_AUTHORITY_UNSUPPORTED — ${target.family}-${target.role} runs under a static permission config that denies git commit/push for every brief, so ${granted.join(" + ")}: allowed cannot take effect. Either set them denied and have the work committed by a pi/Claude Peer after review (hand off a workspace snapshot), or route this task to a pi/Claude Peer.`;
 }
 /** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
 export function createAgentRouteBlockReasonForInput(role, input, routeTable, env = process.env) {
@@ -4687,6 +4770,10 @@ export const CREATE_AGENT_PARAMS = Object.freeze([
     "settings",
     "workspaceId",
     "notifyOnFinish",
+    // Paseo 0.14 fleet tools: seat on a connected host (list_hosts). Allowed
+    // because the route gate maps it to that host's routes (routeTableForServer)
+    // and refuses one it cannot map.
+    "serverId",
 ]);
 export const CREATE_AGENT_PLACEMENT_PARAMS = Object.freeze([
     "relationship",
@@ -4718,7 +4805,7 @@ const CREATE_AGENT_SETTINGS = Object.freeze(["modeId", "thinkingOptionId", "feat
  * cannot be resolved the explicit form is refused, because "the same workspace"
  * is then unprovable and omitting the field is always provable.
  */
-export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, }) {
+export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, routeTable, }) {
     if (role !== "lead" && role !== "supervisor")
         return null;
     if (typeof args !== "object" || args === null || Array.isArray(args)) {
@@ -4731,7 +4818,21 @@ export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, }) {
     if (placement.length > 0) {
         problems.push(`${placement.map((key) => `"${key}"`).join(", ")} ${placement.length === 1 ? "is a placement parameter" : "are placement parameters"} — Paseo reads ${placement.length === 1 ? "it" : "them"} as "create a new workspace for this agent" or "detach it from its creator". Leave ${placement.length === 1 ? "it" : "them"} out: a seat created without any lands in YOUR workspace, nested under you`);
     }
-    if (rec.workspaceId !== undefined) {
+    // A seat on ANOTHER host (serverId of a mapped remote host): Paseo requires
+    // a workspaceId there (measured: "workspaceId expected string" without one),
+    // and it can never be this seat's own. The one-workspace-per-job rule then
+    // means: REUSE the workspace already open for the project on that host
+    // (list_workspaces with that serverId) — a Lead still creates none. An
+    // unmapped serverId is left to the route gate (ROUTE_HOST_UNKNOWN).
+    const serverId = typeof rec.serverId === "string" ? rec.serverId.trim() : undefined;
+    const mapped = serverId && routeTable?.ok ? routeTable.serverHosts?.[serverId] : undefined;
+    const remoteSeat = serverId !== undefined && !(mapped?.local === true);
+    if (remoteSeat) {
+        if (mapped && (typeof rec.workspaceId !== "string" || rec.workspaceId.trim() === "")) {
+            problems.push(`a seat on host "${mapped.hostId}" (serverId ${serverId}) needs "workspaceId" — the workspace already open for this project ON THAT HOST (list_workspaces with the same serverId). A Lead creates no workspace; if none is open there, the Human (or \`remote-paseo.mjs workspace-create\`, which reuses) opens one`);
+        }
+    }
+    else if (rec.workspaceId !== undefined) {
         const requested = typeof rec.workspaceId === "string" ? rec.workspaceId.trim() : "";
         const own = typeof selfWorkspaceId === "string" ? selfWorkspaceId.trim() : "";
         if (!requested) {
@@ -4808,8 +4909,8 @@ export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, }) {
     return `Refusing create_agent: ${problems.join("; ")}.`;
 }
 /** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
-export function createAgentParamsBlockReasonForInput(role, input, selfWorkspaceId) {
-    return createAgentParamsBlockReason({ role, args: extractMcpArgs(input), selfWorkspaceId });
+export function createAgentParamsBlockReasonForInput(role, input, selfWorkspaceId, routeTable) {
+    return createAgentParamsBlockReason({ role, args: extractMcpArgs(input), selfWorkspaceId, routeTable });
 }
 /**
  * Decide whether an `mcp` proxy call is allowed for a role.
@@ -4919,7 +5020,7 @@ export function mcpBlockReason(role, input, context = {}) {
         // After the mode gate for the same reason the mode gate is after the
         // authority ones: the placement and parameter checks are mechanical, and a
         // call that is wrong on authority should hear about that first.
-        const paramsBlock = createAgentParamsBlockReasonForInput(role, input, context.selfWorkspaceId);
+        const paramsBlock = createAgentParamsBlockReasonForInput(role, input, context.selfWorkspaceId, context.routeTable);
         if (paramsBlock)
             return paramsBlock;
         // Which MODEL the seat runs. After the shape gates, so a call they refuse
@@ -5631,14 +5732,18 @@ export function extraTools(role, family, env = process.env) {
 export function extraToolDiagnostics(env = process.env) {
     const roles = ["peer", "lead", "supervisor"];
     const names = configuredExtraToolNames(env);
-    const accepted = Object.fromEntries(RUNTIME_FAMILIES.map((family) => [
+    // Extra tools are a grant THIS module enforces per turn, so only "full"
+    // families have an inventory to report; a static/none family never reads
+    // PASEO_TEAM_EXTRA_TOOLS at all.
+    const families = RUNTIME_FAMILIES.filter((family) => RUNTIME_DESCRIPTORS[family].enforcement === "full");
+    const accepted = Object.fromEntries(families.map((family) => [
         family,
         Object.fromEntries(roles.map((role) => [role, extraTools(role, family, env)])),
     ]));
     const dropped = [];
     for (const tool of names) {
         const capability = extraToolCapability(tool);
-        for (const family of RUNTIME_FAMILIES) {
+        for (const family of families) {
             for (const role of roles) {
                 if (capability?.roles.includes(role) && capability.families.includes(family))
                     continue;

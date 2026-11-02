@@ -59,55 +59,111 @@ trần.
 6. **Chọn host và ghi routing evidence** (xem ROUTING_DECISION trong
    SKILL.md).
 
-## Cơ chế tạo agent trên daemon khác
+## Quản lý máy — không cần shell
 
-MCP server được inject vào pi agent **luôn trỏ daemon local** của agent đó
-(xác minh bằng source Paseo 0.2.5: `daemon.mcp.injectIntoAgents` tạo mcp
-config ở `createPiMcpConfigFile` với URL daemon của chính daemon cha).
-`--host` là option của Paseo CLI, KHÔNG phải argument của MCP tool — nên với
-host remote, Lead KHÔNG dùng MCP mà dùng **wrapper `scripts/remote-paseo.mjs`**
-(Lead skill bắt buộc tách LOCAL_CREATE_CYCLE / REMOTE_CREATE_CYCLE).
+Từ Paseo 0.14, daemon controller có **registry host** riêng (`paseo host
+add|ls|update|rm`). Registry giữ kết nối (kể cả mật khẩu) trong kho của daemon
+và theo dõi trạng thái online. Các MCP tool `create_agent`, `create_workspace`,
+`list_workspaces`, `send_agent_prompt`, `get_agent_status`,
+`get_agent_activity` và `list_agents` nhận thêm `serverId` để thao tác trên host
+đã kết nối. Khi Peer xong, Paseo gửi thông báo hoàn thành ngược về Lead,
+xuyên host (đã đo trong lab).
 
-Wrapper nhận `HOST_ID` từ cluster file, tự resolve `endpointEnv`, validate
-provider/model/thinking, chạy Paseo CLI với `--host` (không shell-quoting
-thủ công), và trả JSON envelope có gắn `hostId` — endpoint value không bao
-giờ xuất hiện trong output hay error:
+Pack ghép ba nguồn thông tin về một host thành một chỗ:
+
+| Nguồn | Giữ gì |
+|---|---|
+| `cluster-routing.local.json` | route, capability, limit, `endpointEnv`, `connection.serverId` |
+| registry của daemon | kết nối và secret, trạng thái, serverId |
+| daemon sống | agent đang chạy |
 
 ```bash
-# Endpoint value NẰM TRONG ENV (ví dụ PASEO_HOST_B), cluster file chỉ tên:
+pteam hosts                       # mọi máy + vấn đề kèm cách sửa (NOT_IN_REGISTRY, NO_SERVER_ID, OFFLINE…)
+pteam hosts add mac --connection 'tcp://10.0.0.5:6767?password=…' --capability git-read --capability independent-review
+pteam hosts sync                  # điền connection.serverId từ registry
+pteam hosts check mac             # preflight chỉ cho máy đó
+pteam hosts set-connection mac --connection-stdin < conn.txt   # đổi địa chỉ/mật khẩu
+pteam hosts remove mac            # gỡ khỏi file cụm và registry
+```
+
+WebUI (`pteam web`) có tab **Máy** làm đủ các việc trên bằng form. Chuỗi kết
+nối đi tới CLI qua **stdin**, nên không bao giờ nằm trong argv hay trong
+"lệnh vừa chạy" mà trang hiển thị lại.
+
+## Chia task: `pteam dispatch plan` và `pteam flow`
+
+`dispatch plan --class <CLASS> [--kind writer|reviewer|reader]
+[--avoid-host <máy writer>] [--project <tên>]` chạy cả chu trình chọn host
+trong một lệnh chỉ đọc. Các bước, theo thứ tự:
+
+1. capability (writer cần `git-write` + `focused-test`; reviewer cần
+   `git-read` + `independent-review`);
+2. tính độc lập (reviewer tránh máy của writer);
+3. còn sống;
+4. route của lớp hợp lệ trên **inventory của chính máy đó**, dùng cùng
+   `resolveRoute` mà gate dùng;
+5. còn chỗ theo `limits`.
+
+Trong các máy đạt, nó chọn máy còn trống nhiều nhất. Writer ưu tiên máy local;
+reviewer ưu tiên máy khác. Kết quả in ra:
+
+- tham số `create_agent` đúng từng chữ: local là MCP; remote có registry là MCP
+  kèm `serverId` và `workspaceId` của **workspace đang mở trên máy đó**; còn
+  lại là lệnh `remote-paseo.mjs`;
+- một `ROUTING_DECISION` điền sẵn;
+- với mỗi máy bị loại: bước trượt và lý do.
+
+Nó không bao giờ tự đổi máy. `flow` cho biết agent nào đang chạy ở máy nào,
+nhóm theo lớp mô hình và job (`paseo ls --label`). WebUI có tab **Luồng việc**
+gồm cả hai, tự làm mới 5 giây một lần.
+
+## Cơ chế tạo agent trên daemon khác
+
+Có hai đường. Gate kiểm cả hai.
+
+**MCP + `serverId`** (mặc định khi máy có trong registry):
+
+- Gate đọc `serverId` trong `create_agent` và so seat với route của **máy có
+  `connection.serverId` đó**.
+- `serverId` chưa ánh xạ bị từ chối với `BLOCKED: ROUTE_HOST_UNKNOWN`. Gate
+  không bao giờ so với route local thay thế.
+- Seat trên máy remote **bắt buộc** có `workspaceId`, là workspace đang mở cho
+  project trên máy đó (`list_workspaces { serverId }`). Paseo yêu cầu điều
+  này, và Lead vẫn không được tạo workspace.
+- `create_workspace` qua MCP **không tái dùng** workspace cũ (đo được: 4
+  workspace trên cùng một đường dẫn). `remote-paseo.mjs workspace-create` thì
+  có tái dùng, và `dispatch plan` báo `WORKSPACE_DUPLICATES` khi gặp trùng.
+- Peer trên máy khác **không** gọi được `peer_ask_lead`: Lead không có trên
+  daemon của Peer. Peer nhận `PARENT_LEAD_REMOTE`, được kiểm bằng một lệnh
+  `inspect` (chỉ đọc), không thử gửi mù. Kênh thật là câu trả lời cuối turn:
+  Paseo chuyển nó tới Lead dưới dạng thông báo hoàn thành.
+
+**`remote-paseo.mjs`** (máy không có trong registry, hoặc khi muốn đi qua CLI):
+wrapper nhận `HOST_ID` từ cluster file, tự resolve `endpointEnv`, validate
+provider/model/thinking, chạy Paseo CLI với `--host` (không shell-quoting thủ
+công), và trả JSON envelope có gắn `hostId`. Endpoint value không bao giờ xuất
+hiện trong output hay error. Lỗi mang **lý do của daemon** (`paseoError`):
+
+| Mã | Nghĩa |
+|---|---|
+| `HOST_ROUTE_UNAVAILABLE` | daemon không với tới được |
+| `HOST_AUTH_FAILED` | `AUTH_REQUIRED` / `AUTH_FAILED`: sửa giá trị endpoint |
+| `CLI_ERROR` | daemon từ chối, kèm code thật (`AGENT_NOT_FOUND`, `AGENT_CREATE_FAILED`…) |
+
+```bash
 node scripts/remote-paseo.mjs health --host-id <id>
-node scripts/remote-paseo.mjs providers --host-id <id>
-node scripts/remote-paseo.mjs models --host-id <id> --provider pi-peer
-node scripts/remote-paseo.mjs workspaces --host-id <id>
 node scripts/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --title <t>
-# MỘT workspace cho cả việc: lệnh này dùng lại workspace đang mở trên <path> (reused: true),
-# chỉ tạo khi chưa có, và chỉ tạo local — `--isolation worktree` bị từ chối
-# (WORKSPACE_ISOLATION_REFUSED). Reviewer tự `git worktree add --detach` bên trong
-# workspace chung; không worktree được → BLOCKED: REVIEW_WORKTREE_UNAVAILABLE
 node scripts/remote-paseo.mjs run --host-id <id> \
   --provider pi-peer/<pi-provider>/<model-id> --thinking <level> \
   --workspace <wks-id> --title <t> --brief <task-file>
-node scripts/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>
-node scripts/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>
-node scripts/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>
-node scripts/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>
+node scripts/remote-paseo.mjs status|send|cancel|archive --agent-ref <host-id>/<agent-id>
 ```
 
-Đủ chi tiết: `node scripts/remote-paseo.mjs --help`.
-
-CLI chấp nhận `host:port`, socket/pipe, `tcp://host:port?ssl=true&password=...`
-hoặc pairing offer URL (xem `paseo run --help`). Credential của endpoint sống
-trong env, không trong file. Lưu ý: `paseo status` KHÔNG có `--host` — reachability
-remote dùng `remote-paseo.mjs health` (chạy `paseo ls --host ... --json`).
-
-> Lưu ý bảo mật policy: policy extension chặn Peer dùng `paseo` CLI từ
-> bash (heuristic) và cho Lead quyền `bash`. Lead dùng wrapper cho remote được
-> coi là đường orchestration chính thức — vẫn qua control plane Paseo, không
-> phải control plane thứ hai.
-
-**Multi-Lead vẫn là phương án mặc định cho quan hệ chặt lâu dài**: một Lead
-mỗi daemon, Supervisor quan sát chéo và Human phối hợp portfolio. Cross-host
-từ một Lead nên dành cho pattern nhẹ (reviewer host riêng, runner host riêng).
+> **Mật khẩu daemon:** `PASEO_PASSWORD` truyền qua `paseo daemon start`
+> **không có tác dụng** (đo được: `authRequired:false`, mật khẩu sai vẫn vào).
+> Đặt mật khẩu bằng `paseo daemon set-password` (cần TTY), hoặc ghi hash bcrypt
+> vào `daemon.auth.password` trong `config.json`. Kiểm lại bằng một lệnh với
+> mật khẩu sai: phải nhận `HOST_AUTH_FAILED`.
 
 ## Composite reference
 
@@ -139,6 +195,74 @@ clone/fetch tới đúng SHA.
   cùng = progress checkpoint).
 - **Endpoint env mất** → strict preflight FAIL (warn trong non-strict);
   routing tới host đó là BLOCKED, không suy đoán endpoint từ lịch sử.
+
+## Lab nhiều máy trên MỘT máy (tự động)
+
+`scripts/lab/multihost-lab.sh` dựng N "máy" Paseo thật trên một host. Mỗi máy
+có `HOME` riêng (nghĩa là `~/.paseo`, `~/.paseo-team-orchestration`, repo
+`projects/demo` riêng) và daemon riêng trên một cổng TCP. Máy đầu là
+controller (`connection.type: local`), các máy còn lại là remote với endpoint
+trong `PASEO_LAB_<HOST>`. Role provider ở lab `extends: "acp"` và trỏ tới
+`scripts/lab/fake-acp-agent.mjs`, một ACP agent giả. Nhờ vậy agent thật sự
+được tạo, chạy turn, inspect, stop, archive trên đúng daemon đích mà không cần
+API key. Mỗi host được gán một runtime family khác nhau (lab-b: claude,
+lab-c: opencode).
+
+```bash
+npm i -g @getpaseo/cli
+scripts/lab/multihost-lab.sh up            # [--hosts a,b,c] [--base-port 6801] [--root DIR]
+scripts/lab/multihost-lab.sh test          # 31 check, exit 1 nếu có FAIL
+eval "$(scripts/lab/multihost-lab.sh env)" # tự đóng vai controller, chạy tay remote-paseo.mjs
+scripts/lab/multihost-lab.sh down
+```
+
+`test` chạy hai bộ. Bộ sâu `multihost-deep.mjs` dùng directive của agent giả:
+`LAB_EXEC` để chạy lệnh thật, `LAB_MCP` để gọi MCP của daemon dưới danh nghĩa
+agent. Nhờ đó Lead/Engineer/Reviewer giả làm việc thật. Bộ sâu phủ:
+
+- mật khẩu daemon trên IP card mạng (`--bind`, `--secure`);
+- registry gốc;
+- Lead seat Peer trên máy khác qua MCP `serverId`;
+- `peer_ask_lead` xuyên host;
+- Engineer commit/push → Reviewer trên máy có mật khẩu checkout **đúng SHA**
+  → sửa → review lại;
+- checkout cũ bị bắt;
+- 12 seat song song;
+- prompt Unicode/ký tự shell, 19k ký tự, `PROMPT_TOO_LONG`, `--brief`;
+- restart daemon giữa turn;
+- strict preflight khi máy bắt buộc chết;
+- model route thiếu trong inventory.
+
+Bộ còn lại, `scripts/lab/multihost-scenario.mjs`, chỉ gọi tool đã ship
+(`remote-paseo.mjs`, `model-routing.mjs`, `preflight.mjs`) và phủ:
+
+- cluster file validate;
+- health / providers / models theo đúng inventory của từng host;
+- `preflight --host-id`;
+- nhiều project trên một host: hai workspace, `workspace-create` dùng lại
+  workspace có sẵn;
+- Peer chạy song song trên hai host, mỗi host dùng route riêng của nó, và turn
+  chạy đúng daemon đó (`LAB_ACK host=...`);
+- không lẫn agent giữa các host;
+- send / cancel / archive theo `AGENT_REF`;
+- các lỗi phải bắt được: thiếu endpoint env, host lạ, host local bị từ chối,
+  host chết thì báo `HOST_ROUTE_UNAVAILABLE` và không rơi sang host khác,
+  host trở lại sau restart, daemon từ chối thì trả nguyên lý do của daemon.
+
+Lab **không** thay thế được: hai máy vật lý thật (NAT, TLS, relay
+`app.paseo.sh`) và model thật. Cả hai vẫn là test tay ở mục dưới.
+
+### Lỗi do lab tìm ra và đã sửa
+
+- Paseo 0.14 trả lỗi `--json` dưới dạng `{"error":{code,message}}` trên
+  **stderr**. `remote-paseo.mjs` trước đây chỉ trả "Command failed: paseo
+  …", làm mất lý do thật. Giờ envelope có thêm `paseoError: {code, message,
+  details}`, và `message` là lý do của daemon (endpoint vẫn được redact).
+- Host chết (`DAEMON_UNREACHABLE`) trước đây ra `CLI_ERROR` chung chung. Giờ
+  nó ra `HOST_ROUTE_UNAVAILABLE`, đúng mã mà mục Failure & recovery bảo Lead
+  dùng. Lỗi daemon từ chối (agent không tồn tại, mode sai) vẫn là `CLI_ERROR`.
+- Redact thêm `password=…` và `#offer=…`. Lý do: thông báo lỗi của daemon có
+  thể in endpoint đã chuẩn hoá, không còn khớp từng byte với giá trị trong env.
 
 ## Cross-host test plan (MANUAL — cần máy thứ hai)
 

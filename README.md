@@ -89,16 +89,20 @@ paseo-team-orchestration/
 │       ├── graph-cache.mjs         # spawn-tree cache; `paseo ls` has no parent link, `inspect` does
 │       ├── install-drift.mjs       # installed copies vs THIS release, byte for byte
 │       ├── workspace-protocol.mjs  # grade a target repo's WORKSPACE_PROTOCOL.md
+│       ├── hosts.mjs               # pteam hosts: cluster file + Paseo host registry + live state
+│       ├── dispatch.mjs            # pteam dispatch plan / flow: where a seat should run, what runs where
 │       └── graph.mjs               # agents + parents + permits -> nodes/edges/degraded
 ├── webui/
 │   ├── server.mjs                  # transport only: route -> paseo-team argv, token, localhost
-│   └── public/                     # zero-dependency SPA (index.html / app.js / style.css)
+│   └── public/                     # zero-dependency SPA (index.html / app.js / fleet.js / style.css)
 ├── scripts/
 │   ├── install.ps1 / install.sh    # installers
 │   ├── lib-common.mjs              # shared helpers: exec/shim resolution, entrypoint, versions
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
 │   ├── pi-models-sync.mjs          # rebuilds ~/.pi/agent/models.json from a probed endpoint
 │   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host by HOST_ID (Lead REMOTE cycle)
+│   ├── runtime-providers.mjs       # provider entries for Peer-only runtimes (opencode) + their static policy
+│   ├── lab/                        # multihost-lab.sh: N real Paseo daemons on one machine + scripted ACP agent + 2 scenario suites
 │   ├── reliability.mjs             # retry classification/backoff + stale predicates
 │   ├── team-communication.mjs      # parent-scoped Peer → Lead messaging
 │   ├── watchdog.mjs                # observation-only running-agent watchdog
@@ -141,7 +145,8 @@ paseo-team-orchestration/
     ├── claude-runtime.md           # Claude Code as the second runtime: hooks, MCP, install
     ├── downstream-doctrine-review.md   # what Paseo's own Foundation does that we don't
     ├── model-routing.md            # the 4 model-routing layers, verified commands
-    ├── multi-host.md               # N-host routing + cross-host test plan
+    ├── multi-host.md               # N-host routing, one-machine lab, cross-host test plan
+    ├── adding-a-runtime.md         # enforcement tiers, OpenCode per task, how to add codex/copilot
     ├── multi-supervisor-topology.md    # domains, clusters, and who may seat whom
     ├── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
     └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
@@ -260,6 +265,26 @@ Four rules make this safe to expose in a browser:
   consequence: `pteam uninstall --purge` deletes that ledger, so any seat
   providers still in `~/.paseo/config.json` become unowned and must be removed
   by hand.
+
+### More coding agents — `pteam runtimes`
+
+Besides pi and Claude, the pack seats **OpenCode** as a **Peer** (`opencode-peer`),
+routable per class, per alternate option or per job like any other provider.
+A runtime enters the pack only with enforcement: pi/Claude decide every tool
+call per turn (`full`); OpenCode runs under its OWN permission config generated
+by `pteam runtimes apply` (`static`: edits allowed; git commit/push/merge,
+`paseo`/`pteam`, web fetch and asking the Human denied for every brief — a
+brief granting commit/push to such a seat is refused as
+`RUNTIME_AUTHORITY_UNSUPPORTED`). Only a `full` runtime carries Supervisor or Lead.
+Antigravity (`agy`) cannot be a policed Paseo seat (Paseo refuses to extend it,
+and it runs only without permissions), so it is a jobs `cliTools` entry run by a
+policed Peer. Adding the next one (codex, copilot) is one descriptor entry plus
+a permission builder: [`docs/adding-a-runtime.md`](docs/adding-a-runtime.md).
+
+```bash
+pteam runtimes                 # every runtime: CLI found?, enforcement, roles, providers configured
+pteam runtimes apply [--family opencode] [--dry-run]   # then: paseo daemon restart
+```
 
 Seats are deliberately **not** routable: `routing`/`cluster` still accept only
 the six durable role providers, so a seat takes whatever model its creator
@@ -1414,6 +1439,30 @@ entries in the Paseo sidebar. Now:
 - `team_fork` refuses a `cwd` other than its source's; `remote-paseo.mjs workspace-create`
   reuses the workspace already open on the path (`reused: true`) and never creates a
   worktree workspace.
+
+## Many machines — hosts, dispatch, flow
+
+A cluster is managed from one place, CLI or WebUI, without a shell per machine:
+
+```bash
+pteam hosts                                   # every machine: cluster file + Paseo's host registry + live state, problems with their fix
+pteam hosts add mac --connection 'tcp://10.0.0.5:6767?password=…' --capability git-read --capability independent-review
+pteam hosts sync | check <id> | remove <id> | set-connection <id> --connection-stdin
+pteam dispatch plan --class REVIEW_HIGH --avoid-host <writer-host> --project <name>
+pteam flow                                    # what runs where, by model class and job
+```
+
+`dispatch plan` is the Lead's host-routing cycle as one read-only call
+(capability → independence → reachable → the class route valid on THAT host's
+inventory → limits; most free capacity wins) and prints the exact
+`create_agent` to copy: plain MCP locally, MCP with `serverId` + that host's
+workspace on a registered remote (Paseo ≥ 0.14 fleet tools — the gate holds
+it to that host's routes and refuses an unmapped serverId), or the
+`remote-paseo.mjs` command. The WebUI has the same as two tabs, **Máy** and
+**Luồng việc** (connection strings reach the CLI on stdin, never argv).
+Everything was exercised against real Paseo daemons on one machine:
+`scripts/lab/multihost-lab.sh up --bind <nic-ip> && scripts/lab/multihost-lab.sh test`
+([docs/multi-host.md](docs/multi-host.md)).
 
 ## CLI and WebUI
 

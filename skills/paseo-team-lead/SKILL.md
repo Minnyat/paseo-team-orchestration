@@ -193,45 +193,34 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    `create_agent`, not two engineers quietly editing the same files.
 
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
-2. Pick `HOST_ID` from the controller-local `cluster-routing.local.json` in the
-   pack's config directory (`PST_TEAM_CONFIG_DIR` → `PASEO_TEAM_HOME` → an
-   existing `~/.paseo-pi-team` → `~/.paseo-team-orchestration`; `preflight.mjs`
-   prints it as `team-config-dir`). Writers need `git-write`+`focused-test`;
-   reviewers `git-read`+`independent-review`. A file you cannot find or read is
-   `BLOCKED: HOST_ROUTE_UNAVAILABLE` — check the other directory first, and
-   never choose a model from `list_models` instead.
-3. Read that host's route from the SAME file (single source of truth for the
-   whole cluster — never infer a remote host's route from local memory), or
-   run the resolver when the role pack repo is available:
-   `node <PASEO_TEAM_SCRIPTS_DIR>/model-routing.mjs resolve --class <CLASS>` for the local
-   `model-routing.local.json` (legacy single-host form).
-4. Verify the target daemon is reachable before routing:
-   - local: `paseo status` (daemon up);
-   - remote: the endpoint env var named by `connection.endpointEnv` must be
-     SET (never print or invent its value) AND
-     `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs health --host-id <id>` must return
-     `ok: true` → else `BLOCKED: HOST_ROUTE_UNAVAILABLE` (no silent fallback
-     to another host; switching hosts is a recorded routing decision).
+2. Pick `HOST_ID` with ONE read-only call that runs the whole host cycle —
+   capabilities (writers `git-write`+`focused-test`, reviewers
+   `git-read`+`independent-review`), reachable, the class route valid on THAT
+   host's own inventory (same validator as the gate), concurrency limits:
+   `node <PASEO_TEAM_SCRIPTS_DIR>/../cli/paseo-team.mjs dispatch plan --class <CLASS> [--kind writer|reviewer|reader] [--avoid-host <writer-host>] [--project <name>] [--cluster-label <your cluster>]`
+   It prints `chosen` (host, mechanism, the exact `createAgent` arguments, a
+   filled `routingDecision`) or `blocked` with every host's failing step. Copy,
+   do not re-derive; a `workspaceNote` is yours to resolve. No `chosen` is
+   `BLOCKED: HOST_ROUTE_UNAVAILABLE` — never pick a model from `list_models`
+   instead, never fall back silently (switching hosts is a recorded decision).
+   An independent reviewer passes `--avoid-host` = the writer's host.
 
-### The hard rule — local MCP vs remote CLI
-
-The injected MCP server is LOCAL-ONLY. `--host` is a Paseo CLI option, not an
-MCP argument. Therefore the target host decides the mechanism:
+### The mechanism follows `chosen.mechanism`
 
 ```text
-IF connection.type == local:
-    use MCP operations (through the mcp proxy)
-
-IF connection.type == remote:
-    do NOT use MCP operations for that host
-    use `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (Paseo CLI with
-    `--host` under the hood)
+mcp            local host: MCP create_agent, no placement (LOCAL_CREATE_CYCLE)
+mcp-serverId   remote host in Paseo's registry: the SAME MCP create_agent plus
+               "serverId" and "workspaceId" (a workspace ALREADY open for this
+               project on that host — list_workspaces { serverId }). The gate
+               holds it to that host's routes; an unmapped serverId is
+               ROUTE_HOST_UNKNOWN (the Human runs `pteam hosts sync`).
+remote-cli     remote host without a serverId: REMOTE_CREATE_CYCLE
 ```
 
-Resolving a remote host and then calling `list_providers`/`create_agent`/…
-via MCP is a routing ERROR: the call lands on the LOCAL daemon, so you get
-local inventory and a local agent while believing you are on the remote host.
-This is the exact failure mode the cluster config exists to prevent.
+An MCP call WITHOUT `serverId` always lands on the LOCAL daemon (local
+inventory, local agent). A Peer you seat on another host cannot reach you with
+`peer_ask_lead` (`PARENT_LEAD_REMOTE`); its final reply reaches you as the
+finish notification — read it, answer with `send_agent_prompt { serverId }`.
 
 ### LOCAL_CREATE_CYCLE — target is `connection.type: local` (MCP)
 
@@ -333,75 +322,32 @@ This is the exact failure mode the cluster config exists to prevent.
     the wrongly-resolved agent.
 11. Only then deliver/continue the initial task.
 
-### REMOTE_CREATE_CYCLE — target is `connection.type: remote` (remote-paseo.mjs)
+### REMOTE_CREATE_CYCLE — `mechanism: remote-cli` (remote-paseo.mjs)
 
-Every operation goes through `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (it drives the
-Paseo CLI with `--host` and returns one JSON envelope per call). Never
-hand-build `paseo ... --host` shell commands — the wrapper validates
-provider/model/thinking, keeps the endpoint value out of every message, and
-returns host-tagged JSON so a remote answer can never be confused with a
-local one. In the commands below, `<id>` is the HOST_ID from
-`cluster-routing.local.json`.
+Every call goes through `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (Paseo
+CLI `--host` underneath, one host-tagged JSON envelope per call, endpoint value
+never printed). Never hand-build `paseo ... --host`. `dispatch plan` already
+checked providers and inventory on that host; `chosen.remoteCli` is the `run`
+line.
 
-1. Reachability is already proven (step 4 of the shared cycle).
-2. List the REMOTE daemon's role providers:
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs providers --host-id <id>`
-3. Verify the route's role provider exists, is enabled AND healthy **on the
-   remote daemon** → else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
-4. List the REMOTE model inventory (the inventory is per-daemon — cache per
-   hostId, never by provider name):
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs models --host-id <id> --provider <role-provider>`
-   ⚠️ `list_models` via MCP would return the LOCAL inventory — only the
-   wrapper's answer counts for a remote host.
-5. Verify the exact model ID + thinking level against the REMOTE list (same
-   `BLOCKED: MODEL_UNAVAILABLE` / `THINKING_OPTION_UNAVAILABLE` rules, and the
-   same three-state reading of thinking as local step 5: unverifiable is not a
-   pass, but a model that reports no extended thinking is routable at
-   `thinking: off`).
-6. **One workspace for the whole job, ON THE REMOTE host.** A local workspace
-   ID means nothing there, and a `run` without `--workspace` would run in the
-   CONTROLLER's cwd, so the wrapper needs one workspace id, the same for every
-   agent of the job, Writer and Reviewer included:
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --title <t>`
-   `workspace-create` is "ensure": it lists what is open and REUSES the workspace
-   on that path (`reused: true`), creating one only when there is none, so a
-   second call never leaves a second one. It creates only local workspaces
-   (`--isolation worktree` is refused: `WORKSPACE_ISOLATION_REFUSED`; the old
-   `--disposition` flag is gone). The Reviewer makes its own detached
-   `git worktree add` inside this workspace, as on the local host.
-7. Create the agent on the remote daemon (background by default; add
-   `--wait-timeout <dur>` to wait for completion). The route is flags, not
-   message text — provider/model, thinking, mode, workspace and cluster all go
-   on the command, and none of them is repeated in the brief:
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
-   The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
-   `run` requires a `team.cluster` label the same way the local `create_agent`
-   does, and the wrapper fills it in from your own cluster (`selfCluster()`) when
-   `--label` does not set one. Pass it explicitly only for a remote seat in a
-   DIFFERENT cluster (rare; note why in the `ROUTING_DECISION`); a run with no
-   value even after the auto-fill is refused, naming `--label team.cluster=`.
-8. Verify the OBSERVED runtime identity on the remote daemon. The wrapper's
-   `run` command performs a bounded startup poll; use `--startup-timeout <dur>`
-   when the host needs a longer (still bounded) initialization window:
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>`
-   Missing `data.Model`/`data.Thinking` until the startup deadline is
-   `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`; do not archive. Only after both
-   fields appear, compare them with the request: a confirmed mismatch is
-   `BLOCKED: MODEL_RESOLUTION_MISMATCH`, then archive the wrongly-resolved agent
-   on that host
-   (`node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>`).
-9. Follow-ups / corrections:
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>`
-   (or `--prompt-file <file>` for long briefs). send is fire-and-forget by
-   default; `status` confirms completion. To interrupt a stuck agent:
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>`.
-10. Only then deliver/continue the initial task.
+1. One workspace for the whole job ON that host — `workspace-create --host-id
+   <id> --path <path-on-remote>` reuses the one open on that path
+   (`reused: true`) and makes only local ones.
+2. `run` = `chosen.remoteCli` with `--workspace <wks> --brief <file>`; route,
+   workspace and cluster are flags, never brief text. `team.cluster` is filled
+   from your own cluster. Record `agentRef: <host-id>/<agent-id>`.
+3. `status --agent-ref <ref>`: missing `data.Model`/`data.Thinking` by the
+   startup deadline (`--startup-timeout`) is `BLOCKED:
+   STARTUP_IDENTITY_UNAVAILABLE` — do not archive; a confirmed mismatch is
+   `BLOCKED: MODEL_RESOLUTION_MISMATCH` → `archive --agent-ref <ref>`.
+4. Follow-ups `send --agent-ref <ref> --prompt <text>` (or `--prompt-file`);
+   stop with `cancel`. Errors carry the daemon's reason: `HOST_ROUTE_UNAVAILABLE`
+   (down), `HOST_AUTH_FAILED` (wrong endpoint credential) — never retry elsewhere.
 
 Never: omit the model field, silently change models, fall back to another
 model or host without recording a routing decision, launch first and "hope",
 trust a model name written in a prompt instead of runtime config, or call MCP
-for a remote host.
+for a remote host without its `serverId`.
 
 ### Runtime family (mixed fleet)
 
