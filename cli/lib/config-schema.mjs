@@ -111,6 +111,11 @@ const MODEL_SHAPE_SENTENCE = RUNTIME_FAMILIES.map(
 const RUNTIME_OPTIONS = RUNTIME_FAMILIES.map((f) => ({
 	id: f,
 	label: RUNTIME_DESCRIPTORS[f].label,
+	// The roles this runtime may carry: a Peer-only family (no per-turn policy)
+	// is offered for "peer" and disabled for supervisor/lead, so the two halves
+	// can only ever compose a real role provider.
+	roles: [...RUNTIME_DESCRIPTORS[f].roles],
+	enforcement: RUNTIME_DESCRIPTORS[f].enforcement,
 }));
 
 /** Thinking levels keyed by role provider — the `optionsBy` map for `thinking`. */

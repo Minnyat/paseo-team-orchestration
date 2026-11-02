@@ -99,6 +99,8 @@ paseo-team-orchestration/
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
 │   ├── pi-models-sync.mjs          # rebuilds ~/.pi/agent/models.json from a probed endpoint
 │   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host by HOST_ID (Lead REMOTE cycle)
+│   ├── runtime-providers.mjs       # provider entries for Peer-only runtimes (opencode) + their static policy
+│   ├── lab/                        # multihost-lab.sh: N real Paseo daemons on one machine + fake ACP agent + scenario
 │   ├── reliability.mjs             # retry classification/backoff + stale predicates
 │   ├── team-communication.mjs      # parent-scoped Peer → Lead messaging
 │   ├── watchdog.mjs                # observation-only running-agent watchdog
@@ -141,7 +143,8 @@ paseo-team-orchestration/
     ├── claude-runtime.md           # Claude Code as the second runtime: hooks, MCP, install
     ├── downstream-doctrine-review.md   # what Paseo's own Foundation does that we don't
     ├── model-routing.md            # the 4 model-routing layers, verified commands
-    ├── multi-host.md               # N-host routing + cross-host test plan
+    ├── multi-host.md               # N-host routing, one-machine lab, cross-host test plan
+    ├── adding-a-runtime.md         # enforcement tiers, OpenCode per task, how to add codex/copilot
     ├── multi-supervisor-topology.md    # domains, clusters, and who may seat whom
     ├── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
     └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
@@ -260,6 +263,26 @@ Four rules make this safe to expose in a browser:
   consequence: `pteam uninstall --purge` deletes that ledger, so any seat
   providers still in `~/.paseo/config.json` become unowned and must be removed
   by hand.
+
+### More coding agents — `pteam runtimes`
+
+Besides pi and Claude, the pack seats **OpenCode** as a **Peer** (`opencode-peer`),
+routable per class, per alternate option or per job like any other provider.
+A runtime enters the pack only with enforcement: pi/Claude decide every tool
+call per turn (`full`); OpenCode runs under its OWN permission config generated
+by `pteam runtimes apply` (`static`: edits allowed; git commit/push/merge,
+`paseo`/`pteam`, web fetch and asking the Human denied for every brief — a
+brief granting commit/push to such a seat is refused as
+`RUNTIME_AUTHORITY_UNSUPPORTED`). Only a `full` runtime carries Supervisor or Lead.
+Antigravity (`agy`) cannot be a policed Paseo seat (Paseo refuses to extend it,
+and it runs only without permissions), so it is a jobs `cliTools` entry run by a
+policed Peer. Adding the next one (codex, copilot) is one descriptor entry plus
+a permission builder: [`docs/adding-a-runtime.md`](docs/adding-a-runtime.md).
+
+```bash
+pteam runtimes                 # every runtime: CLI found?, enforcement, roles, providers configured
+pteam runtimes apply [--family opencode] [--dry-run]   # then: paseo daemon restart
+```
 
 Seats are deliberately **not** routable: `routing`/`cluster` still accept only
 the six durable role providers, so a seat takes whatever model its creator

@@ -140,6 +140,57 @@ clone/fetch tới đúng SHA.
 - **Endpoint env mất** → strict preflight FAIL (warn trong non-strict);
   routing tới host đó là BLOCKED, không suy đoán endpoint từ lịch sử.
 
+## Lab nhiều máy trên MỘT máy (tự động)
+
+`scripts/lab/multihost-lab.sh` dựng N "máy" Paseo thật trên một host. Mỗi máy
+có `HOME` riêng (nghĩa là `~/.paseo`, `~/.paseo-team-orchestration`, repo
+`projects/demo` riêng) và daemon riêng trên một cổng TCP. Máy đầu là
+controller (`connection.type: local`), các máy còn lại là remote với endpoint
+trong `PASEO_LAB_<HOST>`. Role provider ở lab `extends: "acp"` và trỏ tới
+`scripts/lab/fake-acp-agent.mjs`, một ACP agent giả. Nhờ vậy agent thật sự
+được tạo, chạy turn, inspect, stop, archive trên đúng daemon đích mà không cần
+API key. Mỗi host được gán một runtime family khác nhau (lab-b: claude,
+lab-c: opencode).
+
+```bash
+npm i -g @getpaseo/cli
+scripts/lab/multihost-lab.sh up            # [--hosts a,b,c] [--base-port 6801] [--root DIR]
+scripts/lab/multihost-lab.sh test          # 31 check, exit 1 nếu có FAIL
+eval "$(scripts/lab/multihost-lab.sh env)" # tự đóng vai controller, chạy tay remote-paseo.mjs
+scripts/lab/multihost-lab.sh down
+```
+
+Scenario `scripts/lab/multihost-scenario.mjs` chỉ gọi tool đã ship
+(`remote-paseo.mjs`, `model-routing.mjs`, `preflight.mjs`) và phủ:
+
+- cluster file validate;
+- health / providers / models theo đúng inventory của từng host;
+- `preflight --host-id`;
+- nhiều project trên một host: hai workspace, `workspace-create` dùng lại
+  workspace có sẵn;
+- Peer chạy song song trên hai host, mỗi host dùng route riêng của nó, và turn
+  chạy đúng daemon đó (`LAB_ACK host=...`);
+- không lẫn agent giữa các host;
+- send / cancel / archive theo `AGENT_REF`;
+- các lỗi phải bắt được: thiếu endpoint env, host lạ, host local bị từ chối,
+  host chết thì báo `HOST_ROUTE_UNAVAILABLE` và không rơi sang host khác,
+  host trở lại sau restart, daemon từ chối thì trả nguyên lý do của daemon.
+
+Lab **không** thay thế được: mạng/TLS/password thật giữa hai máy, model thật,
+và chuỗi Engineer → push → Reviewer clone đúng SHA (vẫn là test tay ở mục dưới).
+
+### Lỗi do lab tìm ra và đã sửa
+
+- Paseo 0.14 trả lỗi `--json` dưới dạng `{"error":{code,message}}` trên
+  **stderr**. `remote-paseo.mjs` trước đây chỉ trả "Command failed: paseo
+  …", làm mất lý do thật. Giờ envelope có thêm `paseoError: {code, message,
+  details}`, và `message` là lý do của daemon (endpoint vẫn được redact).
+- Host chết (`DAEMON_UNREACHABLE`) trước đây ra `CLI_ERROR` chung chung. Giờ
+  nó ra `HOST_ROUTE_UNAVAILABLE`, đúng mã mà mục Failure & recovery bảo Lead
+  dùng. Lỗi daemon từ chối (agent không tồn tại, mode sai) vẫn là `CLI_ERROR`.
+- Redact thêm `password=…` và `#offer=…`. Lý do: thông báo lỗi của daemon có
+  thể in endpoint đã chuẩn hoá, không còn khớp từng byte với giá trị trong env.
+
 ## Cross-host test plan (MANUAL — cần máy thứ hai)
 
 Trạng thái (2026-08): **live remote preflight đã chạy qua relay offer**

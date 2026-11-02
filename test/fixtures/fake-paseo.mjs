@@ -18,6 +18,22 @@ const shown = [...argv];
 	}
 }
 
+// Paseo >= 0.14 answers a failed --json command with {"error":{...}} on
+// STDERR. FAKE_PASEO_JSON_ERROR=<CODE> reproduces that, echoing the endpoint
+// (normalized, with its password) the way DAEMON_UNREACHABLE really does.
+if (process.env.FAKE_PASEO_JSON_ERROR) {
+	const hostIdx = argv.indexOf("--host");
+	const endpoint = hostIdx >= 0 ? argv[hostIdx + 1] : "?";
+	console.error(JSON.stringify({
+		error: {
+			code: process.env.FAKE_PASEO_JSON_ERROR,
+			message: `fake failure at ${endpoint} (also as tcp://x:1?password=hunter2&ssl=true)`,
+			details: "fake details",
+		},
+	}, null, 2));
+	process.exit(1);
+}
+
 if (argv.includes("--fail")) {
 	// Simulate a paseo CLI that leaks the endpoint into its own stderr — the
 	// wrapper must redact it from the error it surfaces.

@@ -1633,9 +1633,22 @@ function roleProviderControl(field, path) {
 
 	const note = el("p", { class: "cfg-hint cfg-roleprovider-note hidden" });
 
+	// A runtime option without `roles` (an older schema) carries every role.
+	const carries = (rt, role) => !Array.isArray(rt.roles) || rt.roles.includes(role);
+	const paintRuntimeOptions = () => {
+		for (const option of runtimeSel.options) {
+			const rt = runtimes.find((candidate) => candidate.id === option.value);
+			if (!rt) continue;
+			const ok = !roleSel.value || carries(rt, roleSel.value);
+			option.disabled = !ok;
+			option.textContent = ok ? rt.label : `${rt.label} (chỉ ${rt.roles.map(roleLabel).join("/")})`;
+		}
+	};
+
 	const parse = (value) => {
 		for (const rt of runtimes) {
 			for (const role of roles) {
+				if (!carries(rt, role)) continue;
 				if (value === `${rt.id}-${role}`) return { runtime: rt.id, role };
 			}
 		}
@@ -1654,11 +1667,18 @@ function roleProviderControl(field, path) {
 		const { runtime, role } = parse(String(getPath(configState.doc, path) ?? ""));
 		roleSel.value = role;
 		runtimeSel.value = runtime;
+		paintRuntimeOptions();
 		paintNote();
 	};
 
 	const commit = () => {
+		paintRuntimeOptions();
 		const role = roleSel.value;
+		const rt = runtimes.find((candidate) => candidate.id === runtimeSel.value);
+		// A role the chosen runtime cannot carry (switching to "lead" while a
+		// Peer-only runtime is picked) clears the runtime half instead of storing
+		// a provider name that does not exist.
+		if (rt && role && !carries(rt, role)) runtimeSel.value = "";
 		const runtime = runtimeSel.value;
 		if (role && runtime) setPath(configState.doc, path, `${runtime}-${role}`);
 		else deletePath(configState.doc, path);

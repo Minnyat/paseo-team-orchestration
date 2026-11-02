@@ -52,11 +52,18 @@ import {
 	baseRole,
 	SEAT_CAPABILITIES,
 } from "../scripts/seat-profiles.mjs";
+import {
+	describeRuntimes,
+	generatedFamilies,
+	materializeRuntimeProviders,
+	runtimeLedgerPath,
+} from "../scripts/runtime-providers.mjs";
 import { runPaseoJson, runPaseoText, mapWithConcurrency, refreshProviderSnapshot, PaseoError } from "./lib/paseo-bridge.mjs";
 import { describeProtocolState, protocolState } from "./lib/workspace-protocol.mjs";
 import {
 	ROLE_PROVIDERS,
 	RUNTIME_FAMILIES,
+	runtimeDescriptor,
 	PROVIDER_OK_STATUSES,
 	buildProviderInventory,
 	loadLocalRouteTable,
@@ -251,6 +258,10 @@ async function discoverModels(options = {}) {
 		const members = ROLE_PROVIDERS.filter((name) => providerFamily(name) === family);
 		const representative = members.find((name) => healthy.has(name));
 		if (representative === undefined) {
+			// pi and Claude are the pack's own runtimes: missing one is worth
+			// saying. A Peer-only runtime (opencode, agy) is opt-in — a host that
+			// never ran `pteam runtimes apply` has simply not chosen it.
+			if (runtimeDescriptor(family)?.enforcement !== "full") continue;
 			degraded.push({
 				step: `family ${family}`,
 				code: "NO_HEALTHY_ROLE_PROVIDER",
@@ -1732,6 +1743,100 @@ function dispatchSeats(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// runtimes — coding agents the pack can seat (scripts/runtime-providers.mjs)
+// ---------------------------------------------------------------------------
+
+function cliVersionOf(command) {
+	const r = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 10000, shell: process.platform === "win32" });
+	if (r.status !== 0) return null;
+	return String(r.stdout || r.stderr).trim().split("\n")[0] || "present";
+}
+
+function readRuntimeLedger() {
+	const ledger = cw.readJsonOrNull(runtimeLedgerPath(cw.teamConfigDir()));
+	return Array.isArray(ledger?.providers) ? ledger.providers : [];
+}
+
+function cmdRuntimesList(rest = []) {
+	rejectUnknownFlags(rest, []);
+	const config = cw.readJsonOrNull(cw.paseoConfigPath());
+	json({
+		ok: true,
+		configPath: cw.paseoConfigPath(),
+		runtimes: describeRuntimes({
+			installedCli: cliVersionOf,
+			configuredProviders: config?.agents?.providers ?? {},
+		}),
+	});
+}
+
+/** `--family a --family b` (or none = every generated family). */
+function familiesFrom(rest) {
+	const out = [];
+	for (let i = 0; i < rest.length; i++) {
+		if (rest[i] !== "--family") continue;
+		const value = rest[i + 1];
+		if (value === undefined || value.startsWith("--")) fail("--family requires a value");
+		if (!generatedFamilies().includes(value)) {
+			fail(`--family must be one of ${generatedFamilies().join(", ")} (got '${value}'; pi/claude have their own installer)`);
+		}
+		out.push(value);
+	}
+	return out;
+}
+
+/**
+ * Merge the Peer-only runtime providers into ~/.paseo/config.json. Same
+ * ownership rule as `seats apply` (applySeatsToPaseoConfig with a separate
+ * ledger): a name this tool did not create is reported as skipped, never
+ * overwritten; with --family, providers of the other generated families this
+ * tool owns are kept, not removed.
+ */
+function cmdRuntimesApply(rest = []) {
+	rejectUnknownFlags(rest, ["--dry-run", "--family"]);
+	const dryRun = flag(rest, "--dry-run");
+	const families = familiesFrom(rest);
+	const ledger = readRuntimeLedger();
+	const promptsDir = cw.promptsDir();
+	const generated = {
+		// Keep what this tool already owns for the families not asked about now.
+		...(families.length > 0
+			? materializeRuntimeProviders({ families: generatedFamilies().filter((f) => !families.includes(f) && ledger.some((n) => n.startsWith(`${f}-`))), promptsDir })
+			: {}),
+		...materializeRuntimeProviders({ families, promptsDir }),
+	};
+	const configPath = cw.paseoConfigPath();
+	const result = applySeatsToPaseoConfig(cw.readJsonOrNull(configPath), generated, ledger);
+	if (!dryRun) {
+		cw.atomicWriteJson(configPath, JSON.stringify(result.config));
+		cw.atomicWriteJson(
+			runtimeLedgerPath(cw.teamConfigDir()),
+			JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), providers: result.ledger }),
+		);
+	}
+	json({
+		ok: true,
+		dryRun,
+		configPath,
+		created: result.created,
+		updated: result.updated,
+		removed: result.removed,
+		skipped: result.skipped,
+		providers: generated,
+		note: dryRun
+			? "Chưa ghi gì. Bỏ --dry-run để áp dụng."
+			: "Đã ghi provider. Chạy 'paseo daemon restart' (hoặc 'paseo reload') để daemon nạp lại, rồi route một class tới <family>-peer (pteam routing set|add-option).",
+	});
+}
+
+function dispatchRuntimes(argv) {
+	const [sub, ...rest] = argv;
+	if (sub === "list" || sub === undefined) return cmdRuntimesList(rest);
+	if (sub === "apply") return cmdRuntimesApply(rest);
+	fail(`runtimes: unknown subcommand '${sub}' (expected: list, apply)`, 2);
+}
+
+// ---------------------------------------------------------------------------
 
 function helpText() {
 	return `pteam ${su.currentVersion()} — role pack CLI (Paseo + Pi)   (alias: paseo-team)
@@ -1762,6 +1867,9 @@ usage:
                                            (SUPERVISOR_GOVERNANCE | LEAD_RECOVERY only)
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
+  pteam runtimes [list]                    (every coding agent the pack can seat: CLI present, enforcement tier, roles, providers configured)
+  pteam runtimes apply [--family <f>]... [--dry-run]
+                                           (write the Peer-only runtime providers, e.g. opencode-peer, into ~/.paseo/config.json)
   pteam jobs list [--all]                  (job presets a Lead may use NOW: switched-off jobs/executors/tools are left out and named; --all shows everything)
   pteam jobs show <id> [--all]             (one job preset, same shape; a switched-off job is JOB_INACTIVE)
   pteam jobs resolve <id>                  (reload right before seating: the exact create_agent arguments + labels for each executor usable NOW, CLI commands, skipped steps)
@@ -1856,6 +1964,7 @@ async function main() {
 		case "permits": return dispatchPermits(argv);
 		case "models": return cmdModels(argv);
 		case "seats": return dispatchSeats(argv);
+		case "runtimes": return dispatchRuntimes(argv);
 		case "routing": return dispatchRouting(argv);
 		case "jobs": return dispatchJobs(argv);
 		case "cost": return cmdCost(argv);

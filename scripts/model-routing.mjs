@@ -84,6 +84,8 @@ export const ROUTE_ENFORCE_ENV = "PASEO_TEAM_ROUTE_ENFORCE";
  * inside pi's runtime; the cross-check test locks the families and the
  * model-shape facts the two share.
  */
+export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
+
 export const RUNTIME_DESCRIPTORS = Object.freeze({
 	pi: Object.freeze({
 		family: "pi",
@@ -91,6 +93,27 @@ export const RUNTIME_DESCRIPTORS = Object.freeze({
 		label: "Pi",
 		/** The CLI whose presence means this runtime is installed on a host. */
 		cli: "pi",
+		/** The built-in Paseo provider a role provider of this family `extends`. */
+		paseoBase: "pi",
+		/**
+		 * How the pack's role invariants reach a seat of this family — the fact
+		 * that decides which roles the family may carry at all:
+		 *   "full"   an in-process adapter re-decides every tool call per turn
+		 *            from the current brief (pi extension, Claude hooks);
+		 *   "static" the runtime's OWN permission config, generated once per
+		 *            role provider (scripts/runtime-providers.mjs) — fixed denies,
+		 *            nothing brief-scoped.
+		 * There is no third tier: a coding agent with no permission system of
+		 * its own (agy runs only with --dangerously-skip-permissions) does not
+		 * become a seat; a policed Peer runs it as a jobs `cli` tool.
+		 */
+		enforcement: "full",
+		/**
+		 * Roles this family may carry. Supervisor and Lead hold authority the
+		 * policy core must enforce, so only a "full" family carries them; a
+		 * family without per-turn enforcement is a Peer and nothing else.
+		 */
+		roles: TEAM_ROLES,
 		/**
 		 * Thinking levels for this family. `minimal` exists only on pi and
 		 * `ultracode` only on Claude, so a single union would silently accept a
@@ -126,6 +149,7 @@ export const RUNTIME_DESCRIPTORS = Object.freeze({
 			hintPrefix: "<pi-provider>/",
 			/** Shorthand for the whole reference shape, for hints. */
 			hint: "<pi-provider>/<model-id>",
+			example: "<pi-provider>/<model-id>",
 			/**
 			 * Minimum segment count of a full route string
 			 * "<family>-<role>/<pi-provider>/<model-id>". Rejecting a bare
@@ -139,6 +163,9 @@ export const RUNTIME_DESCRIPTORS = Object.freeze({
 		family: "claude",
 		label: "Claude",
 		cli: "claude",
+		paseoBase: "claude",
+		enforcement: "full",
+		roles: TEAM_ROLES,
 		thinkingLevels: Object.freeze([
 			"off",
 			"low",
@@ -155,16 +182,62 @@ export const RUNTIME_DESCRIPTORS = Object.freeze({
 			carriesProvider: false,
 			hintPrefix: "",
 			hint: "id trần (claude-opus-5)",
+			/** A bare id of this family, for "e.g." in errors. */
+			example: "claude-opus-5",
 			/** Route string is "<family>-<role>/<model-id>": two segments. */
 			minRouteSegments: 2,
 		}),
 	}),
+	// ----- Peer-only families: no per-turn policy adapter -------------------
+	// Adding a coding agent Paseo already drives is ONE entry here (plus its
+	// mirror in policy-core.ts, test-locked): routing, jobs, the create_agent
+	// gate, remote-paseo, preflight, the WebUI and `pteam runtimes apply` all
+	// read this table. See docs/adding-a-runtime.md.
+	opencode: Object.freeze({
+		family: "opencode",
+		label: "OpenCode",
+		cli: "opencode",
+		paseoBase: "opencode",
+		/**
+		 * OpenCode enforces its own `permission` config. runtime-providers.mjs
+		 * generates one per role provider (git commit/push/merge, force flags and
+		 * the paseo CLI denied; role prompt via `instructions`) and Paseo merges
+		 * it into OPENCODE_CONFIG_CONTENT next to its bridge plugin.
+		 */
+		enforcement: "static",
+		roles: Object.freeze(["peer"]),
+		/** OpenCode publishes thinking as per-model variants; verify with
+		 * `paseo provider models opencode-peer --json`. */
+		// Measured on opencode 1.19.5 via Paseo 0.14 (200 models): option ids are
+		// default, none, minimal, low, medium, high, xhigh, max — not pi's or
+		// Claude's set. "off" stays for a model that publishes no options.
+		thinkingLevels: Object.freeze(["off", "default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+		/** Paseo exposes build/plan agents as modes; the pack passes none and
+		 * lets the permission config decide, so no Claude mode vocabulary leaks. */
+		hasPermissionModes: false,
+		model: Object.freeze({
+			/** "<provider>/<model-id>", e.g. "anthropic/claude-sonnet-4-5". */
+			carriesProvider: true,
+			hintPrefix: "<provider>/",
+			hint: "<provider>/<model-id>",
+			example: "anthropic/<model-id>",
+			minRouteSegments: 3,
+		}),
+	}),
 });
+
+/**
+ * Built-in Paseo providers a custom provider may `extends` (measured: the
+ * @getpaseo/server 0.14 config schema accepts exactly these; plugin providers
+ * such as "antigravity" are refused with "extends unknown provider"). A
+ * runtime whose Paseo provider is not here cannot carry a role provider at
+ * all — use it as a jobs `cli` tool run by a policed Peer instead.
+ */
+export const PASEO_EXTENDABLE_BASES = Object.freeze(["claude", "codex", "copilot", "opencode", "pi", "omp", "acp"]);
 
 export const RUNTIME_FAMILIES = Object.freeze(
 	Object.keys(RUNTIME_DESCRIPTORS),
 );
-export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 
 /**
  * The descriptor for a family, or null when the name is not a known runtime.
@@ -209,7 +282,7 @@ export const NO_THINKING_LEVEL = "off";
  */
 export const ROLE_PROVIDERS = Object.freeze(
 	RUNTIME_FAMILIES.flatMap((family) =>
-		TEAM_ROLES.map((role) => `${family}-${role}`),
+		RUNTIME_DESCRIPTORS[family].roles.map((role) => `${family}-${role}`),
 	),
 );
 
@@ -217,7 +290,7 @@ export const ROLE_PROVIDERS = Object.freeze(
 export function providerFamily(paseoProvider) {
 	const name = String(paseoProvider ?? "").trim();
 	const family = RUNTIME_FAMILIES.find((candidate) =>
-		TEAM_ROLES.some((role) => name === `${candidate}-${role}`),
+		RUNTIME_DESCRIPTORS[candidate].roles.some((role) => name === `${candidate}-${role}`),
 	);
 	return family ?? null;
 }
@@ -247,7 +320,7 @@ export function validateModelForFamily(family, model, fail, context = {}) {
 	if (!descriptor.model.carriesProvider) {
 		if (trimmed.includes("/")) {
 			throw fail(
-				`model "${trimmed}" must be a bare ${descriptor.label} model id (no "/"), e.g. claude-opus-5`,
+				`model "${trimmed}" must be a bare ${descriptor.label} model id (no "/"), e.g. ${descriptor.model.example}`,
 				{ ...context, model: trimmed },
 			);
 		}

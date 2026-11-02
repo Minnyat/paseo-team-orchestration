@@ -102,9 +102,61 @@ export const REMOTE_ERROR_CODES = Object.freeze([
 	"ENDPOINT_ENV_MISSING",
 	"ENDPOINT_UNSAFE",
 	"CLI_ERROR",
+	"HOST_ROUTE_UNAVAILABLE",
 	"PROMPT_TOO_LONG",
 	"WORKSPACE_ISOLATION_REFUSED",
 ]);
+
+/**
+ * Paseo (>= 0.14) reports a failed `--json` command as
+ * `{"error":{"code","message","details"}}` on STDERR and exits non-zero. The
+ * wrapper used to answer every such failure with execFileSync's own first line
+ * ("Command failed: paseo run ..."), which names the argv and drops the reason —
+ * a Lead then cannot tell "invalid mode" from "agent not found" from "daemon
+ * down". This reads that object back (already redacted by runCli) from stderr,
+ * then stdout; null when neither carries one.
+ */
+export function parsePaseoError(failure) {
+	for (const stream of [failure?.stderr, failure?.stdout]) {
+		const text = String(stream ?? "").trim();
+		if (!text) continue;
+		const start = text.indexOf("{");
+		if (start < 0) continue;
+		try {
+			const parsed = JSON.parse(text.slice(start));
+			const error = parsed?.error;
+			if (error && typeof error === "object" && typeof error.code === "string") {
+				const out = { code: error.code, message: String(error.message ?? "") };
+				if (typeof error.details === "string" && error.details) out.details = error.details;
+				return out;
+			}
+		} catch {}
+	}
+	return null;
+}
+
+/**
+ * Daemon-side codes meaning "this HOST cannot be reached", as opposed to "the
+ * host answered and refused". docs/multi-host.md tells the Lead to answer the
+ * first with HOST_ROUTE_UNAVAILABLE and never to fall back to another host, so
+ * the wrapper names it that way instead of a generic CLI_ERROR.
+ */
+const UNREACHABLE_PASEO_CODES = new Set(["DAEMON_UNREACHABLE", "DAEMON_NOT_RUNNING"]);
+
+/** Fill code/message/paseoError on a failure payload from a runCli result. */
+function describeCliFailure(payload, result, fallbackMessage) {
+	const paseoError = parsePaseoError(result);
+	payload.ok = false;
+	if (paseoError) {
+		payload.paseoError = paseoError;
+		payload.code = UNREACHABLE_PASEO_CODES.has(paseoError.code) ? "HOST_ROUTE_UNAVAILABLE" : "CLI_ERROR";
+		payload.message = `${paseoError.code}: ${paseoError.message}`;
+	} else {
+		payload.code = "CLI_ERROR";
+		payload.message = fallbackMessage;
+	}
+	return payload;
+}
 
 export class RemoteError extends Error {
 	/**
@@ -856,10 +908,16 @@ export function resolvePaseoExec() {
  */
 export function runCli(argv, { timeoutMs = 120000, secret = "", maxAttempts = 3 } = {}) {
 	const [bin, ...prefix] = resolvePaseoExec();
+	// Exact-value redaction first; then credential-shaped fragments, because the
+	// daemon's own error text can echo a NORMALIZED endpoint (reordered query,
+	// decoded offer) that no longer matches the env value byte for byte.
 	const redact = (text) =>
-		secret
+		(secret
 			? String(text).split(secret).join("<endpoint-value-redacted>")
-			: String(text);
+			: String(text)
+		)
+			.replace(/(password=)[^&\s"']+/gi, "$1<redacted>")
+			.replace(/(#offer=)[^\s"']+/gi, "$1<redacted>");
 	for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt++) {
 	try {
 		const stdout = execFileSync(bin, [...prefix, ...argv], {
@@ -1155,10 +1213,8 @@ async function main() {
 		// A listing that FAILED is not "there is none": creating on top of a
 		// workspace that may exist is the very duplication this step prevents.
 		if (!listing.ok) {
-			const failed = basePayload(command, hostInfo);
-			failed.ok = false;
-			failed.code = "CLI_ERROR";
-			failed.message = `could not list the workspaces already open on host "${hostInfo.hostId}", so whether one exists for ${parsed.path} is unknown — not creating a second one blind (${listing.error || `paseo exit ${listing.status}`})`;
+			const failed = describeCliFailure(basePayload(command, hostInfo), listing, "");
+			failed.message = `could not list the workspaces already open on host "${hostInfo.hostId}", so whether one exists for ${parsed.path} is unknown — not creating a second one blind (${failed.message || listing.error || `paseo exit ${listing.status}`})`;
 			emit(failed, 2);
 		}
 		const existing = findWorkspaceByPath(parseWorkspaceList(listing.stdout), parsed.path);
@@ -1211,11 +1267,11 @@ async function main() {
 	});
 	const payload = basePayload(command, hostInfo);
 	if (!result.ok) {
-		payload.ok = false;
-		payload.code = "CLI_ERROR";
-		payload.message =
-			result.error ||
-			`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
+		describeCliFailure(
+			payload,
+			result,
+			result.error || `paseo ${command} failed with exit ${result.status} (stderr redacted)`,
+		);
 		if (result.stdout) payload.data = result.stdout;
 		emit(payload, 2);
 	}

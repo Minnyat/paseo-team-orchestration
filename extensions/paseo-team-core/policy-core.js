@@ -3598,18 +3598,31 @@ export function forkModelBlockReason({ expectedModel, actualModel, expectedThink
     }
     return null;
 }
+const ALL_ROLES = ["supervisor", "lead", "peer"];
 export const RUNTIME_DESCRIPTORS = {
     pi: {
         family: "pi",
         minRouteSegments: 3,
         modelHintPrefix: "<pi-provider>/",
         hasPermissionModes: false,
+        enforcement: "full",
+        roles: ALL_ROLES,
     },
     claude: {
         family: "claude",
         minRouteSegments: 2,
         modelHintPrefix: "",
         hasPermissionModes: true,
+        enforcement: "full",
+        roles: ALL_ROLES,
+    },
+    opencode: {
+        family: "opencode",
+        minRouteSegments: 3,
+        modelHintPrefix: "<provider>/",
+        hasPermissionModes: false,
+        enforcement: "static",
+        roles: ["peer"],
     },
 };
 export const RUNTIME_FAMILIES = Object.keys(RUNTIME_DESCRIPTORS);
@@ -3635,7 +3648,7 @@ export function familyHasPermissionModes(family) {
     return runtimeDescriptor(family)?.hasPermissionModes === true;
 }
 /** Every role provider name the pack owns, e.g. "pi-peer", "claude-lead". */
-export const ROLE_PROVIDERS = RUNTIME_FAMILIES.flatMap((family) => ROLES.map((r) => `${family}-${r}`));
+export const ROLE_PROVIDERS = RUNTIME_FAMILIES.flatMap((family) => RUNTIME_DESCRIPTORS[family].roles.map((r) => `${family}-${r}`));
 /** Tail of a seat provider name — mirrors SEAT_ID_RE in scripts/seat-profiles.mjs. */
 const SEAT_TAIL_RE = /^[a-z][a-z0-9-]{1,23}$/;
 /**
@@ -3656,7 +3669,9 @@ export function parseRoleProvider(name) {
         if (!head.startsWith(prefix))
             continue;
         const rest = head.slice(prefix.length);
-        for (const role of ROLES) {
+        // Only the roles the family may carry: "opencode-lead" is not a role
+        // provider, so it parses to null and every gate refuses it as unknown.
+        for (const role of RUNTIME_DESCRIPTORS[family].roles) {
             if (rest === role)
                 return { family, role, seat: null };
             if (!rest.startsWith(`${role}-`))
@@ -4037,6 +4052,9 @@ function declaredClassReason(declared, allowed, who) {
 export function createAgentRouteBlockReason({ role, args, routeTable, env = process.env, }) {
     if (role !== "lead" && role !== "supervisor")
         return null;
+    const unsupported = staticRuntimeAuthorityBlockReason(args);
+    if (unsupported)
+        return unsupported;
     if (routeEnforcement(env) === "off")
         return null;
     if (typeof args !== "object" || args === null) {
@@ -4101,6 +4119,31 @@ export function createAgentRouteBlockReason({ role, args, routeTable, env = proc
         return `BLOCKED: ROUTE_THINKING_MISMATCH — a top-level "thinking" (legacy) overrides settings.thinkingOptionId in Paseo's top-level create_agent, and it is ${JSON.stringify(rec.thinking)}, not the route's "${chosen.thinking}". Drop it; settings.thinkingOptionId is the only place thinking goes.`;
     }
     return null;
+}
+/**
+ * A seat whose runtime enforces a STATIC policy (opencode: its own permission
+ * config, generated once per provider) can never be granted commit or push by
+ * a brief — that config denies both for every task. Seating one with a brief
+ * that grants them would leave the Lead waiting on a SHA that cannot appear, so
+ * the create_agent is refused up front, naming what to do instead. Independent
+ * of PASEO_TEAM_ROUTE_ENFORCE: this is what the seat can do, not which model.
+ */
+export function staticRuntimeAuthorityBlockReason(args) {
+    if (typeof args !== "object" || args === null)
+        return null;
+    const rec = args;
+    const target = parseRoleProvider(typeof rec.provider === "string" ? rec.provider : "");
+    if (!target || runtimeDescriptor(target.family)?.enforcement !== "static")
+        return null;
+    const prompt = typeof rec.initialPrompt === "string" ? rec.initialPrompt : "";
+    const authority = peerAuthority(parseTaskBrief(prompt));
+    const granted = [
+        ...(authority.commit ? ["COMMIT_AUTHORITY"] : []),
+        ...(authority.pushTaskBranch ? ["PUSH_TASK_BRANCH_AUTHORITY"] : []),
+    ];
+    if (granted.length === 0)
+        return null;
+    return `BLOCKED: RUNTIME_AUTHORITY_UNSUPPORTED — ${target.family}-${target.role} runs under a static permission config that denies git commit/push for every brief, so ${granted.join(" + ")}: allowed cannot take effect. Either set them denied and have the work committed by a pi/Claude Peer after review (hand off a workspace snapshot), or route this task to a pi/Claude Peer.`;
 }
 /** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
 export function createAgentRouteBlockReasonForInput(role, input, routeTable, env = process.env) {
@@ -5631,14 +5674,18 @@ export function extraTools(role, family, env = process.env) {
 export function extraToolDiagnostics(env = process.env) {
     const roles = ["peer", "lead", "supervisor"];
     const names = configuredExtraToolNames(env);
-    const accepted = Object.fromEntries(RUNTIME_FAMILIES.map((family) => [
+    // Extra tools are a grant THIS module enforces per turn, so only "full"
+    // families have an inventory to report; a static/none family never reads
+    // PASEO_TEAM_EXTRA_TOOLS at all.
+    const families = RUNTIME_FAMILIES.filter((family) => RUNTIME_DESCRIPTORS[family].enforcement === "full");
+    const accepted = Object.fromEntries(families.map((family) => [
         family,
         Object.fromEntries(roles.map((role) => [role, extraTools(role, family, env)])),
     ]));
     const dropped = [];
     for (const tool of names) {
         const capability = extraToolCapability(tool);
-        for (const family of RUNTIME_FAMILIES) {
+        for (const family of families) {
             for (const role of roles) {
                 if (capability?.roles.includes(role) && capability.families.includes(family))
                     continue;

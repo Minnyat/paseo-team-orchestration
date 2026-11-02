@@ -26,6 +26,7 @@ import {
 	extractRuntimeIdentity,
 	findWorkspaceByPath,
 	parseWorkspaceList,
+	parsePaseoError,
 } from "../scripts/remote-paseo.mjs";
 import { loadClusterConfig } from "../scripts/model-routing.mjs";
 
@@ -1441,3 +1442,32 @@ assert.deepEqual(
 // ---------------------------------------------------------------------------
 
 console.log("remote-paseo.test.mjs: all tests passed");
+
+{
+	const t = "parsePaseoError reads Paseo's {error:{code,message,details}} from stderr, then stdout";
+	const body = JSON.stringify({ error: { code: "AGENT_NOT_FOUND", message: "Agent not found: x", details: "d" } }, null, 2);
+	assert.deepEqual(parsePaseoError({ stderr: body, stdout: "" }), { code: "AGENT_NOT_FOUND", message: "Agent not found: x", details: "d" }, t);
+	assert.deepEqual(parsePaseoError({ stderr: "noise", stdout: body })?.code, "AGENT_NOT_FOUND", t);
+	assert.equal(parsePaseoError({ stderr: "boom: plain text", stdout: "" }), null, `${t}: plain text is not an error object`);
+	assert.equal(parsePaseoError({ stderr: '{"error":"string"}' }), null, `${t}: code must be a string field`);
+}
+
+{
+	const t = "e2e: DAEMON_UNREACHABLE → HOST_ROUTE_UNAVAILABLE, reason surfaced, endpoint + password redacted";
+	const r = runWrapper(["health", "--host-id", "mac-review"], { extraEnv: { FAKE_PASEO_JSON_ERROR: "DAEMON_UNREACHABLE" } });
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.code, "HOST_ROUTE_UNAVAILABLE", t);
+	assert.equal(r.json.paseoError.code, "DAEMON_UNREACHABLE", t);
+	assert.match(r.json.message, /^DAEMON_UNREACHABLE: fake failure at <endpoint-value-redacted>/, t);
+	assert.ok(!r.stdout.includes(ENDPOINT), `${t}: endpoint leaked`);
+	assert.ok(!r.stdout.includes("hunter2"), `${t}: a normalized endpoint's password leaked`);
+}
+
+{
+	const t = "e2e: a daemon refusal stays CLI_ERROR but carries the daemon's code and message";
+	const r = runWrapper(["status", "--agent-ref", "mac-review/a1"], { extraEnv: { FAKE_PASEO_JSON_ERROR: "AGENT_NOT_FOUND" } });
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.code, "CLI_ERROR", t);
+	assert.equal(r.json.paseoError.code, "AGENT_NOT_FOUND", t);
+	assert.match(r.json.message, /^AGENT_NOT_FOUND: /, t);
+}

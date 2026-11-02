@@ -111,9 +111,11 @@ for (const section of ROUTING_SECTIONS) {
 		);
 		for (const rt of roleProvider.runtimes) {
 			assert.equal(rt.label, RUNTIME_DESCRIPTORS[rt.id].label, `${section}: runtime ${rt.id} carries its descriptor label`);
+			assert.deepEqual(rt.roles, [...RUNTIME_DESCRIPTORS[rt.id].roles], `${section}: runtime ${rt.id} offers exactly its descriptor roles`);
+			for (const role of rt.roles) assert.ok(roleProvider.roles.includes(role), `${section}: ${rt.id} role ${role} is a team role`);
 		}
 		const composed = roleProvider.runtimes
-			.flatMap((rt) => roleProvider.roles.map((role) => `${rt.id}-${role}`))
+			.flatMap((rt) => rt.roles.map((role) => `${rt.id}-${role}`))
 			.sort();
 		assert.deepEqual(
 			composed,
