@@ -372,6 +372,7 @@ export function claudeToolBlockReason(input) {
                 role,
                 args: input.toolInput,
                 selfWorkspaceId: input.selfWorkspaceId,
+                routeTable: input.routeTable,
             });
             if (paramsBlock)
                 return paramsBlock;

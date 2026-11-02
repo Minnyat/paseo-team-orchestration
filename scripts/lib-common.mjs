@@ -492,3 +492,32 @@ export function writeFileAtomic(absPath, content) {
 		throw error;
 	}
 }
+
+/**
+ * Paseo (>= 0.14) reports a failed `--json` command as
+ * `{"error":{"code","message","details"}}` on STDERR and exits non-zero. The
+ * wrapper used to answer every such failure with execFileSync's own first line
+ * ("Command failed: paseo run ..."), which names the argv and drops the reason —
+ * a Lead then cannot tell "invalid mode" from "agent not found" from "daemon
+ * down". This reads that object back (already redacted by runCli) from stderr,
+ * then stdout; null when neither carries one.
+ */
+export function parsePaseoError(failure) {
+	for (const stream of [failure?.stderr, failure?.stdout]) {
+		const text = String(stream ?? "").trim();
+		if (!text) continue;
+		const start = text.indexOf("{");
+		if (start < 0) continue;
+		try {
+			const parsed = JSON.parse(text.slice(start));
+			const error = parsed?.error;
+			if (error && typeof error === "object" && typeof error.code === "string") {
+				const out = { code: error.code, message: String(error.message ?? "") };
+				if (typeof error.details === "string" && error.details) out.details = error.details;
+				return out;
+			}
+		} catch {}
+	}
+	return null;
+}
+

@@ -486,6 +486,7 @@ export function claudeToolBlockReason(
 				role,
 				args: input.toolInput,
 				selfWorkspaceId: input.selfWorkspaceId,
+				routeTable: input.routeTable,
 			});
 			if (paramsBlock) return paramsBlock;
 			// Same route gate, same position (after the mode gate) as the Pi

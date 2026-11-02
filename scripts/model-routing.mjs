@@ -235,6 +235,9 @@ export const RUNTIME_DESCRIPTORS = Object.freeze({
  */
 export const PASEO_EXTENDABLE_BASES = Object.freeze(["claude", "codex", "copilot", "opencode", "pi", "omp", "acp"]);
 
+/** A Paseo daemon's server id as `paseo host ls` / list_hosts report it. */
+export const SERVER_ID_RE = /^srv_[A-Za-z0-9_-]{4,64}$/;
+
 export const RUNTIME_FAMILIES = Object.freeze(
 	Object.keys(RUNTIME_DESCRIPTORS),
 );
@@ -703,6 +706,16 @@ export function validateClusterConfig(data) {
 			}
 			validatedConnection.endpointEnv = connection.endpointEnv.trim();
 		}
+		// serverId: the Paseo server id of that host's daemon (`paseo host ls`
+		// on the controller; `pteam hosts sync` fills it in). It is how the
+		// create_agent gate maps an MCP call's `serverId` — Paseo 0.14 lets a
+		// Lead seat on a connected host through MCP — to THIS host's routes.
+		if (connection.serverId !== undefined) {
+			if (typeof connection.serverId !== "string" || !SERVER_ID_RE.test(connection.serverId)) {
+				throw failHost(`connection.serverId must look like a Paseo server id (srv_...), got ${JSON.stringify(connection.serverId)}`);
+			}
+			validatedConnection.serverId = connection.serverId;
+		}
 		// required
 		if (typeof raw.required !== "boolean") {
 			throw failHost(
@@ -758,6 +771,16 @@ export function validateClusterConfig(data) {
 			routes: validated.routes,
 			...(validated.disabledModels ? { disabledModels: validated.disabledModels } : {}),
 		};
+	}
+	// Two hosts claiming one daemon would let the gate pick either host's routes.
+	const seen = new Map();
+	for (const [hostId, host] of Object.entries(hosts)) {
+		const id = host.connection.serverId;
+		if (!id) continue;
+		if (seen.has(id)) {
+			throw fail(`hosts "${seen.get(id)}" and "${hostId}" both declare connection.serverId ${id} — one daemon is one host`, { serverId: id });
+		}
+		seen.set(id, hostId);
 	}
 	return { version: 1, hosts };
 }
@@ -970,19 +993,37 @@ function withPath(path, error) {
 export function gateRouteTable(options = {}) {
 	const table = loadLocalRouteTable(options);
 	if (!table.ok) return table;
-	const { config: _config, ...rest } = table;
+	const { config, ...rest } = table;
 	// A route on a switched-off model carries `modelDisabled` — the gate refuses it
 	// with its own code. `enabled` is NOT touched: that is the class's own switch
 	// (`routing enable|disable`), and the two must stay separately visible.
-	const mark = (option) =>
-		isModelDisabled(rest.disabledModels, option.paseoProvider, option.model) ? { ...option, modelDisabled: true } : option;
-	const routes = Object.fromEntries(
-		Object.entries(rest.routes).map(([modelClass, route]) => [
-			modelClass,
-			{ ...mark(route), ...(route.alternates ? { alternates: route.alternates.map(mark) } : {}) },
-		]),
-	);
-	return { ...rest, routes };
+	const markAll = (routesIn, disabledModels) => {
+		const mark = (option) =>
+			isModelDisabled(disabledModels, option.paseoProvider, option.model) ? { ...option, modelDisabled: true } : option;
+		return Object.fromEntries(
+			Object.entries(routesIn).map(([modelClass, route]) => [
+				modelClass,
+				{ ...mark(route), ...(route.alternates ? { alternates: route.alternates.map(mark) } : {}) },
+			]),
+		);
+	};
+	const routes = markAll(rest.routes, rest.disabledModels);
+	// Every cluster host whose daemon is known by server id: the table an MCP
+	// create_agent carrying that `serverId` is held to (Paseo 0.14 fleet tools).
+	const serverHosts = {};
+	if (rest.source === "cluster" && config?.hosts) {
+		for (const [hostId, host] of Object.entries(config.hosts)) {
+			const serverId = host.connection.serverId;
+			if (!serverId) continue;
+			serverHosts[serverId] = {
+				hostId,
+				local: host.connection.type === "local",
+				routes: markAll(host.routes, host.disabledModels ?? []),
+				disabledModels: host.disabledModels ?? [],
+			};
+		}
+	}
+	return { ...rest, routes, serverHosts };
 }
 
 // ---------------------------------------------------------------------------

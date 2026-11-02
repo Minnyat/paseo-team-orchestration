@@ -59,7 +59,15 @@ export function gateTable(options = {}) {
 	try {
 		const doc = JSON.parse(readFileSync(path, "utf8"));
 		validateJobsConfig(doc);
-		return { ...table, jobs: gateJobSeats(doc, table) };
+		// Jobs are resolved per host: a job's class executor means THAT host's
+		// route for the class, so a remote seat is checked against its own.
+		const serverHosts = Object.fromEntries(
+			Object.entries(table.serverHosts ?? {}).map(([serverId, host]) => [
+				serverId,
+				{ ...host, jobs: gateJobSeats(doc, { ...table, hostId: host.hostId, routes: host.routes, disabledModels: host.disabledModels }) },
+			]),
+		);
+		return { ...table, serverHosts, jobs: gateJobSeats(doc, table) };
 	} catch (error) {
 		return { ...table, jobsProblem: `${path}: ${String(error?.message ?? error).replace(/^CONFIG_INVALID: /, "")}` };
 	}

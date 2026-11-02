@@ -69,10 +69,13 @@ import {
 	PASEO_CONVENTIONAL_ENTRIES,
 	importPolicyCore,
 	isEntrypoint,
+	parsePaseoError,
 	resolveCmdEntry as resolveCmdEntryFromShim,
 	resolvePaseoExec as resolvePaseoExecShared,
 } from "./lib-common.mjs";
 import { classifyRemoteFailure } from "./reliability.mjs";
+
+export { parsePaseoError };
 import {
 	ROLE_PROVIDERS,
 	THINKING_LEVELS_BY_FAMILY,
@@ -103,37 +106,10 @@ export const REMOTE_ERROR_CODES = Object.freeze([
 	"ENDPOINT_UNSAFE",
 	"CLI_ERROR",
 	"HOST_ROUTE_UNAVAILABLE",
+	"HOST_AUTH_FAILED",
 	"PROMPT_TOO_LONG",
 	"WORKSPACE_ISOLATION_REFUSED",
 ]);
-
-/**
- * Paseo (>= 0.14) reports a failed `--json` command as
- * `{"error":{"code","message","details"}}` on STDERR and exits non-zero. The
- * wrapper used to answer every such failure with execFileSync's own first line
- * ("Command failed: paseo run ..."), which names the argv and drops the reason —
- * a Lead then cannot tell "invalid mode" from "agent not found" from "daemon
- * down". This reads that object back (already redacted by runCli) from stderr,
- * then stdout; null when neither carries one.
- */
-export function parsePaseoError(failure) {
-	for (const stream of [failure?.stderr, failure?.stdout]) {
-		const text = String(stream ?? "").trim();
-		if (!text) continue;
-		const start = text.indexOf("{");
-		if (start < 0) continue;
-		try {
-			const parsed = JSON.parse(text.slice(start));
-			const error = parsed?.error;
-			if (error && typeof error === "object" && typeof error.code === "string") {
-				const out = { code: error.code, message: String(error.message ?? "") };
-				if (typeof error.details === "string" && error.details) out.details = error.details;
-				return out;
-			}
-		} catch {}
-	}
-	return null;
-}
 
 /**
  * Daemon-side codes meaning "this HOST cannot be reached", as opposed to "the
@@ -142,6 +118,13 @@ export function parsePaseoError(failure) {
  * the wrapper names it that way instead of a generic CLI_ERROR.
  */
 const UNREACHABLE_PASEO_CODES = new Set(["DAEMON_UNREACHABLE", "DAEMON_NOT_RUNNING"]);
+/**
+ * The host answered but refused the credential (measured on Paseo 0.14:
+ * AUTH_REQUIRED when the endpoint carries no password, AUTH_FAILED for a wrong
+ * one). Not "unreachable": the fix is the endpoint env value, not waiting for
+ * the daemon, so it gets its own code.
+ */
+const AUTH_PASEO_CODES = new Set(["AUTH_REQUIRED", "AUTH_FAILED"]);
 
 /** Fill code/message/paseoError on a failure payload from a runCli result. */
 function describeCliFailure(payload, result, fallbackMessage) {
@@ -149,7 +132,11 @@ function describeCliFailure(payload, result, fallbackMessage) {
 	payload.ok = false;
 	if (paseoError) {
 		payload.paseoError = paseoError;
-		payload.code = UNREACHABLE_PASEO_CODES.has(paseoError.code) ? "HOST_ROUTE_UNAVAILABLE" : "CLI_ERROR";
+		payload.code = UNREACHABLE_PASEO_CODES.has(paseoError.code)
+			? "HOST_ROUTE_UNAVAILABLE"
+			: AUTH_PASEO_CODES.has(paseoError.code)
+				? "HOST_AUTH_FAILED"
+				: "CLI_ERROR";
 		payload.message = `${paseoError.code}: ${paseoError.message}`;
 	} else {
 		payload.code = "CLI_ERROR";

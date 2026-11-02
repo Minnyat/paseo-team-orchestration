@@ -4576,6 +4576,48 @@ export interface JobGate {
 	seats: { index: number; paseoProvider: string; model: string; thinking: string; source: string }[];
 }
 
+/** One remote (or local) host's slice of the gate table, keyed by server id. */
+export interface ServerHostTable {
+	hostId: string;
+	local?: boolean;
+	routes: Record<string, RouteEntry | undefined>;
+	disabledModels?: string[];
+	jobs?: Record<string, JobGate>;
+}
+
+/**
+ * The table a create_agent is checked against: the local one, or — when the
+ * call names a `serverId` — that host's. A serverId the cluster file does not
+ * map is refused rather than checked against the local routes: that would
+ * approve a model for a daemon whose inventory and routes were never consulted.
+ */
+export function routeTableForServer(
+	routeTable: RouteTable | null | undefined,
+	serverId: unknown,
+): { table: RouteTable | null | undefined } | { reason: string } {
+	if (serverId === undefined) return { table: routeTable };
+	if (typeof serverId !== "string" || serverId.trim() === "") {
+		return { reason: `BLOCKED: ROUTE_HOST_UNKNOWN — serverId must be a non-empty server id from list_hosts (got ${JSON.stringify(serverId)}).` };
+	}
+	if (!routeTable || !routeTable.ok) return { table: routeTable };
+	const host = routeTable.serverHosts?.[serverId];
+	if (!host) {
+		const known = Object.entries(routeTable.serverHosts ?? {}).map(([id, h]) => `${h.hostId}=${id}`);
+		return {
+			reason: `BLOCKED: ROUTE_HOST_UNKNOWN — serverId "${serverId}" is not mapped to any host in ${routeTable.path} (connection.serverId), so there is no route of that host to check this seat against. ${known.length > 0 ? `Mapped: ${known.join(", ")}.` : "No host is mapped yet."} The Human runs \`pteam hosts sync\` (or adds the host with \`pteam hosts add\`); do not retry without serverId to seat it locally instead.`,
+		};
+	}
+	return {
+		table: {
+			...routeTable,
+			hostId: host.hostId,
+			routes: host.routes,
+			disabledModels: host.disabledModels ?? [],
+			...(host.jobs ? { jobs: host.jobs } : {}),
+		},
+	};
+}
+
 /** The shape `gateRouteTable()` in scripts/model-routing.mjs returns. */
 export type RouteTable =
 	| {
@@ -4591,6 +4633,13 @@ export type RouteTable =
 			jobs?: Record<string, JobGate>;
 			/** Why the jobs file could not be read: it refuses job-labelled seatings only. */
 			jobsProblem?: string;
+			/**
+			 * Cluster hosts known by Paseo server id (connection.serverId), each
+			 * with its own routes/jobs. Paseo 0.14 MCP create_agent takes a
+			 * `serverId` and seats on THAT connected host; the gate holds such a
+			 * call to that host's table, never the local one.
+			 */
+			serverHosts?: Record<string, ServerHostTable>;
 	  }
 	| { ok: false; code: string; message: string; paths?: string[] };
 
@@ -4922,6 +4971,9 @@ export function createAgentRouteBlockReason({
 		return "BLOCKED: ROUTE_UNVERIFIABLE — create_agent requires an args object (provider, settings, labels) to be checked against the host's model routes. Refusing fail-closed.";
 	}
 	const rec = args as Record<string, unknown>;
+	const scoped = routeTableForServer(routeTable, rec.serverId);
+	if ("reason" in scoped) return scoped.reason;
+	routeTable = scoped.table;
 	const provider = typeof rec.provider === "string" ? rec.provider : "";
 	const target = parseRoleProvider(provider);
 	if (!target) {
@@ -5748,6 +5800,10 @@ export const CREATE_AGENT_PARAMS = Object.freeze([
 	"settings",
 	"workspaceId",
 	"notifyOnFinish",
+	// Paseo 0.14 fleet tools: seat on a connected host (list_hosts). Allowed
+	// because the route gate maps it to that host's routes (routeTableForServer)
+	// and refuses one it cannot map.
+	"serverId",
 ]);
 export const CREATE_AGENT_PLACEMENT_PARAMS = Object.freeze([
 	"relationship",
@@ -5784,10 +5840,13 @@ export function createAgentParamsBlockReason({
 	role,
 	args,
 	selfWorkspaceId,
+	routeTable,
 }: {
 	role: TeamRole;
 	args: unknown;
 	selfWorkspaceId?: string | null;
+	/** Only to tell a REMOTE serverId from this host's own. */
+	routeTable?: RouteTable | null;
 }): string | null {
 	if (role !== "lead" && role !== "supervisor") return null;
 	if (typeof args !== "object" || args === null || Array.isArray(args)) {
@@ -5803,7 +5862,22 @@ export function createAgentParamsBlockReason({
 			`${placement.map((key) => `"${key}"`).join(", ")} ${placement.length === 1 ? "is a placement parameter" : "are placement parameters"} — Paseo reads ${placement.length === 1 ? "it" : "them"} as "create a new workspace for this agent" or "detach it from its creator". Leave ${placement.length === 1 ? "it" : "them"} out: a seat created without any lands in YOUR workspace, nested under you`,
 		);
 	}
-	if (rec.workspaceId !== undefined) {
+	// A seat on ANOTHER host (serverId of a mapped remote host): Paseo requires
+	// a workspaceId there (measured: "workspaceId expected string" without one),
+	// and it can never be this seat's own. The one-workspace-per-job rule then
+	// means: REUSE the workspace already open for the project on that host
+	// (list_workspaces with that serverId) — a Lead still creates none. An
+	// unmapped serverId is left to the route gate (ROUTE_HOST_UNKNOWN).
+	const serverId = typeof rec.serverId === "string" ? rec.serverId.trim() : undefined;
+	const mapped = serverId && routeTable?.ok ? routeTable.serverHosts?.[serverId] : undefined;
+	const remoteSeat = serverId !== undefined && !(mapped?.local === true);
+	if (remoteSeat) {
+		if (mapped && (typeof rec.workspaceId !== "string" || rec.workspaceId.trim() === "")) {
+			problems.push(
+				`a seat on host "${mapped.hostId}" (serverId ${serverId}) needs "workspaceId" — the workspace already open for this project ON THAT HOST (list_workspaces with the same serverId). A Lead creates no workspace; if none is open there, the Human (or \`remote-paseo.mjs workspace-create\`, which reuses) opens one`,
+			);
+		}
+	} else if (rec.workspaceId !== undefined) {
 		const requested = typeof rec.workspaceId === "string" ? rec.workspaceId.trim() : "";
 		const own = typeof selfWorkspaceId === "string" ? selfWorkspaceId.trim() : "";
 		if (!requested) {
@@ -5896,8 +5970,9 @@ export function createAgentParamsBlockReasonForInput(
 	role: TeamRole,
 	input: unknown,
 	selfWorkspaceId?: string | null,
+	routeTable?: RouteTable | null,
 ): string | null {
-	return createAgentParamsBlockReason({ role, args: extractMcpArgs(input), selfWorkspaceId });
+	return createAgentParamsBlockReason({ role, args: extractMcpArgs(input), selfWorkspaceId, routeTable });
 }
 
 /**
@@ -6059,6 +6134,7 @@ export function mcpBlockReason(
 			role,
 			input,
 			context.selfWorkspaceId,
+			context.routeTable,
 		);
 		if (paramsBlock) return paramsBlock;
 		// Which MODEL the seat runs. After the shape gates, so a call they refuse

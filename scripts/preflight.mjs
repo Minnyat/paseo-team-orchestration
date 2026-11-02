@@ -29,7 +29,7 @@ import {
 	readJsonOrNull,
 	verify as verifyClaudeSetup,
 } from "./claude-setup.mjs";
-import { orchestrationPreferencesNotice } from "./lib-common.mjs";
+import { orchestrationPreferencesNotice, parsePaseoError } from "./lib-common.mjs";
 // Lives in cli/lib because that is where the pack's path knowledge lives
 // (config-walker.mjs). preflight.mjs is never copied into the installed support
 // directory, so this relative path always resolves to the package it shipped in
@@ -164,6 +164,7 @@ function tryExec(cmd, argv, timeoutMs = 30000) {
 		return {
 			ok: false,
 			stdout: error?.stdout ? String(error.stdout) : "",
+			stderr: error?.stderr ? String(error.stderr) : "",
 			error: String(error?.message ?? error),
 		};
 	}
@@ -641,9 +642,33 @@ function routeProviders(routes) {
 	);
 }
 
+/**
+ * `paseo provider ls` right after a daemon (re)start reports every provider
+ * "loading" for a few seconds (measured on 0.14: gone within ~4s). That is not
+ * an unhealthy provider, and failing on it made a preflight run just after a
+ * restart report a healthy host as broken. Re-ask, briefly, while anything is
+ * still loading; whatever is left after the deadline is judged as reported.
+ */
+function settledProviderList(run, deadlineMs = Number(process.env.PASEO_TEAM_PROVIDER_SETTLE_MS ?? 20000)) {
+	const until = Date.now() + deadlineMs;
+	let last = run();
+	for (;;) {
+		if (!last.ok) return last;
+		let loading = false;
+		try {
+			loading = (JSON.parse(last.stdout) ?? []).some((p) => String(p?.status ?? "").toLowerCase() === "loading");
+		} catch {
+			return last;
+		}
+		if (!loading || Date.now() >= until) return last;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+		last = run();
+	}
+}
+
 const providersById = new Map();
 if (daemonUp) {
-	const ls = tryExec("paseo", ["provider", "ls", "--json"]);
+	const ls = settledProviderList(() => tryExec("paseo", ["provider", "ls", "--json"]));
 	if (ls.ok) {
 		try {
 			const providers = JSON.parse(ls.stdout);
@@ -1079,23 +1104,21 @@ function runRemotePreflight(hostId, host, endpointValue) {
 	// 1. daemon reachable?
 	const reach = remoteExec(["paseo", "ls", "--host", endpointValue, "--json"]);
 	if (!reach.ok) {
+		// The daemon's own reason (DAEMON_UNREACHABLE vs AUTH_FAILED ...), not
+		// execFileSync's "Command failed: <argv>" — the fixes are different.
+		const why = parsePaseoError(reach);
 		fail(
 			`cluster-remote:${hostId}`,
-			`remote daemon unreachable via ${host.connection.endpointEnv}: ${String(reach.error).slice(0, 120)}`,
+			`remote daemon ${why && /^AUTH_/.test(why.code) ? "refused the credential" : "unreachable"} via ${host.connection.endpointEnv}: ${why ? `${why.code}: ${why.message}` : String(reach.error).slice(0, 120)}`,
 		);
 		return;
 	}
 	pass(`cluster-remote:${hostId}`, "remote daemon reachable (offer accepted)");
 
 	// 2. role providers present + enabled + healthy on the remote daemon.
-	const ls = remoteExec([
-		"paseo",
-		"provider",
-		"ls",
-		"--host",
-		endpointValue,
-		"--json",
-	]);
+	const ls = settledProviderList(() =>
+		remoteExec(["paseo", "provider", "ls", "--host", endpointValue, "--json"]),
+	);
 	const remoteProviders = new Map();
 	if (ls.ok) {
 		try {

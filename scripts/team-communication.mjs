@@ -18,7 +18,7 @@
 // named code (NO_SUPERVISOR_SEAT) carrying the exact call that fixes it,
 // instead of a silent fallback the Lead cannot explain.
 import { execFileSync } from "node:child_process";
-import { importPolicyCore, isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
+import { importPolicyCore, isEntrypoint, parsePaseoError, resolvePaseoExec } from "./lib-common.mjs";
 import { retryWithBackoff } from "./reliability.mjs";
 
 // Mirrors policy-core's PEER_MESSAGE_KINDS, which is the source of truth; the
@@ -136,9 +136,13 @@ export function runPaseo(args, timeoutMs = 20_000) {
       encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], env: process.env, windowsHide: true,
     })) };
   } catch (error) {
-    const text = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}\n${error?.message ?? error}`;
-    const wrapped = Object.assign(new Error(text.split("\n")[0]), { code: "CLI_ERROR" });
-    throw wrapped;
+    // Paseo >= 0.14 puts {"error":{code,message}} on stderr; the first raw line
+    // of that is "{", which is what a Peer used to be told. Read the object.
+    const paseoError = parsePaseoError({ stderr: error?.stderr, stdout: error?.stdout });
+    const text = paseoError
+      ? `${paseoError.code}: ${paseoError.message}`
+      : `${error?.stderr ?? ""}\n${error?.stdout ?? ""}\n${error?.message ?? error}`.trim().split("\n")[0];
+    throw Object.assign(new Error(text), { code: "CLI_ERROR", ...(paseoError ? { paseoCode: paseoError.code } : {}) });
   }
 }
 
@@ -171,6 +175,26 @@ export async function sendPeerMessage(input, options = {}) {
   // `send` is a mutation with delivery ambiguity: the daemon may accept it
   // before the response is lost. Never retry without a Paseo idempotency/ACK
   // contract; correlationId is for Lead-side deduplication, not transport.
+  // A Lead on ANOTHER host seated this Peer (Paseo 0.14 MCP create_agent with
+  // serverId): ParentAgentId names it, but this daemon has no such agent, so a
+  // local send could never reach it (measured: SEND_FAILED "Agent not found").
+  // Ask first — inspect is a read, so unlike `send` it is safe to probe — and
+  // name the channel that DOES cross hosts: this turn's final reply, which
+  // Paseo delivers to the Lead as its finish notification (multi-host lab).
+  try {
+    await paseo(["inspect", parent]);
+  } catch (error) {
+    if (error?.paseoCode === "AGENT_NOT_FOUND") {
+      throw Object.assign(
+        new Error(
+          `Your Lead (${parent}) runs on another host, so peer_ask_lead cannot reach it from here. Put this ${message.kind} (TASK_ID ${message.taskId}, CORRELATION_ID ${message.correlationId}) at the top of your FINAL reply and end the turn: Paseo delivers that reply to the Lead when you finish, and the Lead answers with a new prompt.`,
+        ),
+        { code: "PARENT_LEAD_REMOTE", recipient: parent },
+      );
+    }
+    // Any other failure to look is not proof of absence: fall through to the
+    // send, whose own error is reported as before.
+  }
   const sent = await paseo(["send", parent, "--prompt", body, "--no-wait"], options.sendTimeoutMs ?? 20_000);
   return { ok: true, recipient: parent, correlationId: message.correlationId, response: sent.data };
 }

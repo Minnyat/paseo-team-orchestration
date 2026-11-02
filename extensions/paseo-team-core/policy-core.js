@@ -3769,6 +3769,37 @@ function routeOptionsOf(route) {
 const optionUsable = (option) => option.enabled !== false && !option.modelDisabled;
 const optionLabel = (option) => `${option.paseoProvider}/${option.model} @${option.thinking}`;
 /**
+ * The table a create_agent is checked against: the local one, or — when the
+ * call names a `serverId` — that host's. A serverId the cluster file does not
+ * map is refused rather than checked against the local routes: that would
+ * approve a model for a daemon whose inventory and routes were never consulted.
+ */
+export function routeTableForServer(routeTable, serverId) {
+    if (serverId === undefined)
+        return { table: routeTable };
+    if (typeof serverId !== "string" || serverId.trim() === "") {
+        return { reason: `BLOCKED: ROUTE_HOST_UNKNOWN — serverId must be a non-empty server id from list_hosts (got ${JSON.stringify(serverId)}).` };
+    }
+    if (!routeTable || !routeTable.ok)
+        return { table: routeTable };
+    const host = routeTable.serverHosts?.[serverId];
+    if (!host) {
+        const known = Object.entries(routeTable.serverHosts ?? {}).map(([id, h]) => `${h.hostId}=${id}`);
+        return {
+            reason: `BLOCKED: ROUTE_HOST_UNKNOWN — serverId "${serverId}" is not mapped to any host in ${routeTable.path} (connection.serverId), so there is no route of that host to check this seat against. ${known.length > 0 ? `Mapped: ${known.join(", ")}.` : "No host is mapped yet."} The Human runs \`pteam hosts sync\` (or adds the host with \`pteam hosts add\`); do not retry without serverId to seat it locally instead.`,
+        };
+    }
+    return {
+        table: {
+            ...routeTable,
+            hostId: host.hostId,
+            routes: host.routes,
+            disabledModels: host.disabledModels ?? [],
+            ...(host.jobs ? { jobs: host.jobs } : {}),
+        },
+    };
+}
+/**
  * On unless the variable is EXACTLY "off". Any other value — "OFF", "0",
  * "false", a typo — keeps the gate on: a mistyped opt-out costs one refused
  * call with an explicit reason, a mistyped opt-in would silently disarm it.
@@ -4061,6 +4092,10 @@ export function createAgentRouteBlockReason({ role, args, routeTable, env = proc
         return "BLOCKED: ROUTE_UNVERIFIABLE — create_agent requires an args object (provider, settings, labels) to be checked against the host's model routes. Refusing fail-closed.";
     }
     const rec = args;
+    const scoped = routeTableForServer(routeTable, rec.serverId);
+    if ("reason" in scoped)
+        return scoped.reason;
+    routeTable = scoped.table;
     const provider = typeof rec.provider === "string" ? rec.provider : "";
     const target = parseRoleProvider(provider);
     if (!target) {
@@ -4730,6 +4765,10 @@ export const CREATE_AGENT_PARAMS = Object.freeze([
     "settings",
     "workspaceId",
     "notifyOnFinish",
+    // Paseo 0.14 fleet tools: seat on a connected host (list_hosts). Allowed
+    // because the route gate maps it to that host's routes (routeTableForServer)
+    // and refuses one it cannot map.
+    "serverId",
 ]);
 export const CREATE_AGENT_PLACEMENT_PARAMS = Object.freeze([
     "relationship",
@@ -4761,7 +4800,7 @@ const CREATE_AGENT_SETTINGS = Object.freeze(["modeId", "thinkingOptionId", "feat
  * cannot be resolved the explicit form is refused, because "the same workspace"
  * is then unprovable and omitting the field is always provable.
  */
-export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, }) {
+export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, routeTable, }) {
     if (role !== "lead" && role !== "supervisor")
         return null;
     if (typeof args !== "object" || args === null || Array.isArray(args)) {
@@ -4774,7 +4813,21 @@ export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, }) {
     if (placement.length > 0) {
         problems.push(`${placement.map((key) => `"${key}"`).join(", ")} ${placement.length === 1 ? "is a placement parameter" : "are placement parameters"} — Paseo reads ${placement.length === 1 ? "it" : "them"} as "create a new workspace for this agent" or "detach it from its creator". Leave ${placement.length === 1 ? "it" : "them"} out: a seat created without any lands in YOUR workspace, nested under you`);
     }
-    if (rec.workspaceId !== undefined) {
+    // A seat on ANOTHER host (serverId of a mapped remote host): Paseo requires
+    // a workspaceId there (measured: "workspaceId expected string" without one),
+    // and it can never be this seat's own. The one-workspace-per-job rule then
+    // means: REUSE the workspace already open for the project on that host
+    // (list_workspaces with that serverId) — a Lead still creates none. An
+    // unmapped serverId is left to the route gate (ROUTE_HOST_UNKNOWN).
+    const serverId = typeof rec.serverId === "string" ? rec.serverId.trim() : undefined;
+    const mapped = serverId && routeTable?.ok ? routeTable.serverHosts?.[serverId] : undefined;
+    const remoteSeat = serverId !== undefined && !(mapped?.local === true);
+    if (remoteSeat) {
+        if (mapped && (typeof rec.workspaceId !== "string" || rec.workspaceId.trim() === "")) {
+            problems.push(`a seat on host "${mapped.hostId}" (serverId ${serverId}) needs "workspaceId" — the workspace already open for this project ON THAT HOST (list_workspaces with the same serverId). A Lead creates no workspace; if none is open there, the Human (or \`remote-paseo.mjs workspace-create\`, which reuses) opens one`);
+        }
+    }
+    else if (rec.workspaceId !== undefined) {
         const requested = typeof rec.workspaceId === "string" ? rec.workspaceId.trim() : "";
         const own = typeof selfWorkspaceId === "string" ? selfWorkspaceId.trim() : "";
         if (!requested) {
@@ -4851,8 +4904,8 @@ export function createAgentParamsBlockReason({ role, args, selfWorkspaceId, }) {
     return `Refusing create_agent: ${problems.join("; ")}.`;
 }
 /** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
-export function createAgentParamsBlockReasonForInput(role, input, selfWorkspaceId) {
-    return createAgentParamsBlockReason({ role, args: extractMcpArgs(input), selfWorkspaceId });
+export function createAgentParamsBlockReasonForInput(role, input, selfWorkspaceId, routeTable) {
+    return createAgentParamsBlockReason({ role, args: extractMcpArgs(input), selfWorkspaceId, routeTable });
 }
 /**
  * Decide whether an `mcp` proxy call is allowed for a role.
@@ -4962,7 +5015,7 @@ export function mcpBlockReason(role, input, context = {}) {
         // After the mode gate for the same reason the mode gate is after the
         // authority ones: the placement and parameter checks are mechanical, and a
         // call that is wrong on authority should hear about that first.
-        const paramsBlock = createAgentParamsBlockReasonForInput(role, input, context.selfWorkspaceId);
+        const paramsBlock = createAgentParamsBlockReasonForInput(role, input, context.selfWorkspaceId, context.routeTable);
         if (paramsBlock)
             return paramsBlock;
         // Which MODEL the seat runs. After the shape gates, so a call they refuse

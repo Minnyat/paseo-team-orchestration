@@ -1471,3 +1471,12 @@ console.log("remote-paseo.test.mjs: all tests passed");
 	assert.equal(r.json.paseoError.code, "AGENT_NOT_FOUND", t);
 	assert.match(r.json.message, /^AGENT_NOT_FOUND: /, t);
 }
+
+{
+	const t = "e2e: AUTH_FAILED / AUTH_REQUIRED → HOST_AUTH_FAILED (fix the endpoint, not the daemon)";
+	for (const code of ["AUTH_FAILED", "AUTH_REQUIRED"]) {
+		const r = runWrapper(["health", "--host-id", "mac-review"], { extraEnv: { FAKE_PASEO_JSON_ERROR: code } });
+		assert.equal(r.json.code, "HOST_AUTH_FAILED", `${t}: ${code}`);
+		assert.ok(!r.stdout.includes("hunter2"), `${t}: password leaked`);
+	}
+}
