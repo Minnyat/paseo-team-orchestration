@@ -61,6 +61,7 @@ import {
 	syncWarningText,
 	toolMeaning,
 } from "./humanize.js";
+import { mountFleet } from "./fleet.js";
 
 // --- token -----------------------------------------------------------------
 
@@ -3333,6 +3334,14 @@ $("config-save").addEventListener("click", async () => {
 loaders.config = async () => {
 	if (configState.section !== $("config-section").value) await loadConfig();
 };
+
+// --- hosts + task flow (fleet.js) -----------------------------------------
+
+const fleet = mountFleet({ api, el, clear, toast, toastError, $ });
+loaders.hosts = () => fleet.hosts();
+loaders.flow = () => fleet.flow();
+$("hosts-refresh").addEventListener("click", () => fleet.refresh());
+$("hosts-sync").addEventListener("click", (event) => fleet.sync(event.currentTarget));
 
 // --- boot ------------------------------------------------------------------
 

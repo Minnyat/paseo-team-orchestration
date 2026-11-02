@@ -176,7 +176,10 @@ runtime nhận một khối cảnh báo, preflight báo WARN (FAIL với `--stri
 Cổng phủ `create_agent` MCP, `update_agent` MCP và `team_fork`. Nó **không** phủ:
 
 1. **Lệnh `run` của `remote-paseo.mjs`** — tạo agent trên host remote qua Paseo
-   CLI `--host`; không đi qua MCP của daemon local nên hook không thấy nó. Vì vậy nó cũng
+   CLI `--host`; không đi qua MCP của daemon local nên hook không thấy nó.
+   Đường thay thế ĐƯỢC phủ: MCP `create_agent { serverId }` (Paseo ≥ 0.14) —
+   cổng so với route của chính host có `connection.serverId` đó và từ chối
+   serverId lạ (`ROUTE_HOST_UNKNOWN`); `pteam dispatch plan` in sẵn lời gọi này. Vì vậy nó cũng
    **không** thấy công tắc `enabled` của route (nó nhận provider tường minh, không qua resolver).
 2. **Lead gọi thẳng `paseo` CLI từ bash** (tạo hay đổi agent với `--provider`
    tuỳ ý) — `callsPaseoCli` chỉ áp cho Peer. Có từ trước thay đổi này và nằm

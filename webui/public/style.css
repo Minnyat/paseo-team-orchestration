@@ -904,3 +904,28 @@ button.danger:hover:not(:disabled) { border-color: var(--danger); background: co
 	.route-row > .route-n { grid-column: 1; grid-row: 1; }
 }
 .quick-role { margin: 10px 0 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+
+/* --- hosts + task flow (fleet.js) --------------------------------------- */
+.fleet-grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.fleet-card { display: flex; flex-direction: column; gap: 8px; }
+.fleet-card.tone-no { border-color: var(--danger); }
+.fleet-card.tone-warn { border-color: var(--warn); }
+.fleet-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.fleet-out:empty { display: none; }
+.fleet-out { margin-top: 6px; }
+.fleet-agent { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 0; }
+.fleet-steps td, .fleet-steps th, .fleet-matrix td, .fleet-matrix th { padding: 4px 8px; text-align: left; vertical-align: top; }
+.fleet-matrix td { text-align: center; }
+.chip.ok { border-color: var(--accent); color: var(--accent); }
+.chip.warn { border-color: var(--warn); color: var(--warn); }
+.chip.no { border-color: var(--danger); color: var(--danger); }
+#flow-planner, #flow-runtimes, #fleet-add { margin: 16px 0; }
+.fleet-card, .fleet-grid > .card { min-width: 0; overflow-wrap: anywhere; }
+.fleet-card .facts { display: flex; flex-direction: column; gap: 4px; }
+.fleet-card .facts > div { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.fleet-card .check, .fleet-out .check { display: flex; align-items: flex-start; gap: 6px; }
+.fleet-out .chip, .fleet-steps .chip, .fleet-agent .chip { flex-shrink: 0; white-space: nowrap; }
+.fleet-steps td { display: table-cell; }
+.fleet-steps td .chip { margin: 0 4px 4px 0; }
+.fleet-agent .tech { color: var(--muted); font-size: 12px; }
+#tab-flow pre.cmd, #tab-hosts pre.cmd { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -493,11 +493,11 @@ assert.equal(bearerToken({ headers: {} }), null);
 
 // --- every route is a real CLI subcommand ---------------------------------
 {
-	const known = new Set(["status", "preflight", "config", "prompts", "skills", "env", "install", "agents", "agent", "permits", "graph", "watchdog", "web", "seats", "models"]);
+	const known = new Set(["status", "preflight", "config", "prompts", "skills", "env", "install", "agents", "agent", "permits", "graph", "watchdog", "web", "seats", "models", "hosts", "dispatch", "flow", "runtimes"]);
 	for (const [key, route] of Object.entries(ROUTES)) {
 		const { args } = route.build(
-			{ section: "providers", role: "lead", id: "aaaa1111-2222-3333-4444-555555555555", name: "paseo-team-lead", room: "team" },
-			{ agentId: "aaaa1111-2222-3333-4444-555555555555", action: "allow", requestId: "r", name: "paseo-team-lead", room: "team" },
+			{ section: "providers", role: "lead", id: "aaaa1111-2222-3333-4444-555555555555", name: "paseo-team-lead", room: "team", class: "REVIEW_HIGH" },
+			{ agentId: "aaaa1111-2222-3333-4444-555555555555", action: "allow", requestId: "r", name: "paseo-team-lead", room: "team", hostId: "mac", connection: "tcp://10.0.0.2:6767", registrationId: "hst_abc" },
 			"{}",
 		);
 		assert.ok(known.has(args[0]), `${key} maps to a real subcommand (got '${args[0]}')`);
@@ -578,3 +578,23 @@ assert.equal(bearerToken({ headers: {} }), null);
 }
 
 console.log("webui-server tests passed");
+
+// --- hosts: a connection (may carry a password) never travels in argv --------
+{
+	const route = ROUTES["POST /api/hosts/add"];
+	const built = route.build({}, { hostId: "mac", connection: "tcp://10.0.0.2:6767?password=hunter2", capabilities: ["git-read"], readers: 3 }, "{}");
+	assert.ok(!built.args.join(" ").includes("hunter2"), "the password is not in argv (argv is echoed as `command`)");
+	assert.ok(built.args.includes("--connection-stdin"));
+	assert.equal(built.stdin, "tcp://10.0.0.2:6767?password=hunter2\n");
+	assert.deepEqual(built.args.slice(0, 3), ["hosts", "add", "mac"]);
+	assert.ok(built.args.includes("--readers") && built.args.includes("3"));
+	for (const bad of [{ hostId: "Mac", connection: "x" }, { hostId: "mac", connection: "" }, { hostId: "mac", connection: "a\nb" }, { hostId: "mac", connection: "x", capabilities: ["$(id)"] }, { hostId: "mac", connection: "x", readers: -1 }]) {
+		assert.throws(() => route.build({}, bad, "{}"), /PARAM_INVALID|must be|malformed/, JSON.stringify(bad));
+	}
+	const sc = ROUTES["POST /api/hosts/set-connection"].build({}, { hostId: "mac", connection: "tcp://h:1?password=pw" }, "{}");
+	assert.ok(!sc.args.join(" ").includes("pw") && sc.stdin.includes("password=pw"));
+	const plan = ROUTES["GET /api/dispatch/plan"].build({ class: "REVIEW_HIGH", kind: "reviewer", avoidHost: "ctl", project: "demo" });
+	assert.deepEqual(plan.args, ["dispatch", "plan", "--class", "REVIEW_HIGH", "--kind", "reviewer", "--avoid-host", "ctl", "--project", "demo"]);
+	assert.throws(() => ROUTES["GET /api/dispatch/plan"].build({ class: "review; rm" }), /malformed/);
+	assert.throws(() => ROUTES["GET /api/dispatch/plan"].build({ class: "REVIEW_HIGH", kind: "boss" }), /must be one of/);
+}

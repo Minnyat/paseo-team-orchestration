@@ -89,10 +89,12 @@ paseo-team-orchestration/
 │       ├── graph-cache.mjs         # spawn-tree cache; `paseo ls` has no parent link, `inspect` does
 │       ├── install-drift.mjs       # installed copies vs THIS release, byte for byte
 │       ├── workspace-protocol.mjs  # grade a target repo's WORKSPACE_PROTOCOL.md
+│       ├── hosts.mjs               # pteam hosts: cluster file + Paseo host registry + live state
+│       ├── dispatch.mjs            # pteam dispatch plan / flow: where a seat should run, what runs where
 │       └── graph.mjs               # agents + parents + permits -> nodes/edges/degraded
 ├── webui/
 │   ├── server.mjs                  # transport only: route -> paseo-team argv, token, localhost
-│   └── public/                     # zero-dependency SPA (index.html / app.js / style.css)
+│   └── public/                     # zero-dependency SPA (index.html / app.js / fleet.js / style.css)
 ├── scripts/
 │   ├── install.ps1 / install.sh    # installers
 │   ├── lib-common.mjs              # shared helpers: exec/shim resolution, entrypoint, versions
@@ -100,7 +102,7 @@ paseo-team-orchestration/
 │   ├── pi-models-sync.mjs          # rebuilds ~/.pi/agent/models.json from a probed endpoint
 │   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host by HOST_ID (Lead REMOTE cycle)
 │   ├── runtime-providers.mjs       # provider entries for Peer-only runtimes (opencode) + their static policy
-│   ├── lab/                        # multihost-lab.sh: N real Paseo daemons on one machine + fake ACP agent + scenario
+│   ├── lab/                        # multihost-lab.sh: N real Paseo daemons on one machine + scripted ACP agent + 2 scenario suites
 │   ├── reliability.mjs             # retry classification/backoff + stale predicates
 │   ├── team-communication.mjs      # parent-scoped Peer → Lead messaging
 │   ├── watchdog.mjs                # observation-only running-agent watchdog
@@ -1437,6 +1439,30 @@ entries in the Paseo sidebar. Now:
 - `team_fork` refuses a `cwd` other than its source's; `remote-paseo.mjs workspace-create`
   reuses the workspace already open on the path (`reused: true`) and never creates a
   worktree workspace.
+
+## Many machines — hosts, dispatch, flow
+
+A cluster is managed from one place, CLI or WebUI, without a shell per machine:
+
+```bash
+pteam hosts                                   # every machine: cluster file + Paseo's host registry + live state, problems with their fix
+pteam hosts add mac --connection 'tcp://10.0.0.5:6767?password=…' --capability git-read --capability independent-review
+pteam hosts sync | check <id> | remove <id> | set-connection <id> --connection-stdin
+pteam dispatch plan --class REVIEW_HIGH --avoid-host <writer-host> --project <name>
+pteam flow                                    # what runs where, by model class and job
+```
+
+`dispatch plan` is the Lead's host-routing cycle as one read-only call
+(capability → independence → reachable → the class route valid on THAT host's
+inventory → limits; most free capacity wins) and prints the exact
+`create_agent` to copy: plain MCP locally, MCP with `serverId` + that host's
+workspace on a registered remote (Paseo ≥ 0.14 fleet tools — the gate holds
+it to that host's routes and refuses an unmapped serverId), or the
+`remote-paseo.mjs` command. The WebUI has the same as two tabs, **Máy** and
+**Luồng việc** (connection strings reach the CLI on stdin, never argv).
+Everything was exercised against real Paseo daemons on one machine:
+`scripts/lab/multihost-lab.sh up --bind <nic-ip> && scripts/lab/multihost-lab.sh test`
+([docs/multi-host.md](docs/multi-host.md)).
 
 ## CLI and WebUI
 

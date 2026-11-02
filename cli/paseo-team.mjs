@@ -1880,6 +1880,16 @@ function clusterOrSeed(ctx) {
 	};
 }
 
+/**
+ * The connection string, from `--connection <c>` or — so a password never sits
+ * in argv, a process list or the WebUI's echoed command — the first line of
+ * stdin with `--connection-stdin`.
+ */
+function connectionFrom(argv) {
+	if (flag(argv, "--connection-stdin")) return readStdin().split(/\r?\n/)[0].trim() || undefined;
+	return flagValue(argv, "--connection");
+}
+
 function multiFlag(argv, name) {
 	const out = [];
 	for (let i = 0; i < argv.length; i++) {
@@ -1934,14 +1944,14 @@ function dispatchHosts(argv) {
 			const [hostId] = rest;
 			if (!hostId || hostId.startsWith("-")) usageFail("hosts add: missing <host-id>");
 			const options = rest.slice(1);
-			rejectUnknownFlags(options, ["--connection", "--endpoint-env", "--capability", "--writers", "--readers", "--required", "--copy-routes-from", "--dry-run"]);
+			rejectUnknownFlags(options, ["--connection", "--connection-stdin", "--endpoint-env", "--capability", "--writers", "--readers", "--required", "--copy-routes-from", "--dry-run"]);
 			return runHosts(async () => {
 				const ctx = await hostsContext();
 				const base = clusterOrSeed(ctx);
 				const plan = await hostsLib.planAddHost({
 					cluster: base,
 					hostId,
-					connection: flagValue(options, "--connection"),
+					connection: connectionFrom(options),
 					registry: ctx.registry,
 					paseo: hostsPaseo,
 					localRoutes: ctx.localRoutes,
@@ -2021,13 +2031,13 @@ function dispatchHosts(argv) {
 		case "set-connection": {
 			const [hostId] = rest;
 			if (!hostId || hostId.startsWith("-")) usageFail("hosts set-connection: missing <host-id>");
-			rejectUnknownFlags(rest.slice(1), ["--connection"]);
+			rejectUnknownFlags(rest.slice(1), ["--connection", "--connection-stdin"]);
 			return runHosts(async () => {
 				const ctx = await hostsContext();
 				const entry = hostsLib.registryEntryFor(ctx.registry, hostId);
 				if (!entry) throw new hostsLib.HostsError("NOT_IN_REGISTRY", `no registry entry for "${hostId}" — pteam hosts add ${hostId} --connection ...`);
-				const connection = flagValue(rest, "--connection");
-				if (!connection) usageFail("hosts set-connection: --connection is required");
+				const connection = connectionFrom(rest);
+				if (!connection) usageFail("hosts set-connection: --connection (or --connection-stdin) is required");
 				const updated = await hostsPaseo(["host", "update", entry.registrationId, "--connection", connection]);
 				return { hostId, registrationId: entry.registrationId, status: updated?.status ?? null };
 			});

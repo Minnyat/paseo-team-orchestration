@@ -15,6 +15,8 @@
 			<nav id="tabs" aria-label="Điều hướng chính" data-i18n-aria="navAria">
 				<button data-tab="home" class="active" data-i18n="navHome">Trang chủ</button>
 				<button data-tab="graph" data-i18n="navGraph">Nhóm agent</button>
+				<button data-tab="flow">Luồng việc</button>
+				<button data-tab="hosts">Máy</button>
 				<button data-tab="permissions">
 					<span data-i18n="navPermits">Chờ duyệt</span><span id="permit-badge" class="badge hidden">0</span>
 				</button>
@@ -137,6 +139,25 @@
 					<span><i class="line solid"></i>giao việc</span>
 					<span><i class="line forked"></i>bàn giao (fork phiên)</span>
 				</div>
+			</section>
+
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-flow" class="tab" aria-labelledby="flow-title">
+				<div class="page-heading"><div><h1 id="flow-title">Luồng việc</h1><p>Task nên chạy ở máy nào, và từng phần của nó đang ở đâu.</p></div></div>
+				<section id="flow-planner" class="card"></section>
+				<section id="flow-live" class="body">Đang tải…</section>
+				<section id="flow-runtimes" class="card"></section>
+			</section>
+
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-hosts" class="tab" aria-labelledby="hosts-title">
+				<div class="page-heading"><div><h1 id="hosts-title">Máy trong cụm</h1><p>Mọi máy chạy agent: trạng thái, việc nó làm được, và vấn đề cần sửa — không cần mở terminal.</p></div></div>
+				<div class="toolbar">
+					<button id="hosts-refresh">Cập nhật</button>
+					<button id="hosts-sync" title="Điền serverId từ registry của daemon vào file cụm">Đồng bộ serverId</button>
+				</div>
+				<div id="fleet-hosts" class="body">Đang tải…</div>
+				<section id="fleet-add" class="card"></section>
 			</section>
 
 			<!-- ------------------------------------------------------------ -->
