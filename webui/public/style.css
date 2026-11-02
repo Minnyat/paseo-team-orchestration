@@ -26,7 +26,7 @@
 	--line-strong: #344052;
 	--text: #e9eef5;
 	--muted: #8b97a9;
-	--faint: #5d697b;
+	--faint: #8591a3;
 	--accent: #5eead4;
 	--accent-strong: #2dd4bf;
 	--accent-ink: #032420;
@@ -62,15 +62,15 @@
 	--line: #e2e7ef;
 	--line-strong: #c9d1de;
 	--text: #111827;
-	--muted: #5a6577;
-	--faint: #8a94a5;
-	--accent: #0d9488;
-	--accent-strong: #0f766e;
+	--muted: #4b5565;
+	--faint: #5f6a7b;
+	--accent: #0f766e;
+	--accent-strong: #115e59;
 	--accent-ink: #ffffff;
 	--accent-soft: rgb(13 148 136 / 0.1);
-	--info: #3e63dd;
-	--warn: #b7791f;
-	--danger: #d83a31;
+	--info: #3451c7;
+	--warn: #8f5a0a;
+	--danger: #c2281f;
 	--supervisor: #4f6bed;
 	--lead: #0f9f7a;
 	--peer: #8b5cf6;
@@ -94,15 +94,15 @@
 		--line: #e2e7ef;
 		--line-strong: #c9d1de;
 		--text: #111827;
-		--muted: #5a6577;
-		--faint: #8a94a5;
-		--accent: #0d9488;
-		--accent-strong: #0f766e;
+		--muted: #4b5565;
+		--faint: #5f6a7b;
+		--accent: #0f766e;
+		--accent-strong: #115e59;
 		--accent-ink: #ffffff;
 		--accent-soft: rgb(13 148 136 / 0.1);
-		--info: #3e63dd;
-		--warn: #b7791f;
-		--danger: #d83a31;
+		--info: #3451c7;
+		--warn: #8f5a0a;
+		--danger: #c2281f;
 		--supervisor: #4f6bed;
 		--lead: #0f9f7a;
 		--peer: #8b5cf6;
@@ -1163,7 +1163,7 @@ li.fail .check-mark { background: color-mix(in srgb, var(--danger) 18%, transpar
 .lane-head b { font-size: 14.5px; }
 .lane-count { margin-left: auto; min-width: 26px; padding: 0 8px; border-radius: 999px; text-align: center; font-size: 12px; font-weight: 700; line-height: 22px; background: var(--panel-2); color: var(--muted); }
 .lane-count.busy { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
-.lane-empty { margin: 4px 0; padding: 14px; text-align: center; font-size: 12.5px; color: var(--faint); border: 1px dashed var(--line); border-radius: 12px; }
+.lane-empty { margin: 4px 0; padding: 14px; text-align: center; font-size: 12.5px; color: var(--muted); border: 1px dashed var(--line); border-radius: 12px; }
 .lane .idle > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); padding: 4px 2px; list-style: none; }
 .lane .idle > summary::-webkit-details-marker { display: none; }
 .lane .idle > summary::before { content: "▸"; display: inline-block; width: 14px; transition: transform 160ms var(--ease); }
@@ -1192,7 +1192,7 @@ li.fail .check-mark { background: color-mix(in srgb, var(--danger) 18%, transpar
 .heat { display: grid; gap: 4px; min-width: 520px; font-size: 12.5px; align-items: center; }
 .heat-h { text-align: center; font-size: 11.5px; font-weight: 600; color: var(--muted); padding-bottom: 4px; }
 .heat-row { font: 600 11.5px var(--mono); color: var(--muted); }
-.heat-cell { display: grid; place-items: center; height: 32px; border-radius: 8px; font-weight: 650; font-variant-numeric: tabular-nums; background: color-mix(in srgb, var(--accent) calc(var(--a) * 100%), var(--panel-2)); color: var(--text); }
+.heat-cell { display: grid; place-items: center; height: 32px; border-radius: 8px; font-weight: 650; font-variant-numeric: tabular-nums; background: color-mix(in srgb, var(--accent) calc(var(--a) * 55%), var(--panel-2)); color: var(--text); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) calc(var(--a) * 70%), transparent); }
 .heat-cell.zero { color: var(--faint); background: var(--panel-2); }
 .heat-run { text-align: center; font-weight: 700; color: var(--faint); }
 .heat-run.busy { color: var(--warn); }
@@ -1227,8 +1227,9 @@ li.fail .check-mark { background: color-mix(in srgb, var(--danger) 18%, transpar
 	.topbar .brand { padding: 0; font-size: 15px; }
 	.topbar .brand-mark { width: 30px; height: 30px; flex-basis: 30px; font-size: 17px; }
 	.topbar-title { margin-left: auto; font-size: 13.5px; }
-	.sidebar { transform: translateX(-100%); transition: transform 240ms var(--ease); box-shadow: 0 0 60px -10px var(--shadow-color); }
-	body.nav-open .sidebar { transform: none; }
+	/* Off-screen is not enough: a closed drawer must also leave the Tab order. */
+	.sidebar { transform: translateX(-100%); visibility: hidden; transition: transform 240ms var(--ease), visibility 0s linear 240ms; box-shadow: 0 0 60px -10px var(--shadow-color); }
+	body.nav-open .sidebar { transform: none; visibility: visible; transition: transform 240ms var(--ease), visibility 0s; }
 	main { margin-left: 0; padding: 24px 16px 64px; }
 	.grid, .grid.kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 	.meters { grid-template-columns: 1fr; }

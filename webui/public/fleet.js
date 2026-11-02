@@ -296,6 +296,22 @@ export function mountFleet({ api: rawApi, el, clear, toast, toastError: rawToast
 			e.preventDefault();
 			close();
 		});
+		// Keep Tab inside the dialog: past the last control it wraps to the first
+		// (a modal <dialog> makes the page inert but lets focus leave to the browser).
+		d.addEventListener("keydown", (e) => {
+			if (e.key !== "Tab") return;
+			const items = [...d.querySelectorAll("button, input, select, textarea, [tabindex]:not([tabindex='-1'])")].filter((n) => !n.disabled && n.offsetParent !== null);
+			if (items.length === 0) return;
+			const first = items[0];
+			const last = items[items.length - 1];
+			if (e.shiftKey && document.activeElement === first) {
+				e.preventDefault();
+				last.focus();
+			} else if (!e.shiftKey && document.activeElement === last) {
+				e.preventDefault();
+				first.focus();
+			}
+		});
 		document.body.appendChild(d);
 		d.showModal();
 		return { d, close };
