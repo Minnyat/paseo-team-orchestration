@@ -43,7 +43,11 @@ export const role = detectRole();
 // Tool policy tables
 // ---------------------------------------------------------------------------
 export const PASEO_TOOLS = {
-    discovery: ["list_providers", "list_models", "inspect_provider"],
+    /**
+     * list_hosts is read-only discovery of this daemon and its registered
+     * destination hosts (the registry behind `serverId`). It mutates nothing.
+     */
+    discovery: ["list_providers", "list_models", "inspect_provider", "list_hosts"],
     /** Reading the workspace list is discovery; a Lead may do it. */
     workspace: ["list_workspaces"],
     /**
@@ -176,6 +180,9 @@ export const SUPERVISOR_MONITORING_TARGETS = [
     "get_agent_status",
     "get_agent_activity",
     "send_agent_prompt",
+    // Read-only: which hosts exist and are online. Lets the Supervisor observe
+    // a multi-host cluster without being handed provider/model discovery.
+    "list_hosts",
 ];
 /**
  * Paseo tools the supervisor may call through the MCP proxy. Fail-closed:
